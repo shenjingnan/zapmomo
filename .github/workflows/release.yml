@@ -153,7 +153,7 @@ jobs:
               export OpenMP_ROOT="$(brew --prefix libomp)"
             fi
           fi
-          COMMON_FLAGS="-DAUDIOCPP_MODEL_SET=custom -DAUDIOCPP_MODELS=pocket_tts,omnivoice \
+          COMMON_FLAGS="-DAUDIOCPP_MODEL_SET=custom -DAUDIOCPP_MODELS=pocket_tts,omnivoice,voxcpm2 \
             -DAUDIOCPP_DEPLOYMENT_BUILD=ON -DENGINE_ENABLE_NATIVE_CPU=OFF \
             -DENGINE_ENABLE_CUDA=OFF -DENGINE_ENABLE_VULKAN=OFF -DENGINE_ENABLE_HIP=OFF"
           # shellcheck disable=SC2086

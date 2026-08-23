@@ -380,6 +380,17 @@
       "sha256": "2f4be637278043c6842de5b85d681532030e9eb6ffe0f8b0e320f68238e3da8b",
       "size_bytes": 1350288416,
       "license": "Apache-2.0"
+    },
+    {
+      "name": "voxcpm2-audiocpp",
+      "role": "tts-audiocpp-voxcpm2",
+      "version": "q8_0",
+      "kind": "raw",
+      "archive": "voxcpm2-q8_0.gguf",
+      "source": "https://huggingface.co/audio-cpp/audio.cpp-gguf/resolve/main/VoxCPM2-GGUF/voxcpm2-q8_0.gguf",
+      "sha256": "c8e01ab4416011e12a28f24ede298a1aa5ce64b43f8e8aaad53b1e2fe7c96432",
+      "size_bytes": 2955000480,
+      "license": "Apache-2.0"
     }
   ]
 }

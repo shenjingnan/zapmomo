@@ -97,6 +97,9 @@ pub enum TtsModelKind {
     /// 与 Pocket 同款「audiocpp-only kind」：仅由 `set_selected_model` 权威写入，
     /// `detect_kind_from_dir` 不探测（族差异见 `crate::audiocpp::families` 表）。
     Omnivoice,
+    /// VoxCPM2：audio.cpp 后端专用（OpenBMB 2B，48kHz 录音室级 + 30 语种克隆）。
+    /// 同款「audiocpp-only kind」语义（见 `Omnivoice` 注释）。
+    Voxcpm2,
     Supertonic,
 }
 
@@ -111,6 +114,7 @@ impl TtsModelKind {
             Self::Kitten => "kitten",
             Self::Pocket => "pocket",
             Self::Omnivoice => "omnivoice",
+            Self::Voxcpm2 => "voxcpm2",
             Self::Supertonic => "supertonic",
         }
     }
@@ -126,15 +130,16 @@ impl TtsModelKind {
             "kitten" => Some(Self::Kitten),
             "pocket" => Some(Self::Pocket),
             "omnivoice" => Some(Self::Omnivoice),
+            "voxcpm2" => Some(Self::Voxcpm2),
             "supertonic" => Some(Self::Supertonic),
             _ => None,
         }
     }
 
-    /// 是否使用参考音频（声音克隆）语义：ZipVoice（sherpa）与 OmniVoice（audiocpp）
-    /// 支持克隆，其余按 speaker id（sid）说话。
+    /// 是否使用参考音频（声音克隆）语义：ZipVoice（sherpa）与 OmniVoice/VoxCPM2
+    /// （audiocpp）支持克隆，其余按 speaker id（sid）说话。
     pub fn uses_reference_audio(&self) -> bool {
-        matches!(self, Self::Zipvoice | Self::Omnivoice)
+        matches!(self, Self::Zipvoice | Self::Omnivoice | Self::Voxcpm2)
     }
 
     /// 是否需要 espeak-ng 数据目录：ZipVoice / Kokoro（包内 `espeak-ng-data/`）。
@@ -302,7 +307,7 @@ impl Default for ResolvedTtsConfig {
 
 impl ResolvedTtsConfig {
     /// 是否使用参考音频（声音克隆）语义：sherpa 后端仅 ZipVoice，audiocpp 后端
-    /// 仅 OmniVoice（pocket 为固定具名音色）。
+    /// 仅 OmniVoice/VoxCPM2（pocket 为固定具名音色）。
     ///
     /// 编排层（voice 会话 / GUI / CLI）应调此方法而非裸
     /// `model_type.uses_reference_audio()`——保持 backend 感知，防「audiocpp
@@ -310,7 +315,12 @@ impl ResolvedTtsConfig {
     pub fn uses_reference_audio(&self) -> bool {
         match self.backend {
             TtsBackendKind::Sherpa => self.model_type == TtsModelKind::Zipvoice,
-            TtsBackendKind::Audiocpp => self.model_type == TtsModelKind::Omnivoice,
+            TtsBackendKind::Audiocpp => {
+                matches!(
+                    self.model_type,
+                    TtsModelKind::Omnivoice | TtsModelKind::Voxcpm2
+                )
+            }
         }
     }
 }

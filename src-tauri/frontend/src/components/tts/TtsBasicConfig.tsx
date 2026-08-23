@@ -40,12 +40,13 @@ export function TtsBasicConfig({
   const modelPath = config?.model_dir ?? "";
   const modelName = modelNameFromDir(modelPath);
   // 音色语义按模型族三分：kokoro 选预置音色（103 个，分组下拉）；
-  // vits/matcha/pocket 单说话人或固定音色（禁用占位）；zipvoice/omnivoice 走
-  // 参考音频克隆（共享音色库与音色管理入口；omnivoice 无内置音色，未选时走
-  // server auto voice）。
+  // vits/matcha/pocket 单说话人或固定音色（禁用占位）；zipvoice/omnivoice/voxcpm2
+  // 走参考音频克隆（共享音色库与音色管理入口；omnivoice/voxcpm2 无内置音色，
+  // 未选时走 server auto voice）。
   const modelKind = config?.model_type ?? "";
   const kokoro = modelKind === "kokoro";
-  const clone = modelKind === "zipvoice" || modelKind === "omnivoice";
+  const clone =
+    modelKind === "zipvoice" || modelKind === "omnivoice" || modelKind === "voxcpm2";
   const sidFixed = !!modelKind && !clone && !kokoro;
   const voiceGroups = groupKokoroVoices(voices);
 
@@ -194,12 +195,18 @@ export function TtsBasicConfig({
               >
                 <SelectTrigger id="tts-default-voice" aria-label="默认音色" className="h-8 w-48">
                   <SelectValue
-                    placeholder={modelKind === "omnivoice" ? "默认（自动音色）" : "默认（内置 leijun）"}
+                    placeholder={
+                      modelKind === "omnivoice" || modelKind === "voxcpm2"
+                        ? "默认（自动音色）"
+                        : "默认（内置 leijun）"
+                    }
                   />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="">
-                    {modelKind === "omnivoice" ? "默认（自动音色）" : "默认（内置 leijun）"}
+                    {modelKind === "omnivoice" || modelKind === "voxcpm2"
+                      ? "默认（自动音色）"
+                      : "默认（内置 leijun）"}
                   </SelectItem>
                   {voices.map((v) => (
                     <SelectItem key={v.id} value={v.id}>
