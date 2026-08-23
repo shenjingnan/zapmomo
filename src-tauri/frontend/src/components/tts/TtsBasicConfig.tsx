@@ -40,10 +40,13 @@ export function TtsBasicConfig({
   const modelPath = config?.model_dir ?? "";
   const modelName = modelNameFromDir(modelPath);
   // 音色语义按模型族三分：kokoro 选预置音色（103 个，分组下拉）；
-  // vits/matcha 单说话人固定（禁用占位）；zipvoice 走克隆（含音色管理入口）。
+  // vits/matcha/pocket 单说话人或固定音色（禁用占位）；zipvoice/omnivoice 走
+  // 参考音频克隆（共享音色库与音色管理入口；omnivoice 无内置音色，未选时走
+  // server auto voice）。
   const modelKind = config?.model_type ?? "";
   const kokoro = modelKind === "kokoro";
-  const sidFixed = !!modelKind && modelKind !== "zipvoice" && !kokoro;
+  const clone = modelKind === "zipvoice" || modelKind === "omnivoice";
+  const sidFixed = !!modelKind && !clone && !kokoro;
   const voiceGroups = groupKokoroVoices(voices);
 
   return (
@@ -145,7 +148,8 @@ export function TtsBasicConfig({
       </dl>
 
       {/* 默认音色：kokoro 选预置音色（分组下拉，选即持久化 [tts].voice）；
-          zipvoice 走克隆（所有合成默认用该音色）；vits/matcha 音色固定，仅显示禁用占位 */}
+          zipvoice/omnivoice 走克隆（共享音色库，所有合成默认用该音色）；
+          vits/matcha/pocket 音色固定，仅显示禁用占位 */}
       <dl>
         <div className="flex items-center justify-between gap-3.5 border-t border-divider px-3.5 py-2.5">
           <dt className="shrink-0 text-sm text-text-primary">音色</dt>
@@ -186,13 +190,17 @@ export function TtsBasicConfig({
               <Select
                 value={selectedVoice}
                 onValueChange={(v) => void setSelectedVoice(v)}
-                disabled={voices.length === 0}
+                disabled={voices.length === 0 && modelKind === "zipvoice"}
               >
                 <SelectTrigger id="tts-default-voice" aria-label="默认音色" className="h-8 w-48">
-                  <SelectValue placeholder="默认（内置 leijun）" />
+                  <SelectValue
+                    placeholder={modelKind === "omnivoice" ? "默认（自动音色）" : "默认（内置 leijun）"}
+                  />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="">默认（内置 leijun）</SelectItem>
+                  <SelectItem value="">
+                    {modelKind === "omnivoice" ? "默认（自动音色）" : "默认（内置 leijun）"}
+                  </SelectItem>
                   {voices.map((v) => (
                     <SelectItem key={v.id} value={v.id}>
                       {v.name}

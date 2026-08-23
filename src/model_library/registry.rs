@@ -91,8 +91,43 @@ pub struct RegistryModel {
     /// 可选增强资产 role 列表（如 ASR 的 punctuation，缺失不影响可用性）
     #[serde(default)]
     pub optional_assets: Vec<String>,
+    /// 可用平台约束（`None` = 全平台；取值对齐 target triple 简写，如
+    /// "darwin-aarch64"）。平台不符的条目在模型库中隐藏——如 omnivoice
+    /// 依赖 Metal 加速，仅 macOS arm64 的 sidecar 构建编入 Metal 后端，
+    /// 其余平台纯 CPU 实测 RTF 不可用（技术方案 R1 预案）。
+    #[serde(default)]
+    pub platforms: Option<Vec<String>>,
     /// `None` = 无内置下载源（需导入本地文件；当前 LLM 预设均已有 manifest 下载源）
     pub download: Option<RegistryDownload>,
+}
+
+/// 当前平台的 triple 简写（与 registry `platforms` 字段取值对齐）。
+fn current_platform_triple() -> &'static str {
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        "darwin-aarch64"
+    }
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    {
+        "darwin-x86_64"
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        "linux-x86_64"
+    }
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    {
+        "windows-x86_64"
+    }
+    #[cfg(not(any(
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "macos", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "windows", target_arch = "x86_64"),
+    )))]
+    {
+        "other"
+    }
 }
 
 impl RegistryModel {
@@ -127,6 +162,21 @@ pub fn all_models() -> &'static [RegistryModel] {
 /// 按 id 查找目录条目。
 pub fn model_by_id(id: &str) -> Option<&'static RegistryModel> {
     registry().models.iter().find(|m| m.id == id)
+}
+
+/// 当前平台可用的目录条目（`platforms` 为 None 的条目恒可用）。
+///
+/// 模型库列表（`list_models`）与解析入口都应以此过滤，保证平台受限条目
+/// （如仅 Metal 平台的 omnivoice）在其余平台不可见、不可下载。
+pub fn models_for_current_platform() -> Vec<&'static RegistryModel> {
+    all_models()
+        .iter()
+        .filter(|m| {
+            m.platforms
+                .as_ref()
+                .is_none_or(|list| list.iter().any(|p| p == current_platform_triple()))
+        })
+        .collect()
 }
 
 /// 按下载引用解析 manifest 资产。
@@ -164,8 +214,9 @@ pub fn required_files_for_role(role: &str) -> &'static [&'static str] {
         "tts-matcha" => &crate::tts::config::MATCHA_REQUIRED_FILES,
         "tts-vocoder-22khz" => &[crate::tts::config::DEFAULT_MATCHA_VOCODER],
         // audiocpp（PocketTTS）：主 GGUF + speaker embeddings 子目录文件
-        "tts-audiocpp-pocket" => &[crate::audiocpp::POCKET_GGUF_FILE],
-        "tts-audiocpp-pocket-embeddings" => &[crate::tts::config::AUDIOCPP_REQUIRED_FILES[1]],
+        "tts-audiocpp-pocket" => &[crate::audiocpp::families::POCKET.gguf_file],
+        "tts-audiocpp-pocket-embeddings" => &[crate::audiocpp::families::POCKET_EMBEDDINGS_FILE],
+        "tts-audiocpp-omnivoice" => &[crate::audiocpp::families::OMNIVOICE.gguf_file],
         // Kokoro 两量化变体：registry 层按 role 钉死主模型文件名（staging 校验抓错误归档），
         // 引擎层用 kokoro_model_file_in 双名探测容忍两种包
         "tts-kokoro" => &crate::tts::config::KOKORO_FP32_REQUIRED_FILES,
@@ -194,8 +245,8 @@ mod tests {
         let models = all_models();
         assert_eq!(
             models.len(),
-            30,
-            "应为 7 个首批（含 2 KWS）+ 5 个 ASR + 6 个补充 LLM + 2 个新 TTS + 3 个新 ASR + 2 个流式 Paraformer + 1 个新 KWS（gigaspeech）+ 2 个 Kokoro TTS + 1 个 Qwen3-ASR + 1 个 audiocpp PocketTTS"
+            31,
+            "应为 7 个首批（含 2 KWS）+ 5 个 ASR + 6 个补充 LLM + 2 个新 TTS + 3 个新 ASR + 2 个流式 Paraformer + 1 个新 KWS（gigaspeech）+ 2 个 Kokoro TTS + 1 个 Qwen3-ASR + 1 个 audiocpp PocketTTS + 1 个 audiocpp OmniVoice"
         );
         assert!(
             models
@@ -339,9 +390,48 @@ mod tests {
             registry_tts_kind("tts-kokoro-multi-lang-v1-1"),
             Some(TtsModelKind::Kokoro)
         );
+        assert_eq!(
+            registry_tts_kind("tts-pocket-english-audiocpp"),
+            Some(TtsModelKind::Pocket)
+        );
+        assert_eq!(
+            registry_tts_kind("tts-omnivoice-q8-audiocpp"),
+            Some(TtsModelKind::Omnivoice)
+        );
         // 非 TTS 或无 tts_kind → None
         assert_eq!(registry_tts_kind("qwen3-1.7b-q4-k-m"), None);
         assert_eq!(registry_tts_kind("不存在"), None);
+    }
+
+    /// 平台过滤：omnivoice 仅darwin-aarch64；无 platforms 的条目全平台可见。
+    /// 本机为 darwin-aarch64 时 omnivoice 在列；其它平台的 CI 通过「显式三元组
+    /// 判定函数」覆盖，不依赖宿主平台。
+    #[test]
+    fn test_platforms_filter() {
+        let omni = model_by_id("tts-omnivoice-q8-audiocpp").unwrap();
+        assert_eq!(
+            omni.platforms.as_deref(),
+            Some(&["darwin-aarch64".to_string()][..])
+        );
+        // 显式判定（不依赖宿主平台）
+        let visible = |triple: &str| {
+            omni.platforms
+                .as_ref()
+                .is_none_or(|list| list.iter().any(|p| p == triple))
+        };
+        assert!(visible("darwin-aarch64"));
+        assert!(!visible("darwin-x86_64"));
+        assert!(!visible("linux-x86_64"));
+        assert!(!visible("windows-x86_64"));
+        // 无 platforms 的条目恒可见
+        let pocket = model_by_id("tts-pocket-english-audiocpp").unwrap();
+        assert!(pocket.platforms.is_none());
+        // 全量条目在当前平台的过滤数 ≤ 总数，且 darwin-aarch64 下含 omnivoice
+        let filtered = models_for_current_platform();
+        assert!(filtered.len() <= all_models().len());
+        if current_platform_triple() == "darwin-aarch64" {
+            assert!(filtered.iter().any(|m| m.id == "tts-omnivoice-q8-audiocpp"));
+        }
     }
 
     #[test]

@@ -3,27 +3,19 @@
 /// audio.cpp（Apache-2.0，ggml 系）作为独立进程 `audiocpp_server` 运行，暴露
 /// OpenAI 风格 HTTP API（`/health`、`/v1/models`、`/v1/audio/speech`）。本模块
 /// 负责：引擎二进制定位（locator）、server config 生成（server_config）、进程
-/// 生命周期管理（server，lease 单例 + 健康轮询 + 懒重启）、HTTP 客户端与 wav
-/// 解码（client）。
+/// 生命周期管理（server，lease + 按配置指纹多实例并存 + 健康轮询 + 懒重启）、
+/// HTTP 客户端与 wav 解码（client）。
 ///
 /// 与 sherpa-onnx 进程内引擎的边界：[`crate::tts::TtsEngine`] 门面按
 /// `ResolvedTtsConfig.backend` 分派，本模块不接触 sherpa 类型。
+///
+/// 模型族差异（pocket / omnivoice 等）统一收敛在 [`families`] 静态描述表：
+/// 模型 id、GGUF 文件名、必需文件清单、采样率、缺省推理后端、音色语义。
 pub mod client;
+pub mod families;
 pub mod locator;
 pub mod server;
 pub mod server_config;
-
-/// server 侧模型条目 id（config `models[].id` 与 `/v1/audio/speech` 请求体 `model`
-/// 同源，两侧由本 crate 生成/消费）。
-pub const MODEL_ID: &str = "pocket-tts-english";
-/// PocketTTS 模型族名（audio.cpp `model_specs` 的 family 标识）。
-pub const MODEL_FAMILY: &str = "pocket_tts";
-/// PocketTTS English 内置音色（q8_0 包唯一 speaker embedding）。
-pub const DEFAULT_VOICE: &str = "alba";
-/// PocketTTS 固定输出采样率（Hz）。
-pub const POCKET_SAMPLE_RATE: i32 = 24_000;
-/// PocketTTS English q8_0 主模型文件名（相对模型目录，与 manifest asset 一致）。
-pub const POCKET_GGUF_FILE: &str = "pocket-tts-english-q8_0.gguf";
 
 /// audio.cpp sidecar 集成的统一错误分类。
 ///
@@ -73,7 +65,7 @@ impl AudiocppError {
             ),
             Self::ModelNotListed { model_id } => format!(
                 "audiocpp_server 未加载模型 {model_id}，请检查模型文件是否完整\
-                 （zapmomo tts install-model --registry-id tts-pocket-english-audiocpp）。"
+                 （在模型库重新下载，或运行 `zapmomo tts install-model`）。"
             ),
             Self::Connection(e) => {
                 format!("无法连接 audiocpp_server（引擎未启动或已退出）: {e}")

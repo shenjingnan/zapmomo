@@ -47,6 +47,8 @@ export function ttsModelKindLabel(kind: string): string {
       return "Kokoro";
     case "pocket":
       return "PocketTTS";
+    case "omnivoice":
+      return "OmniVoice 克隆";
     default:
       return "TTS";
   }

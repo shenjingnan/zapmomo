@@ -1,7 +1,8 @@
 use std::cell::Cell;
 use std::time::Duration;
 
-use super::{AudiocppError, DEFAULT_VOICE, MODEL_ID, POCKET_SAMPLE_RATE};
+use super::AudiocppError;
+use super::families::{AudiocppFamilyDesc, VoiceSemantics, family_desc};
 use crate::tts::TtsVoiceParams;
 use crate::tts::config::ResolvedTtsConfig;
 
@@ -18,36 +19,42 @@ const ERROR_BODY_MAX: usize = 500;
 /// （[`Self::new_with_base_url`]）直连 stub server，绕过进程管理。
 pub struct AudiocppTts {
     cfg: ResolvedTtsConfig,
+    /// 模型族描述（构造时查表一次；请求体/采样率/音色映射都来自它）
+    desc: &'static AudiocppFamilyDesc,
     base_url: String,
     /// 持有租约（保活 server）；Drop 释放。测试构造（直连 stub）为 None。
     _lease: Option<super::server::ServerLease>,
     client: reqwest::blocking::Client,
-    /// 输出采样率缓存：初值 PocketTTS 固定 24000，首响应 wav 头校准
+    /// 输出采样率缓存：初值为族固定采样率（如 24000），首响应 wav 头校准
     sample_rate: Cell<i32>,
 }
 
 impl AudiocppTts {
-    /// 生产构造：定位引擎 → lease server（含 spawn + 健康检查）。
+    /// 生产构造：查模型族表 → 定位引擎 → lease server（含 spawn + 健康检查）。
     pub fn new(cfg: ResolvedTtsConfig) -> Result<Self, String> {
+        let desc = lookup_desc(&cfg)?;
         let lease = super::server::lease(&cfg).map_err(|e| e.to_user_message())?;
         let base_url = lease.base_url();
         Ok(Self {
             cfg,
+            desc,
             base_url,
             _lease: Some(lease),
             client: build_client()?,
-            sample_rate: Cell::new(POCKET_SAMPLE_RATE),
+            sample_rate: Cell::new(desc.sample_rate),
         })
     }
 
     /// 测试构造：直连指定 base_url 的 stub server（不 spawn 进程、不持租约）。
     pub fn new_with_base_url(cfg: ResolvedTtsConfig, base_url: &str) -> Self {
+        let desc = lookup_desc(&cfg).expect("测试构造要求合法 audiocpp 模型族");
         Self {
             cfg,
+            desc,
             base_url: base_url.to_string(),
             _lease: None,
             client: build_client().expect("构建 HTTP 客户端"),
-            sample_rate: Cell::new(POCKET_SAMPLE_RATE),
+            sample_rate: Cell::new(desc.sample_rate),
         }
     }
 
@@ -56,36 +63,58 @@ impl AudiocppTts {
         &self.cfg
     }
 
-    /// 输出采样率（初值 PocketTTS 固定值，合成后按响应 wav 头校准）。
+    /// 输出采样率（初值为族固定值，合成后按响应 wav 头校准）。
     pub fn sample_rate(&self) -> i32 {
         self.sample_rate.get()
     }
 
     /// 合成文本为 PCM（f32 mono）。语速处理与 sherpa 后端一致：模型按 1.0
     /// 合成，输出重采样实现（复用 `tts::apply_speed_to_samples`）。
+    ///
+    /// 音色字段按族语义映射（`families::VoiceSemantics`）：
+    /// - 固定具名音色（pocket）：`Named`/`Sid` → `voice`；`Reference` 报错；
+    /// - 参考音频克隆（omnivoice）：`Reference` → `voice_ref`+`reference_text`
+    ///   （本地路径，sidecar 同机可读）；`Named` → 透传 `voice`（server 端
+    ///   preset/voice_dir 二期）；`Sid` → 省略 voice 字段（server auto voice）。
     pub fn synthesize(
         &self,
         text: &str,
         speed: f32,
         voice: &TtsVoiceParams,
     ) -> Result<Vec<f32>, String> {
-        let voice_str = match voice {
-            TtsVoiceParams::Named(v) => v.clone(),
-            // 固定音色模型按具名音色语义处理；sid 视为「后端默认音色」
-            TtsVoiceParams::Sid(_) => DEFAULT_VOICE.to_string(),
-            TtsVoiceParams::Reference { .. } => {
-                return Err(AudiocppError::UnsupportedVoice(
-                    "audio.cpp 后端暂不支持参考音频克隆（PocketTTS 为固定音色 alba）".to_string(),
-                )
+        let mut body = serde_json::json!({
+            "model": self.desc.model_id,
+            "input": text,
+        });
+        match (self.desc.voice_semantics, voice) {
+            (VoiceSemantics::FixedNamed(_), TtsVoiceParams::Named(v)) => {
+                body["voice"] = serde_json::json!(v);
+            }
+            (VoiceSemantics::FixedNamed(default), TtsVoiceParams::Sid(_)) => {
+                body["voice"] = serde_json::json!(default);
+            }
+            (VoiceSemantics::FixedNamed(default), TtsVoiceParams::Reference { .. }) => {
+                return Err(AudiocppError::UnsupportedVoice(format!(
+                    "该 audio.cpp 模型为固定音色（{default}），不支持参考音频克隆"
+                ))
                 .to_user_message());
             }
-        };
-
-        let body = serde_json::json!({
-            "model": MODEL_ID,
-            "input": text,
-            "voice": voice_str,
-        });
+            (
+                VoiceSemantics::ReferenceClone,
+                TtsVoiceParams::Reference {
+                    wav_path,
+                    reference_text,
+                },
+            ) => {
+                body["voice_ref"] = serde_json::json!(wav_path.to_string_lossy());
+                body["reference_text"] = serde_json::json!(reference_text);
+            }
+            (VoiceSemantics::ReferenceClone, TtsVoiceParams::Named(v)) => {
+                body["voice"] = serde_json::json!(v);
+            }
+            // 省略 voice 字段 → server auto voice（无显式音色时的可用兜底）
+            (VoiceSemantics::ReferenceClone, TtsVoiceParams::Sid(_)) => {}
+        }
         let resp = self
             .client
             .post(format!("{}/v1/audio/speech", self.base_url))
@@ -108,6 +137,16 @@ impl AudiocppTts {
         self.sample_rate.set(rate);
         crate::tts::apply_speed_to_samples(&samples, rate, speed)
     }
+}
+
+/// 查模型族描述；sherpa-only kind 配 audiocpp 后端的非法组合报错。
+fn lookup_desc(cfg: &ResolvedTtsConfig) -> Result<&'static AudiocppFamilyDesc, String> {
+    family_desc(cfg.model_type).ok_or_else(|| {
+        format!(
+            "模型类型 {} 不支持 audiocpp 后端（请检查 [tts].model_type 与 backend 组合）",
+            cfg.model_type.as_str()
+        )
+    })
 }
 
 fn build_client() -> Result<reqwest::blocking::Client, String> {
@@ -165,9 +204,19 @@ mod tests {
     use crate::tts::config::TtsBackendKind;
 
     fn audiocpp_cfg() -> ResolvedTtsConfig {
-        let mut cfg = ResolvedTtsConfig::default();
-        cfg.backend = TtsBackendKind::Audiocpp;
-        cfg
+        ResolvedTtsConfig {
+            backend: TtsBackendKind::Audiocpp,
+            model_type: crate::tts::config::TtsModelKind::Pocket,
+            ..ResolvedTtsConfig::default()
+        }
+    }
+
+    fn omnivoice_cfg() -> ResolvedTtsConfig {
+        ResolvedTtsConfig {
+            backend: TtsBackendKind::Audiocpp,
+            model_type: crate::tts::config::TtsModelKind::Omnivoice,
+            ..ResolvedTtsConfig::default()
+        }
     }
 
     // ---------- 纯函数：wav 解码 ----------
@@ -284,6 +333,56 @@ mod tests {
             )
             .unwrap_err();
         assert!(err.contains("固定音色"), "err: {err}");
+    }
+
+    /// omnivoice（克隆族）请求体三态：Reference → voice_ref+reference_text；
+    /// Named → voice 透传；Sid → 无 voice 字段（server auto voice）。
+    #[test]
+    fn test_synthesize_omnivoice_request_body() {
+        let (base_url, received, _handle) = spawn_stub();
+        let tts = AudiocppTts::new_with_base_url(omnivoice_cfg(), &base_url);
+
+        tts.synthesize(
+            "x",
+            1.0,
+            &TtsVoiceParams::Reference {
+                wav_path: std::path::PathBuf::from("/voices/me.wav"),
+                reference_text: "参考转写".into(),
+            },
+        )
+        .unwrap();
+        let reqs = received.lock().unwrap();
+        let last = reqs.last().unwrap();
+        assert_eq!(last["model"], "omnivoice", "model 字段按族");
+        assert_eq!(
+            last["voice_ref"].as_str().unwrap().replace('\\', "/"),
+            "/voices/me.wav"
+        );
+        assert_eq!(last["reference_text"], "参考转写");
+        assert!(last.get("voice").is_none(), "Reference 不应带 voice 字段");
+        drop(reqs);
+
+        tts.synthesize("x", 1.0, &TtsVoiceParams::Named("demo_01_man".into()))
+            .unwrap();
+        let last = received.lock().unwrap().last().unwrap().clone();
+        assert_eq!(last["voice"], "demo_01_man", "Named 透传 voice");
+        assert!(last.get("voice_ref").is_none());
+
+        tts.synthesize("x", 1.0, &TtsVoiceParams::Sid(0)).unwrap();
+        let last = received.lock().unwrap().last().unwrap().clone();
+        assert!(
+            last.get("voice").is_none() && last.get("voice_ref").is_none(),
+            "Sid 省略全部音色字段（auto voice）"
+        );
+    }
+
+    /// 非法组合（sherpa kind + audiocpp 后端）在构造期报错，不发起连接。
+    #[test]
+    fn test_new_rejects_sherpa_kind() {
+        let mut cfg = ResolvedTtsConfig::default();
+        cfg.backend = TtsBackendKind::Audiocpp; // model_type 缺省 Zipvoice
+        let err = lookup_desc(&cfg).unwrap_err();
+        assert!(err.contains("不支持 audiocpp 后端"), "err: {err}");
     }
 
     #[test]

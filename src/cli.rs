@@ -602,26 +602,14 @@ fn cmd_tts(cmd: TtsCmd) -> Result<(), String> {
             apply_backend_override(&mut cfg, backend, engine_path)?;
             let engine = crate::tts::TtsEngine::new(cfg.clone())?;
             let speed = speed.unwrap_or(1.0);
-            // 合成参数：sherpa ZipVoice 走参考音频克隆；sid 模型（Kokoro 等）按音色名/sid
-            // 解析说话人；audiocpp（PocketTTS）走具名音色 alba
-            let voice_params = if cfg.uses_reference_audio() {
-                let (ref_wav, ref_text) = crate::tts::voice::resolve_reference(
-                    &cfg,
-                    voice.as_deref(),
-                    reference_wav.as_deref(),
-                    reference_text.as_deref(),
-                )?;
-                crate::tts::TtsVoiceParams::Reference {
-                    wav_path: ref_wav,
-                    reference_text: ref_text,
-                }
-            } else if cfg.backend == crate::tts::config::TtsBackendKind::Audiocpp {
-                crate::tts::TtsVoiceParams::Named(
-                    voice.unwrap_or_else(|| crate::audiocpp::DEFAULT_VOICE.to_string()),
-                )
-            } else {
-                crate::tts::voice::resolve_sid_voice(&cfg, voice.as_deref(), sid)?
-            };
+            // 合成音色参数统一解析（克隆 > sid > audiocpp 具名，见 tts::voice）
+            let voice_params = crate::tts::voice::resolve_voice_params(
+                &cfg,
+                voice.as_deref(),
+                sid,
+                reference_wav.as_deref(),
+                reference_text.as_deref(),
+            )?;
             let out_path = output.unwrap_or_else(crate::tts::default_output_path);
             if let Some(parent) = out_path.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| format!("创建输出目录失败: {e}"))?;
@@ -634,10 +622,21 @@ fn cmd_tts(cmd: TtsCmd) -> Result<(), String> {
             let mut cfg = tts_config(model_dir.as_ref())?;
             apply_backend_override(&mut cfg, backend, None)?;
             if cfg.backend == crate::tts::config::TtsBackendKind::Audiocpp {
-                println!(
-                    "audiocpp 后端（PocketTTS English）固定音色:\n  {}  内置音色",
-                    crate::audiocpp::DEFAULT_VOICE
-                );
+                let desc =
+                    crate::audiocpp::families::family_desc(cfg.model_type).ok_or_else(|| {
+                        format!("模型类型 {} 不支持 audiocpp 后端", cfg.model_type.as_str())
+                    })?;
+                match desc.voice_semantics {
+                    crate::audiocpp::families::VoiceSemantics::FixedNamed(v) => {
+                        println!("audiocpp 后端（{}）固定音色:\n  {v}  内置音色", desc.family);
+                    }
+                    crate::audiocpp::families::VoiceSemantics::ReferenceClone => {
+                        println!(
+                            "audiocpp 后端（{}）为克隆模型：用 --reference-wav/--voice 指定参考音色\n（自定义音色库可用 `zapmomo tts voices` 管理，未指定时走 auto voice）",
+                            desc.family
+                        );
+                    }
+                }
                 return Ok(());
             }
             if cfg.model_type == crate::tts::config::TtsModelKind::Kokoro {

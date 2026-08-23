@@ -135,10 +135,20 @@
 - **sha256**: gguf `0315406421d515d9ffbde49ed998832ff2962562ef8abde440c85fa0a27d8b2a` /
   embeddings `69c32db63ca56843d994f81f343f62e0bf2d73f7e4c9bc73e44bb1110b1d8845`
 
+## omnivoice-q8_0.gguf（audio.cpp TTS）
+
+- **用途**: 多语种文本转语音 + 零样本声音克隆（TTS，OmniVoice，Qwen3-0.6B 基座，
+  q8_0 量化，24kHz，generator 与 audio tokenizer 双权重内嵌单文件），由内置的
+  audio.cpp 引擎（sidecar 进程，Metal 后端）驱动
+- **来源**: https://huggingface.co/audio-cpp/audio.cpp-gguf/tree/main/OmniVoice-GGUF
+- **发布方**: audio-cpp（audio.cpp 官方 GGUF 仓库；模型源自 k2-fsa/OmniVoice）
+- **许可证**: Apache-2.0（依据 audio.cpp 仓库标注；如需商用请以模型发布页的许可说明为准）
+- **sha256**: `2f4be637278043c6842de5b85d681532030e9eb6ffe0f8b0e320f68238e3da8b`
+
 ## audiocpp_server（audio.cpp 引擎二进制，随安装包分发）
 
 - **用途**: TTS 第二推理后端（ggml 系 audio.cpp 的 HTTP server sidecar，裁剪构建
-  仅含 pocket_tts 模型族；编译参数见 `.github/workflows/release.yml`）
+  仅含 pocket_tts + omnivoice 模型族；编译参数见 `.github/workflows/release.yml`）
 - **来源**: https://github.com/0xShug0/audio.cpp（版本 pin 见 release.yml 的 AUDIOCPP_REF）
 - **发布方**: ShugoAI LLC（audio.cpp 项目）
 - **许可证**: Apache-2.0。随 ZapMomo（GPL-3.0-only）以独立进程形式聚合分发，

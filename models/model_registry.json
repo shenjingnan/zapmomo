@@ -1032,6 +1032,31 @@
         "extra_roles": ["tts-audiocpp-pocket-embeddings"],
         "kind": "raw"
       }
+    },
+    {
+      "id": "tts-omnivoice-q8-audiocpp",
+      "name": "omnivoice-audiocpp",
+      "display_name": "OmniVoice 多语种克隆 (audio.cpp)",
+      "model_type": "tts",
+      "tts_kind": "omnivoice",
+      "runtime": "audiocpp",
+      "format": "GGUF",
+      "description": "OmniVoice（Qwen3-0.6B 基座）零样本声音克隆 + 声音设计，600+ 语种，q8_0 量化，24kHz；由 audio.cpp 引擎驱动。体积约 1.26 GiB，推理依赖 Metal 加速（实测 CPU 不可用），建议 8GB 以上内存的 Apple Silicon 设备使用。",
+      "languages": ["zh", "en"],
+      "tags": ["tts", "audiocpp", "clone", "multilingual"],
+      "parameter_count": "0.6B",
+      "quantization": "q8_0",
+      "version": "q8_0",
+      "size_bytes": 1350288416,
+      "homepage": "https://huggingface.co/k2-fsa/OmniVoice",
+      "required_assets": ["tts-audiocpp-omnivoice"],
+      "optional_assets": [],
+      "platforms": ["darwin-aarch64"],
+      "download": {
+        "manifest_role": "tts-audiocpp-omnivoice",
+        "extra_roles": [],
+        "kind": "raw"
+      }
     }
   ]
 }

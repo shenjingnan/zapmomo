@@ -126,6 +126,9 @@ pub(crate) fn build_offline_model_config(cfg: &ResolvedTtsConfig) -> OfflineTtsM
         TtsModelKind::Supertonic => {
             config.supertonic = OfflineTtsSupertonicModelConfig::default();
         }
+        // audiocpp-only 族：无 sherpa 配置分支（引擎构造在 AudiocppTts，
+        // preflight 已按族清单拦截非法组合）
+        TtsModelKind::Omnivoice => {}
     }
     config
 }
@@ -236,6 +239,15 @@ impl TtsEngine {
         match &self.inner {
             TtsBackendInner::Sherpa { tts, .. } => tts.sample_rate(),
             TtsBackendInner::Audiocpp(a) => a.sample_rate(),
+        }
+    }
+
+    /// 测试构造：包装 audiocpp 客户端（直连 stub server，不 spawn 进程）。
+    /// 供合成线程 SwapEngine 句间语义测试构造「无需模型文件」的真实引擎。
+    #[cfg(test)]
+    pub(crate) fn from_audiocpp_for_test(tts: crate::audiocpp::client::AudiocppTts) -> Self {
+        Self {
+            inner: TtsBackendInner::Audiocpp(tts),
         }
     }
 
@@ -563,6 +575,60 @@ mod tests {
         let duration = samples.len() as f32 / engine.sample_rate() as f32;
         eprintln!(
             "kokoro e2e: {:.2}s 音频 / {:.2}s 合成 (RTF {:.2})",
+            duration,
+            elapsed,
+            elapsed / duration
+        );
+    }
+
+    #[test]
+    #[ignore = "需要 omnivoice GGUF 在 OMNIVOICE_E2E_DIR 目录 + audiocpp 引擎可定位"]
+    fn test_omnivoice_synthesize_produces_audio() {
+        // E2E：OMNIVOICE_E2E_DIR=/path/to/omnivoice-audiocpp cargo test -- --ignored
+        // 可选 OMNIVOICE_E2E_REF=/path/to/ref.wav 验证克隆（缺省走 auto voice）。
+        let Some(dir) = std::env::var("OMNIVOICE_E2E_DIR").ok() else {
+            eprintln!("跳过：未设置 OMNIVOICE_E2E_DIR");
+            return;
+        };
+        let cfg = config::ResolvedTtsConfig {
+            backend: crate::tts::config::TtsBackendKind::Audiocpp,
+            model_type: TtsModelKind::Omnivoice,
+            model_dir: PathBuf::from(&dir),
+            // 阶段 1 实测：omnivoice CPU RTF 6.6 不可用，Metal 0.41 达标
+            provider: std::env::var("OMNIVOICE_E2E_PROVIDER")
+                .unwrap_or_else(|_| "metal".to_string()),
+            ..config::ResolvedTtsConfig::default()
+        };
+        let engine = TtsEngine::new(cfg.clone()).unwrap();
+        assert_eq!(engine.sample_rate(), 24000, "omnivoice 固定 24kHz");
+
+        let voice = match std::env::var("OMNIVOICE_E2E_REF") {
+            Ok(ref_wav) => TtsVoiceParams::Reference {
+                wav_path: PathBuf::from(ref_wav),
+                reference_text: std::env::var("OMNIVOICE_E2E_REF_TEXT").unwrap_or_else(|_| {
+                    "那还是36年前, 1987年. 我呢考上了武汉大学的计算机系.".to_string()
+                }),
+            },
+            Err(_) => TtsVoiceParams::Sid(0), // auto voice
+        };
+        let started = std::time::Instant::now();
+        let samples = engine
+            .synthesize(
+                "你好，我是 ZapMomo 语音伙伴，正在验证 OmniVoice 中文合成。",
+                1.0,
+                &voice,
+            )
+            .unwrap();
+        let elapsed = started.elapsed().as_secs_f32();
+        assert!(!samples.is_empty(), "合成音频不应为空");
+        let duration = samples.len() as f32 / engine.sample_rate() as f32;
+        eprintln!(
+            "omnivoice e2e ({}): {:.2}s 音频 / {:.2}s 合成 (RTF {:.2})",
+            if matches!(voice, TtsVoiceParams::Reference { .. }) {
+                "clone"
+            } else {
+                "auto"
+            },
             duration,
             elapsed,
             elapsed / duration

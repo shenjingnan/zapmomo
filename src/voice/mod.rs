@@ -22,7 +22,7 @@ pub use events::{ErrorKind, VoiceEvent, cli_sink};
 pub use listen::{ChunkAccumulator, MicEvent, MicLoop};
 pub use player::{AudioPlayer, MockPlayer, Speaker};
 pub use records::{ConversationRecord, RecordRole};
-pub use session::{ReplyAccumulator, VoiceSession};
+pub use session::{ReplyAccumulator, TtsSwap, TtsSwapSlot, VoiceSession};
 pub use synthesizer::{SynthHandle, SynthResult};
 
 /// CLI 入口：解析配置 → 构造会话 → 运行（Ctrl-C 优雅退出）。

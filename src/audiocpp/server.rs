@@ -20,13 +20,15 @@ const STDERR_TAIL_LINES: usize = 20;
 
 /// sidecar 进程租约：RAII 计数，Drop 时释放；计数归零按 keepalive 策略回收。
 ///
-/// 持有者（`AudiocppTts`）生命周期即租约生命周期：voice 会话/Announcer 常驻则
-/// server 常驻；GUI 每次合成取放，配合 `set_idle_keepalive(Some(45s))` 在窗口内
-/// 复用热 server（热请求 0.13s 级）。
+/// 携带所属实例的配置指纹与代际：多实例并存（模型族切换窗口）下，释放时
+/// 精确路由到自己的实例。持有者（`AudiocppTts`）生命周期即租约生命周期：
+/// voice 会话/Announcer 常驻则 server 常驻；GUI 每次合成取放，配合
+/// `set_idle_keepalive(Some(45s))` 在窗口内复用热 server（热请求 0.13s 级）。
 #[derive(Debug)]
 pub struct ServerLease {
     port: u16,
     generation: u64,
+    config_hash: u64,
 }
 
 impl ServerLease {
@@ -38,7 +40,7 @@ impl ServerLease {
 
 impl Drop for ServerLease {
     fn drop(&mut self) {
-        release_lease(self.generation);
+        release_lease(self.config_hash, self.generation);
     }
 }
 
@@ -49,10 +51,16 @@ struct ServerInstance {
     generation: u64,
 }
 
+/// 单个配置指纹对应的实例条目（实例 + 活跃租约数）。
+struct InstanceEntry {
+    inst: ServerInstance,
+    leases: usize,
+}
+
 struct ManagerState {
-    instance: Option<ServerInstance>,
-    lease_count: usize,
-    config_hash: u64,
+    /// 按配置指纹并存的实例：模型族/后端切换窗口双实例共存（旧实例在租约
+    /// 归零 + keepalive 后自然回收），热切换不杀正在合成的进程（技术方案 §4.6）。
+    instances: std::collections::HashMap<u64, InstanceEntry>,
     orphan_reaped: bool,
 }
 
@@ -66,9 +74,7 @@ static GENERATION: AtomicU64 = AtomicU64::new(0);
 fn manager() -> &'static Mutex<ManagerState> {
     MANAGER.get_or_init(|| {
         Mutex::new(ManagerState {
-            instance: None,
-            lease_count: 0,
-            config_hash: 0,
+            instances: std::collections::HashMap::new(),
             orphan_reaped: false,
         })
     })
@@ -84,11 +90,19 @@ pub fn set_idle_keepalive(keepalive: Option<Duration>) {
     );
 }
 
-/// 获取 server 租约：复用健康实例或按当前配置 spawn（模型/引擎/backend 变更自动重启）。
+/// 获取 server 租约：按配置指纹复用健康实例或 spawn（同指纹崩溃懒重启）。
 ///
-/// manager 互斥锁串行化，避免并发 lease 双 spawn；已退出实例（崩溃）懒重启。
+/// manager 互斥锁串行化，避免并发 lease 双 spawn。**不同指纹的实例互不影响**
+/// （并存直至各自租约归零回收）——切换模型时旧 server 继续服务在途请求，
+/// 新 server 独立启动，热切换零中断。
 pub fn lease(cfg: &ResolvedTtsConfig) -> Result<ServerLease, AudiocppError> {
     let engine = super::locator::locate_engine(cfg.engine_path.as_deref())?;
+    let desc = super::families::family_desc(cfg.model_type).ok_or_else(|| {
+        AudiocppError::SpawnFailed(format!(
+            "模型类型 {} 不支持 audiocpp 后端",
+            cfg.model_type.as_str()
+        ))
+    })?;
     let hash = config_hash(cfg, &engine);
 
     let mut state = manager().lock().unwrap_or_else(|e| e.into_inner());
@@ -97,82 +111,100 @@ pub fn lease(cfg: &ResolvedTtsConfig) -> Result<ServerLease, AudiocppError> {
         reap_orphan_process();
     }
 
-    // 复用判定：实例存活（崩溃懒重启）且配置一致（模型切换自动重启）
-    let exited = state.instance.as_mut().is_some_and(|inst| {
-        let exited = inst.child.try_wait().map(|s| s.is_some()).unwrap_or(true);
-        if exited {
-            tracing::warn!(target: "audiocpp", "server 已退出（pid {}），懒重启", inst.child.id());
+    // 已退出实例（崩溃）懒重启：只移除死实例，不动其他指纹的活实例
+    let mut dead: Vec<u64> = Vec::new();
+    for (key, entry) in state.instances.iter_mut() {
+        if entry
+            .inst
+            .child
+            .try_wait()
+            .map(|s| s.is_some())
+            .unwrap_or(true)
+        {
+            dead.push(*key);
         }
-        exited
-    });
-    let need_spawn = state.instance.is_none() || exited || state.config_hash != hash;
-    if need_spawn {
-        if let Some(mut old) = state.instance.take() {
-            kill_instance(&mut old);
+    }
+    for key in dead {
+        if let Some(mut entry) = state.instances.remove(&key) {
+            tracing::warn!(
+                target: "audiocpp",
+                "server 已退出 (pid {})，移除实例",
+                entry.inst.child.id()
+            );
+            kill_instance(&mut entry.inst);
         }
-        let inst = spawn_instance(cfg, &engine)?;
-        state.config_hash = hash;
-        state.instance = Some(inst);
     }
 
-    state.lease_count += 1;
-    let inst = state
-        .instance
-        .as_ref()
-        .expect("spawn 后实例必在（上方 need_spawn 分支保证）");
+    let entry = match state.instances.get_mut(&hash) {
+        Some(entry) => entry,
+        None => {
+            let inst = spawn_instance(cfg, &engine, desc.model_id)?;
+            state
+                .instances
+                .insert(hash, InstanceEntry { inst, leases: 0 });
+            state.instances.get_mut(&hash).expect("刚插入的条目必在")
+        }
+    };
+    entry.leases += 1;
     Ok(ServerLease {
-        port: inst.port,
-        generation: inst.generation,
+        port: entry.inst.port,
+        generation: entry.inst.generation,
+        config_hash: hash,
     })
 }
 
-/// 显式停止 server（幂等）。GUI 退出钩子 / CLI epilogue 调用。
+/// 显式停止全部实例（幂等）。GUI 退出钩子 / CLI epilogue 调用。
 pub fn shutdown_blocking() {
     let mut state = manager().lock().unwrap_or_else(|e| e.into_inner());
-    state.lease_count = 0;
-    if let Some(mut inst) = state.instance.take() {
-        kill_instance(&mut inst);
+    for (_key, mut entry) in state.instances.drain() {
+        kill_instance(&mut entry.inst);
     }
 }
 
-fn release_lease(generation: u64) {
+fn release_lease(config_hash: u64, generation: u64) {
     let keepalive_ms = IDLE_KEEPALIVE_MS.load(Ordering::SeqCst);
     let mut state = manager().lock().unwrap_or_else(|e| e.into_inner());
-    state.lease_count = state.lease_count.saturating_sub(1);
-    if state.lease_count > 0 || state.instance.is_none() {
+    let Some(entry) = state.instances.get_mut(&config_hash) else {
+        return;
+    };
+    entry.leases = entry.leases.saturating_sub(1);
+    if entry.leases > 0 {
         return;
     }
     if keepalive_ms == 0 {
         // CLI 语义：归零立即回收，进程绝不残留
-        if let Some(mut inst) = state.instance.take() {
-            kill_instance(&mut inst);
+        if let Some(mut entry) = state.instances.remove(&config_hash) {
+            kill_instance(&mut entry.inst);
         }
         return;
     }
-    // GUI 语义：延迟回收。sleep 后复核「计数仍为零且实例未换代」，避免误杀
+    // GUI 语义：延迟回收。sleep 后复核「计数仍为零且代际未变」，避免误杀
     // 窗口内新取的 lease / 崩溃重启的新实例。
     std::thread::Builder::new()
         .name("audiocpp-reaper".to_string())
         .spawn(move || {
             std::thread::sleep(Duration::from_millis(keepalive_ms));
             let mut state = manager().lock().unwrap_or_else(|e| e.into_inner());
-            if state.lease_count == 0
-                && state
-                    .instance
-                    .as_ref()
-                    .is_some_and(|i| i.generation == generation)
-                && let Some(mut inst) = state.instance.take()
+            if let Some(entry) = state.instances.get(&config_hash)
+                && entry.leases == 0
+                && entry.inst.generation == generation
+                && let Some(mut entry) = state.instances.remove(&config_hash)
             {
-                kill_instance(&mut inst);
+                kill_instance(&mut entry.inst);
             }
         })
         .ok();
 }
 
-/// 决定「是否需要重启 server」的配置指纹：模型目录 / 推理后端 / 线程数 / 引擎路径。
+/// 决定「复用哪个实例」的配置指纹：模型目录 / 模型族 / 推理后端 / 线程数 / 引擎路径。
+///
+/// `model_type` 显式加入（model_dir 已隐含区分）：防 external 目录同 dir 不同
+/// kind 的边角，并自我文档化「模型族变更必换实例」。voice/音色不进指纹——
+/// 音色随请求传（pocket 的 `voice` / omnivoice 的 `voice_ref`），换音色复用热实例。
 fn config_hash(cfg: &ResolvedTtsConfig, engine: &std::path::Path) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     cfg.model_dir.hash(&mut h);
+    cfg.model_type.as_str().hash(&mut h);
     cfg.provider.hash(&mut h);
     cfg.num_threads.hash(&mut h);
     engine.hash(&mut h);
@@ -191,6 +223,7 @@ fn allocate_port() -> Result<u16, AudiocppError> {
 fn spawn_instance(
     cfg: &ResolvedTtsConfig,
     engine: &std::path::Path,
+    model_id: &str,
 ) -> Result<ServerInstance, AudiocppError> {
     let port = allocate_port()?;
     let config_path =
@@ -234,8 +267,8 @@ fn spawn_instance(
             .ok();
     }
 
-    write_pidfile(child.id());
     let generation = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    write_pidfile(generation, child.id());
     let mut instance = ServerInstance {
         child,
         port,
@@ -244,7 +277,7 @@ fn spawn_instance(
     };
 
     // 健康检查失败 → 回收进程再返回错误（不留半启动实例）
-    if let Err(e) = wait_until_ready(&mut instance) {
+    if let Err(e) = wait_until_ready(&mut instance, model_id) {
         kill_instance(&mut instance);
         return Err(e);
     }
@@ -253,8 +286,8 @@ fn spawn_instance(
 }
 
 /// 轮询直到 `/health` 200 且 `/v1/models` 列出目标模型（eager 模式下含模型加载），
-/// 或超时/进程退出。
-fn wait_until_ready(inst: &mut ServerInstance) -> Result<(), AudiocppError> {
+/// 或超时/进程退出。`model_id` 来自模型族描述表（多族下按实例校验）。
+fn wait_until_ready(inst: &mut ServerInstance, model_id: &str) -> Result<(), AudiocppError> {
     let client = reqwest::blocking::Client::builder()
         .timeout(PROBE_TIMEOUT)
         // 回环探测不走系统代理（代理会拦 localhost 请求返回 5xx）
@@ -286,7 +319,7 @@ fn wait_until_ready(inst: &mut ServerInstance) -> Result<(), AudiocppError> {
                 .and_then(|j| {
                     j["data"]
                         .as_array()
-                        .map(|a| a.iter().any(|m| m["id"].as_str() == Some(super::MODEL_ID)))
+                        .map(|a| a.iter().any(|m| m["id"].as_str() == Some(model_id)))
                 })
                 .unwrap_or(false);
             if listed {
@@ -304,9 +337,10 @@ fn wait_until_ready(inst: &mut ServerInstance) -> Result<(), AudiocppError> {
 }
 
 fn kill_instance(inst: &mut ServerInstance) {
+    let generation = inst.generation;
     let _ = inst.child.kill();
     let _ = inst.child.wait();
-    remove_pidfile();
+    remove_pidfile(generation);
 }
 
 fn tail_string(tail: &Arc<Mutex<VecDeque<String>>>) -> String {
@@ -318,43 +352,53 @@ fn tail_string(tail: &Arc<Mutex<VecDeque<String>>>) -> String {
     }
 }
 
-/// pidfile：`<data_dir>/engines/audiocpp-server.pid`。
-fn pidfile_path() -> PathBuf {
-    super::locator::engines_dir().join("audiocpp-server.pid")
+/// pidfile（按实例代际命名，多实例并存互不覆盖）：`<data_dir>/engines/audiocpp-server-<gen>.pid`。
+fn pidfile_path(generation: u64) -> PathBuf {
+    super::locator::engines_dir().join(format!("audiocpp-server-{generation}.pid"))
 }
 
-fn write_pidfile(pid: u32) {
+fn write_pidfile(generation: u64, pid: u32) {
     let _ = std::fs::create_dir_all(super::locator::engines_dir());
-    let _ = std::fs::write(pidfile_path(), pid.to_string());
+    let _ = std::fs::write(pidfile_path(generation), pid.to_string());
 }
 
-fn remove_pidfile() {
-    let _ = std::fs::remove_file(pidfile_path());
+fn remove_pidfile(generation: u64) {
+    let _ = std::fs::remove_file(pidfile_path(generation));
 }
 
 /// 孤儿清理（宿主崩溃/强杀兜底，对齐 dsh「残留→下次启动清理」模式）：
-/// 读 pidfile，pid 存活且进程名匹配 `audiocpp_server` 时 kill。不做复用
-/// （manager 总是按当前配置重新生成 config 再 spawn）。
+/// 扫描 engines 目录下全部 `audiocpp-server-*.pid`，pid 存活且进程名匹配
+/// `audiocpp_server` 时 kill。不做复用（manager 总是按当前配置重新生成
+/// config 再 spawn）。
 fn reap_orphan_process() {
-    let Ok(content) = std::fs::read_to_string(pidfile_path()) else {
+    let Ok(entries) = std::fs::read_dir(super::locator::engines_dir()) else {
         return;
     };
-    let Ok(pid) = content.trim().parse::<u32>() else {
-        remove_pidfile();
-        return;
-    };
-    let sys_pid = sysinfo::Pid::from_u32(pid);
-    let mut sys = sysinfo::System::new();
-    sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[sys_pid]), true);
-    if let Some(proc) = sys.process(sys_pid) {
-        let name = proc.name().to_string_lossy().to_string();
-        if name.contains("audiocpp_server") {
-            tracing::warn!(target: "audiocpp", "发现残留 audiocpp_server 进程 (pid {pid})，正在清理");
-            let _ = proc.kill();
-            std::thread::sleep(Duration::from_millis(200));
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !(name.starts_with("audiocpp-server-") && name.ends_with(".pid")) {
+            continue;
         }
+        let Ok(content) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        let Ok(pid) = content.trim().parse::<u32>() else {
+            let _ = std::fs::remove_file(entry.path());
+            continue;
+        };
+        let sys_pid = sysinfo::Pid::from_u32(pid);
+        let mut sys = sysinfo::System::new();
+        sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[sys_pid]), true);
+        if let Some(proc) = sys.process(sys_pid) {
+            let pname = proc.name().to_string_lossy().to_string();
+            if pname.contains("audiocpp_server") {
+                tracing::warn!(target: "audiocpp", "发现残留 audiocpp_server 进程 (pid {pid})，正在清理");
+                let _ = proc.kill();
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        }
+        let _ = std::fs::remove_file(entry.path());
     }
-    remove_pidfile();
 }
 
 #[cfg(test)]
@@ -391,7 +435,7 @@ class H(http.server.BaseHTTPRequestHandler):
         if self.path == '/health':
             self._ok(b'{"status":"ok"}')
         elif self.path == '/v1/models':
-            self._ok(json.dumps({"data": [{"id": "pocket-tts-english"}]}).encode())
+            self._ok(json.dumps({"data": [{"id": "pocket-tts-english"}, {"id": "omnivoice"}]}).encode())
         else:
             self.send_error(404)
     def do_POST(self):
@@ -416,24 +460,36 @@ http.server.HTTPServer(('127.0.0.1', port), H).serve_forever()
         dir
     }
 
-    /// audiocpp 后端测试配置（HOME 隔离 + 模型两文件齐）。
+    /// audiocpp 后端测试配置（HOME 隔离 + pocket 两文件齐）。
     #[cfg(all(unix, not(target_os = "macos")))]
     fn stub_ready_cfg(home: &std::path::Path) -> crate::tts::config::ResolvedTtsConfig {
         crate::test_util::set_custom_data_dir(home);
         let model_dir = home.join("models/pocket-stub");
         std::fs::create_dir_all(model_dir.join("embeddings")).unwrap();
-        std::fs::write(model_dir.join(super::super::POCKET_GGUF_FILE), b"x").unwrap();
+        std::fs::write(
+            model_dir.join(super::super::families::POCKET.gguf_file),
+            b"x",
+        )
+        .unwrap();
         std::fs::write(model_dir.join("embeddings/alba.safetensors"), b"x").unwrap();
         let mut cfg = crate::tts::config::ResolvedTtsConfig::default();
         cfg.backend = crate::tts::config::TtsBackendKind::Audiocpp;
+        cfg.model_type = crate::tts::config::TtsModelKind::Pocket;
         cfg.model_dir = model_dir;
         cfg
     }
 
-    /// pidfile 是否存在（引擎目录在 HOME 隔离下随 data_dir 走）。
+    /// 是否存在任一实例 pidfile（多实例下按前缀探测；目录在 HOME 隔离下随 data_dir 走）。
     #[cfg(all(unix, not(target_os = "macos")))]
     fn stub_pidfile_exists() -> bool {
-        pidfile_path().exists()
+        let Ok(entries) = std::fs::read_dir(super::super::locator::engines_dir()) else {
+            return false;
+        };
+        entries.flatten().any(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with("audiocpp-server-")
+        })
     }
 
     #[test]
@@ -586,6 +642,30 @@ http.server.HTTPServer(('127.0.0.1', port), H).serve_forever()
         });
     }
 
+    /// 多实例并存：不同配置指纹各起实例、互不误杀；释放一个不影响另一个。
+    #[test]
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn test_multi_instance_two_configs_coexist() {
+        crate::test_util::run_with_temp_home(|home| {
+            setup_stub_engine();
+            let cfg_a = stub_ready_cfg(home);
+            // 实例 B：仅模型目录不同（指纹不同；stub 引擎不读模型文件）
+            let mut cfg_b = cfg_a.clone();
+            cfg_b.model_dir = home.join("models/pocket-stub-b");
+
+            let la = lease(&cfg_a).expect("实例 A 应起");
+            let lb = lease(&cfg_b).expect("实例 B 应起");
+            assert_ne!(la.base_url(), lb.base_url(), "不同指纹应各起实例");
+
+            // 释放 A（keepalive=0 → 立即回收）不影响 B
+            drop(la);
+            assert!(stub_pidfile_exists(), "实例 B 应仍存活");
+            drop(lb);
+            assert!(!stub_pidfile_exists(), "全部释放后应回收干净");
+            shutdown_blocking();
+        });
+    }
+
     #[test]
     fn test_config_hash_distinguishes_model_dir() {
         let mut cfg = ResolvedTtsConfig::default();
@@ -594,8 +674,12 @@ http.server.HTTPServer(('127.0.0.1', port), H).serve_forever()
         cfg.model_dir = std::path::PathBuf::from("/models/other");
         let h2 = config_hash(&cfg, engine);
         assert_ne!(h1, h2);
+        // 模型族变更 → 指纹必变（即使 external 目录同名）
+        cfg.model_type = crate::tts::config::TtsModelKind::Omnivoice;
+        let h3 = config_hash(&cfg, engine);
+        assert_ne!(h2, h3);
         // 同配置幂等
-        assert_eq!(h2, config_hash(&cfg, engine));
+        assert_eq!(h3, config_hash(&cfg, engine));
     }
 
     #[test]

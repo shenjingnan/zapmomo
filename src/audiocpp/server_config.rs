@@ -22,9 +22,9 @@ pub struct ServerConfig {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ServerModelConfig {
-    /// 与 `/v1/audio/speech` 请求体 `model` 同源（见 [`super::MODEL_ID`]）
+    /// 与 `/v1/audio/speech` 请求体 `model` 同源（见 [`super::families::AudiocppFamilyDesc::model_id`]）
     pub id: String,
-    /// audio.cpp 模型族标识（见 [`super::MODEL_FAMILY`]）
+    /// audio.cpp 模型族标识（见 [`super::families::AudiocppFamilyDesc::family`]）
     pub family: String,
     /// 主模型 GGUF 绝对路径
     pub path: String,
@@ -34,27 +34,29 @@ pub struct ServerModelConfig {
     pub load_options: serde_json::Value,
 }
 
-/// 由解析后的 TTS 配置生成 server config（纯函数，快照单测锚定）。
-pub fn build_server_config(cfg: &ResolvedTtsConfig, port: u16) -> ServerConfig {
-    ServerConfig {
+/// 由解析后的 TTS 配置生成 server config（纯函数，快照单测锚定两族）。
+///
+/// 模型族信息（id/family/gguf 路径/load_options）查 [`super::families`] 描述表；
+/// sherpa-only kind 配 audiocpp 后端的非法组合返回错误。`mode` 本期恒 "offline"，
+/// SSE 流式二期经 `AudiocppFamilyDesc` 扩展（schema 已就绪）。
+pub fn build_server_config(cfg: &ResolvedTtsConfig, port: u16) -> Result<ServerConfig, String> {
+    let desc = super::families::family_desc(cfg.model_type)
+        .ok_or_else(|| format!("模型类型 {} 不支持 audiocpp 后端", cfg.model_type.as_str()))?;
+    Ok(ServerConfig {
         host: "127.0.0.1".to_string(),
         port,
         backend: cfg.provider.clone(),
         threads: cfg.num_threads,
         lazy_load: false,
         models: vec![ServerModelConfig {
-            id: super::MODEL_ID.to_string(),
-            family: super::MODEL_FAMILY.to_string(),
-            path: cfg
-                .model_dir
-                .join(super::POCKET_GGUF_FILE)
-                .display()
-                .to_string(),
+            id: desc.model_id.to_string(),
+            family: desc.family.to_string(),
+            path: cfg.model_dir.join(desc.gguf_file).display().to_string(),
             task: "tts".to_string(),
             mode: "offline".to_string(),
-            load_options: serde_json::json!({ "language": "english" }),
+            load_options: desc.load_options(),
         }],
-    }
+    })
 }
 
 /// server config 落盘路径：`<data_dir>/engines/audiocpp-server.json`。
@@ -72,7 +74,7 @@ pub fn write_server_config(cfg: &ResolvedTtsConfig, port: u16) -> Result<PathBuf
         .ok_or_else(|| format!("配置路径无父目录: {}", path.display()))?;
     std::fs::create_dir_all(dir)
         .map_err(|e| format!("创建 engines 目录失败 {}: {e}", dir.display()))?;
-    let json = serde_json::to_string_pretty(&build_server_config(cfg, port))
+    let json = serde_json::to_string_pretty(&build_server_config(cfg, port)?)
         .map_err(|e| format!("序列化 server config 失败: {e}"))?;
     // 先写临时文件再原子 rename，避免 server 读到半截 config
     let tmp = path.with_extension("json.tmp");
@@ -89,16 +91,18 @@ mod tests {
     use crate::tts::config::TtsBackendKind;
 
     fn audiocpp_cfg(model_dir: &std::path::Path) -> ResolvedTtsConfig {
-        let mut cfg = ResolvedTtsConfig::default();
-        cfg.backend = TtsBackendKind::Audiocpp;
-        cfg.model_dir = model_dir.to_path_buf();
-        cfg
+        ResolvedTtsConfig {
+            backend: TtsBackendKind::Audiocpp,
+            model_dir: model_dir.to_path_buf(),
+            ..ResolvedTtsConfig::default()
+        }
     }
 
     #[test]
     fn test_build_server_config_shape() {
-        let cfg = audiocpp_cfg(std::path::Path::new("/models/pocket-tts-english-audiocpp"));
-        let sc = build_server_config(&cfg, 18123);
+        let mut cfg = audiocpp_cfg(std::path::Path::new("/models/pocket-tts-english-audiocpp"));
+        cfg.model_type = crate::tts::config::TtsModelKind::Pocket;
+        let sc = build_server_config(&cfg, 18123).unwrap();
         assert_eq!(sc.host, "127.0.0.1");
         assert_eq!(sc.port, 18123);
         assert_eq!(sc.backend, "cpu");
@@ -119,11 +123,39 @@ mod tests {
         assert_eq!(m.load_options["language"], "english");
     }
 
+    /// omnivoice 族快照：family/id/gguf 路径/空 load_options；非法组合报错。
+    #[test]
+    fn test_build_server_config_omnivoice_shape() {
+        let mut cfg = audiocpp_cfg(std::path::Path::new("/models/omnivoice-audiocpp"));
+        cfg.model_type = crate::tts::config::TtsModelKind::Omnivoice;
+        cfg.provider = "metal".to_string();
+        let sc = build_server_config(&cfg, 18200).unwrap();
+        assert_eq!(sc.backend, "metal");
+        let m = &sc.models[0];
+        assert_eq!(m.id, "omnivoice");
+        assert_eq!(m.family, "omnivoice");
+        assert_eq!(
+            m.path.replace('\\', "/"),
+            "/models/omnivoice-audiocpp/omnivoice-q8_0.gguf"
+        );
+        assert_eq!(m.mode, "offline");
+        assert_eq!(m.load_options, serde_json::json!({}));
+    }
+
+    /// sherpa kind（默认 Zipvoice）配 audiocpp 后端 → 明确报错。
+    #[test]
+    fn test_build_server_config_rejects_sherpa_kind() {
+        let cfg = audiocpp_cfg(std::path::Path::new("/m")); // model_type 缺省 Zipvoice
+        let err = build_server_config(&cfg, 1).unwrap_err();
+        assert!(err.contains("不支持 audiocpp 后端"), "err: {err}");
+    }
+
     #[test]
     fn test_server_config_json_keys() {
         // 序列化键名与上游 example.json 对齐（schema 快照）
-        let cfg = audiocpp_cfg(std::path::Path::new("/m"));
-        let json = serde_json::to_value(build_server_config(&cfg, 1)).unwrap();
+        let mut cfg = audiocpp_cfg(std::path::Path::new("/m"));
+        cfg.model_type = crate::tts::config::TtsModelKind::Pocket;
+        let json = serde_json::to_value(build_server_config(&cfg, 1).unwrap()).unwrap();
         for key in ["host", "port", "backend", "threads", "lazy_load", "models"] {
             assert!(json.get(key).is_some(), "missing key: {key}");
         }
@@ -139,7 +171,8 @@ mod tests {
         crate::test_util::run_with_temp_home(|home| {
             crate::test_util::set_custom_data_dir(home);
             // 写入前 engines 目录不存在也能创建
-            let cfg = audiocpp_cfg(base.path());
+            let mut cfg = audiocpp_cfg(base.path());
+            cfg.model_type = crate::tts::config::TtsModelKind::Pocket;
             let path = write_server_config(&cfg, 19999).unwrap();
             assert!(path.is_file());
             let content = std::fs::read_to_string(&path).unwrap();

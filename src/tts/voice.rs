@@ -143,6 +143,55 @@ pub fn resolve_sid_voice(
     }
 }
 
+/// 合成音色参数的统一解析入口（backend + 模型族感知）。
+///
+/// 收敛此前散落 4 处（语音会话 / dsh 播报 / GUI 合成 / CLI speak）的同构
+/// 分支逻辑。三档语义：
+/// - 参考音频克隆（sherpa zipvoice / audiocpp omnivoice）：显式音色
+///   （`voice_id` > `cfg.voice`）或自定义 wav → `resolve_reference`；
+///   omnivoice 无任何音色时不回退模型包默认参考（包内无 test_wavs），
+///   返回 `Sid(0)`——client 侧省略音色字段，走 server auto voice；
+/// - audiocpp 固定具名音色族（pocket）：`Named(voice_id > cfg.voice > 族默认)`；
+/// - 其余（kokoro/vits/matcha/kitten）：`resolve_sid_voice`。
+pub fn resolve_voice_params(
+    cfg: &ResolvedTtsConfig,
+    voice_id: Option<&str>,
+    sid: Option<i32>,
+    custom_wav: Option<&Path>,
+    custom_text: Option<&str>,
+) -> Result<crate::tts::TtsVoiceParams, String> {
+    use crate::tts::TtsVoiceParams;
+    use crate::tts::config::TtsBackendKind;
+    if cfg.uses_reference_audio() {
+        let has_any = voice_id.is_some() || cfg.voice.is_some() || custom_wav.is_some();
+        if !has_any && cfg.backend == TtsBackendKind::Audiocpp {
+            // omnivoice 兜底：无音色 → auto voice（Sid(0) → client 省略音色字段）
+            return Ok(TtsVoiceParams::Sid(0));
+        }
+        let (wav, text) = resolve_reference(cfg, voice_id, custom_wav, custom_text)?;
+        Ok(TtsVoiceParams::Reference {
+            wav_path: wav,
+            reference_text: text,
+        })
+    } else if cfg.backend == TtsBackendKind::Audiocpp {
+        let desc = crate::audiocpp::families::family_desc(cfg.model_type)
+            .ok_or_else(|| format!("模型类型 {} 不支持 audiocpp 后端", cfg.model_type.as_str()))?;
+        let crate::audiocpp::families::VoiceSemantics::FixedNamed(default) = desc.voice_semantics
+        else {
+            // 克隆族已被 uses_reference_audio() 分支覆盖，此处防御
+            return Ok(TtsVoiceParams::Sid(0));
+        };
+        Ok(TtsVoiceParams::Named(
+            voice_id
+                .or(cfg.voice.as_deref())
+                .unwrap_or(default)
+                .to_string(),
+        ))
+    } else {
+        resolve_sid_voice(cfg, voice_id, sid)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -390,5 +439,66 @@ mod tests {
                 Ok(TtsVoiceParams::Sid(0))
             ));
         }
+    }
+
+    fn audiocpp_cfg(kind: crate::tts::config::TtsModelKind) -> ResolvedTtsConfig {
+        ResolvedTtsConfig {
+            backend: crate::tts::config::TtsBackendKind::Audiocpp,
+            model_type: kind,
+            ..ResolvedTtsConfig::default()
+        }
+    }
+
+    /// omnivoice（克隆族）：自定义音色库命中 → Reference；无任何音色 → Sid(0)
+    /// （client 省略音色字段走 auto voice，不回退模型包默认参考）。
+    #[test]
+    fn test_resolve_voice_params_omnivoice() {
+        crate::test_util::run_with_temp_home(|home| {
+            let src = home.join("src.wav");
+            std::fs::write(&src, sample_wav_bytes()).unwrap();
+            let v = crate::tts::voice_store::save_voice("我的声音", &src, "参考转写").unwrap();
+
+            let cfg = audiocpp_cfg(crate::tts::config::TtsModelKind::Omnivoice);
+            // 显式音色 id → Reference（voice_store 命中）
+            let out = resolve_voice_params(&cfg, Some(&v.id), None, None, None).unwrap();
+            let crate::tts::TtsVoiceParams::Reference { wav_path, .. } = out else {
+                panic!("应为 Reference: {out:?}");
+            };
+            assert_eq!(wav_path, v.wav_path);
+            // 自定义 wav + 转写 → Reference
+            let out =
+                resolve_voice_params(&cfg, None, None, Some(Path::new("/tmp/x.wav")), Some("t"))
+                    .unwrap();
+            assert!(matches!(out, crate::tts::TtsVoiceParams::Reference { .. }));
+            // 无任何音色 → Sid(0)（auto voice 语义）
+            let out = resolve_voice_params(&cfg, None, None, None, None).unwrap();
+            assert!(matches!(out, crate::tts::TtsVoiceParams::Sid(0)));
+        });
+    }
+
+    /// pocket（固定音色族）：voice_id/cfg.voice/族默认三级回退 → Named。
+    #[test]
+    fn test_resolve_voice_params_pocket() {
+        let cfg = audiocpp_cfg(crate::tts::config::TtsModelKind::Pocket);
+        let out = resolve_voice_params(&cfg, None, None, None, None).unwrap();
+        assert!(matches!(
+            out,
+            crate::tts::TtsVoiceParams::Named(ref v) if v == "alba"
+        ));
+        let out = resolve_voice_params(&cfg, Some("cosette"), None, None, None).unwrap();
+        assert!(matches!(
+            out,
+            crate::tts::TtsVoiceParams::Named(ref v) if v == "cosette"
+        ));
+    }
+
+    /// sherpa 族（zipvoice/kokoro）经由统一入口行为不变（旁路 sid/reference 解析）。
+    #[test]
+    fn test_resolve_voice_params_sherpa_passthrough() {
+        let cfg = ResolvedTtsConfig::default(); // zipvoice + sherpa
+        let out = resolve_voice_params(&cfg, None, None, None, None).unwrap();
+        assert!(matches!(out, crate::tts::TtsVoiceParams::Reference { .. }));
+        let out = resolve_voice_params(&kokoro_cfg(), Some("zf_099"), None, None, None).unwrap();
+        assert!(matches!(out, crate::tts::TtsVoiceParams::Sid(_)));
     }
 }

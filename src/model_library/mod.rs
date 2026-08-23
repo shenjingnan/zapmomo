@@ -468,6 +468,15 @@ pub fn restore_selected_model(mt: ModelType, old: Option<String>) -> Result<(), 
     })
 }
 
+/// 恢复 TTS 整段配置（热切换构造失败时的回滚）。比 [`restore_selected_model`]
+/// 的单字段恢复更完整：`set_selected_model` 切 TTS 时会同步写 model_type/backend、
+/// 清 voice/engine_path 与文件级覆盖，单恢复 model_dir 会留下半新半旧状态。
+pub fn restore_tts_settings(
+    old: Option<crate::config::settings::TtsSettings>,
+) -> Result<(), String> {
+    update_settings(|cfg| cfg.tts = old)
+}
+
 // ---------------------------------------------------------------------------
 // RuntimeStatus 纯函数（可单测，不依赖 runtime state）
 // ---------------------------------------------------------------------------
@@ -542,7 +551,8 @@ pub fn list_models() -> Vec<LibraryModel> {
     let sel = current_selections();
     let locals = get_local_models();
     let mut out = Vec::new();
-    for reg in registry::all_models() {
+    // 平台受限条目（如仅 Metal 平台的 omnivoice）在此过滤：不可见即不可下载
+    for reg in registry::models_for_current_platform() {
         out.push(build_registry_model(reg, &sel, &locals));
     }
     for lm in locals.iter().filter(|l| l.registry_id.is_none()) {
@@ -1642,6 +1652,17 @@ mod tests {
                 Some(crate::tts::config::TtsModelKind::Pocket)
             );
 
+            // omnivoice managed 目录 → backend = audiocpp + model_type = omnivoice
+            let omni = home.join("models/omnivoice-audiocpp");
+            set_selected_model(ModelType::Tts, &omni).unwrap();
+            let cfg = settings::load_settings().unwrap().unwrap();
+            let tts = cfg.tts.as_ref().expect("tts 段应存在");
+            assert_eq!(tts.backend.as_deref(), Some("audiocpp"));
+            assert_eq!(
+                tts.model_type,
+                Some(crate::tts::config::TtsModelKind::Omnivoice)
+            );
+
             // 切回 sherpa zipvoice → backend 复位缺省（None）
             let zip = home.join("models/sherpa-onnx-zipvoice-distill-int8-zh-en-emilia");
             set_selected_model(ModelType::Tts, &zip).unwrap();
@@ -1943,6 +1964,7 @@ mod tests {
             homepage: None,
             required_assets: vec!["wake-word".into()],
             optional_assets: Vec::new(),
+            platforms: None,
             download: None,
         }
     }
