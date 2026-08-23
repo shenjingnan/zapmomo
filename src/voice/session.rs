@@ -45,7 +45,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// 编排循环单次轮询麦克风的最长等待（块间隔远小于此，不影响实时性）。
 const MIC_POLL: Duration = Duration::from_millis(100);
@@ -121,6 +121,17 @@ pub struct VoiceSession {
     speech_wait_accum: f32,
     /// 欢迎语是否已播放（合成失败也置位，跳过欢迎不卡流程）
     welcome_played: bool,
+    /// 流式句「首块已消费」跟踪（见 [`SentencePlayGate`]）：首块弹
+    /// `pending_speech` 并发 `PlaySentence`，后续块沿用，零块句由终态补弹。
+    /// 非流式句不触碰（行为等价于 gate 恒 false）。
+    stream_gate: SentencePlayGate,
+    /// 首响打点（验收量化用；`start_reply` 重置、`do_barge_in` 清空）：
+    /// 唤醒 → 首句入队 → 首块播放，首次播放时打一条分段耗时日志
+    /// （`mark_first_audio`；非流式路径同样打点供 A/B 对比）。
+    t_wake: Option<Instant>,
+    t_reply_start: Option<Instant>,
+    t_first_sentence: Option<Instant>,
+    t_first_audio: Option<Instant>,
 }
 
 impl VoiceSession {
@@ -217,6 +228,11 @@ impl VoiceSession {
             speech_hits: 0,
             speech_wait_accum: 0.0,
             welcome_played: false,
+            stream_gate: SentencePlayGate::default(),
+            t_wake: None,
+            t_reply_start: None,
+            t_first_sentence: None,
+            t_first_audio: None,
         })
     }
 
@@ -373,6 +389,8 @@ impl VoiceSession {
         let _ = self.kws.detect(&self.kws_stream, &mut reaction);
         if let Some(keyword) = reaction.keyword {
             (self.emit)(VoiceEvent::Wake { keyword });
+            // 首响打点：唤醒时刻（含欢迎语流程；回复轮的起点在 start_reply）
+            self.t_wake = Some(Instant::now());
             // 唤醒 → 合成并播放欢迎语（复用 SynthHandle；进入 Greeting 等结果）
             self.synth.clear_cancel();
             self.synth
@@ -400,6 +418,22 @@ impl VoiceSession {
                 } => {
                     if gen_id == self.current_gen {
                         self.speaker.play(samples, sample_rate);
+                        self.welcome_played = true;
+                    }
+                }
+                // 流式欢迎语：逐块播放；welcome_played 只在**终态**置位——
+                // 块间空窗 rodio drained() 可能瞬时为 true，首块置位会误迁移
+                SynthResult::StreamChunk {
+                    gen_id,
+                    samples,
+                    sample_rate,
+                } => {
+                    if gen_id == self.current_gen {
+                        self.speaker.play(samples, sample_rate);
+                    }
+                }
+                SynthResult::StreamDone { gen_id } => {
+                    if gen_id == self.current_gen {
                         self.welcome_played = true;
                     }
                 }
@@ -533,6 +567,11 @@ impl VoiceSession {
         self.synth_enqueued = 0;
         self.synth_consumed = 0;
         self.pending_speech.clear();
+        self.stream_gate = SentencePlayGate::default();
+        // 首响打点：本轮生成起点；首句/首块待入队与播放时置位
+        self.t_reply_start = Some(Instant::now());
+        self.t_first_sentence = None;
+        self.t_first_audio = None;
         self.synth.clear_cancel();
     }
 
@@ -544,6 +583,9 @@ impl VoiceSession {
         self.pending_speech.push_back(sentence.clone());
         self.synth.enqueue(sentence, self.current_gen);
         self.synth_enqueued += 1;
+        if self.t_first_sentence.is_none() {
+            self.t_first_sentence = Some(Instant::now());
+        }
     }
 
     /// 消费 LLM 事件流：Token 切句入队合成 / `Finished` 置位 / 错误转发。
@@ -619,11 +661,14 @@ impl VoiceSession {
     }
 
     /// Speaking：喂 KWS（打断监听）+ 消费 LLM 事件（晚到的 token/Finished）+ 按序播放，播完回听。
+    ///
+    /// 消费计数只计**当前 gen 的终态**（Done/StreamDone/Error）：流式分块不计，
+    /// 过期结果（打断后迟到，流式下取消延迟 = chunk 边界）不计数——否则迟到
+    /// 终态会把 `synth_consumed` 抬到 `synth_enqueued` 之上，完成判定永不成立。
     fn step_speaking(&mut self) -> Result<(), String> {
         self.listen_barge_in()?;
         self.poll_llm_events()?;
         while let Some(result) = self.synth.try_recv() {
-            self.synth_consumed += 1;
             match result {
                 SynthResult::Done {
                     gen_id,
@@ -631,18 +676,50 @@ impl VoiceSession {
                     sample_rate,
                 } => {
                     if gen_id == self.current_gen {
+                        self.synth_consumed += 1;
                         // 弹出与入队顺序对应的句子文本（播放状态展示）
                         let text = self.pending_speech.pop_front().unwrap_or_default();
                         (self.emit)(VoiceEvent::PlaySentence {
                             sentence: text.clone(),
                         });
                         self.speaker.play(samples, sample_rate);
+                        self.mark_first_audio(false);
                     }
                     // 过期结果（打断后迟到）直接丢弃
                 }
+                // 流式分块：首块弹 pending_speech + 发 PlaySentence（gate 保证每句
+                // 恰一次），后续块沿用直接追加播放（rodio append 按序）
+                SynthResult::StreamChunk {
+                    gen_id,
+                    samples,
+                    sample_rate,
+                } => {
+                    if gen_id == self.current_gen {
+                        if self.stream_gate.on_stream_chunk() {
+                            let text = self.pending_speech.pop_front().unwrap_or_default();
+                            (self.emit)(VoiceEvent::PlaySentence { sentence: text });
+                        }
+                        self.speaker.play(samples, sample_rate);
+                        self.mark_first_audio(true);
+                    }
+                }
+                SynthResult::StreamDone { gen_id } => {
+                    if gen_id == self.current_gen {
+                        self.synth_consumed += 1;
+                        // 零块句（空流）：终态补弹保持 pending_speech 对齐（静默，
+                        // 不发 PlaySentence——没有可播内容）
+                        if self.stream_gate.on_terminal() {
+                            self.pending_speech.pop_front();
+                        }
+                    }
+                }
                 SynthResult::Error { gen_id, message } => {
                     if gen_id == self.current_gen {
-                        self.pending_speech.pop_front();
+                        self.synth_consumed += 1;
+                        // 已播过块的句子 gate 已弹过；零块句补弹对齐
+                        if self.stream_gate.on_terminal() {
+                            self.pending_speech.pop_front();
+                        }
                         (self.emit)(VoiceEvent::Error {
                             kind: ErrorKind::Synth,
                             message,
@@ -703,9 +780,14 @@ impl VoiceSession {
         self.reply_done = false;
         self.first_sentence = false;
         self.pending_speech.clear();
+        self.stream_gate = SentencePlayGate::default();
         self.synth.cancel_all();
         self.synth_enqueued = 0;
         self.synth_consumed = 0;
+        self.t_wake = None;
+        self.t_reply_start = None;
+        self.t_first_sentence = None;
+        self.t_first_audio = None;
         self.barge_in.store(false, Ordering::Relaxed);
         if let Err(e) = self.set_state(SessionEvent::BargeIn) {
             (self.emit)(VoiceEvent::Error {
@@ -714,6 +796,57 @@ impl VoiceSession {
             });
         }
         self.mic.skip_for(SKIP_AFTER_BARGE_IN);
+    }
+
+    /// 首次播放打点（一轮回复只打一次）：输出 唤醒→首句 / 生成→首句 /
+    /// 首句→首块 三段耗时。`streamed` 标记流式/整段（A/B 验收对照）。
+    fn mark_first_audio(&mut self, streamed: bool) {
+        if self.t_first_audio.is_some() {
+            return; // 只打首轮首块（后续句/块不再打）
+        }
+        self.t_first_audio = Some(Instant::now());
+        let ms = |a: Option<Instant>, b: Option<Instant>| {
+            a.zip(b)
+                .map(|(a, b)| format!("{}ms", b.duration_since(a).as_millis()))
+                .unwrap_or_else(|| "-".to_string())
+        };
+        tracing::info!(
+            "[voice] 首响打点：唤醒→首句 {} 生成→首句 {} 首句→首块 {}（{}）",
+            ms(self.t_wake, self.t_first_sentence),
+            ms(self.t_reply_start, self.t_first_sentence),
+            ms(self.t_first_sentence, self.t_first_audio),
+            if streamed { "流式" } else { "整段" }
+        );
+    }
+}
+
+/// 流式句「首块已消费」跟踪（纯逻辑，可单测）。
+///
+/// 不变量：`pending_speech` 每句恰弹一次——首块弹（并发 `PlaySentence`），
+/// 零块句（空流）由终态补弹；终态（`StreamDone`/`Error`）后复位，下一句重新
+/// 起算。非流式句不触碰本类型（`Done` 直接弹，行为等价于 gate 恒 false）。
+#[derive(Default, Debug)]
+struct SentencePlayGate {
+    started: bool,
+}
+
+impl SentencePlayGate {
+    /// 流式分块到达：首块返回 true（调用方弹 pending_speech + 发 PlaySentence），
+    /// 后续块返回 false。
+    fn on_stream_chunk(&mut self) -> bool {
+        if self.started {
+            false
+        } else {
+            self.started = true;
+            true
+        }
+    }
+
+    /// 终态到达：返回「是否尚未弹过」（零块句需补弹），并复位供下一句。
+    fn on_terminal(&mut self) -> bool {
+        let pending = !self.started;
+        self.started = false;
+        pending
     }
 }
 
@@ -1149,5 +1282,44 @@ mod tests {
         assert!((chunk_rms(&sine) - 0.7071).abs() < 0.01);
         // 幅度更大 → RMS 更大（用于阈值门控判断）
         assert!(chunk_rms(&[0.9, 0.9]) > chunk_rms(&[0.1, 0.1]));
+    }
+
+    // ---------- SentencePlayGate：pending_speech 每句恰弹一次的不变量 ----------
+
+    #[test]
+    fn test_gate_first_chunk_then_subsequent() {
+        let mut gate = SentencePlayGate::default();
+        assert!(gate.on_stream_chunk(), "首块应触发弹句");
+        assert!(!gate.on_stream_chunk(), "后续块不再触发");
+        assert!(!gate.on_stream_chunk());
+    }
+
+    #[test]
+    fn test_gate_terminal_resets_for_next_sentence() {
+        let mut gate = SentencePlayGate::default();
+        gate.on_stream_chunk();
+        assert!(!gate.on_terminal(), "已弹过的句终态不补弹");
+        // 复位后下一句首块重新触发
+        assert!(gate.on_stream_chunk(), "终态复位后下一句首块生效");
+    }
+
+    #[test]
+    fn test_gate_zero_chunk_sentence_needs_pop() {
+        let mut gate = SentencePlayGate::default();
+        assert!(
+            gate.on_terminal(),
+            "零块句（空流）终态需补弹保持 pending_speech 对齐"
+        );
+        // 注：不 assert 二次 on_terminal 为 false——「每句恰一个终态」由合成线程
+        // 协议保证，gate 只跟踪首块；双终态序列不存在，无需防御。
+    }
+
+    #[test]
+    fn test_gate_terminal_after_no_chunks_next_sentence_first_chunk() {
+        // 序列：句 1 零块终态（补弹）→ 句 2 首块（应触发）
+        let mut gate = SentencePlayGate::default();
+        assert!(gate.on_terminal());
+        assert!(gate.on_stream_chunk(), "句 2 首块在句 1 补弹复位后正常触发");
+        assert!(matches!(gate.on_terminal(), false));
     }
 }

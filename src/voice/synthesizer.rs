@@ -14,6 +14,13 @@
 /// 中断**切换（TTS 模型切换不杀会话、不打断正在合成的句子，见
 /// `session::refresh_tts_if_switched`）。旧引擎在替换处 drop（sherpa 释放内存 /
 /// audiocpp 释放 server 租约）。
+///
+/// 流式合成：`supports_streaming()` 的引擎（audiocpp 流式族）在 `Synthesize`
+/// 处理时改走 `synthesize_streaming`，逐块发 [`SynthResult::StreamChunk`]、句末
+/// 发 [`SynthResult::StreamDone`] 终态（「每句恰一个终态」协议与 `Done`/`Error`
+/// 同地位）。发送闭包双查 cancel 与结果通道 send：任一失败即停止读取 SSE
+/// （协作取消，取消延迟 = chunk 边界，修复 audiocpp 在途 HTTP 不可中断的缺陷）。
+/// 协作取消与正常完成统一补终态，打断后由编排线程按 gen_id 丢弃。
 use crate::tts::{TtsEngine, TtsVoiceParams};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -36,11 +43,26 @@ enum SynthCommand {
 }
 
 /// 合成结果（成功或失败，均带 `gen_id` 供编排线程做过期丢弃）。
+///
+/// 协议：每个 `Synthesize` 命令**恰一个终态**（`Done`/`StreamDone`/`Error`）；
+/// 流式路径在终态前可发任意多个 [`SynthResult::StreamChunk`]（同句内严格有序，
+/// 不计入编排线程的消费计数）。
+#[derive(Debug)]
 pub enum SynthResult {
     Done {
         gen_id: u64,
         samples: Vec<f32>,
         sample_rate: u32,
+    },
+    /// 流式分块（块序即播放序；样本已应用语速，按 `sample_rate` 播放）
+    StreamChunk {
+        gen_id: u64,
+        samples: Vec<f32>,
+        sample_rate: u32,
+    },
+    /// 流式终态（句内全部分块已发完；对齐 `Done` 的地位）
+    StreamDone {
+        gen_id: u64,
     },
     Error {
         gen_id: u64,
@@ -81,23 +103,52 @@ impl SynthHandle {
                                 });
                                 continue;
                             }
-                            // progress 回调返回 false 可提前终止当前句（打断时减少无用计算）；
-                            // 闭包需 'static，clone 一份 cancel 标志再 move。
-                            let progress_cancel = cancel_clone.clone();
-                            let result =
-                                tts.synthesize_with_progress(&text, speed, &voice, move |_p| {
-                                    !progress_cancel.load(Ordering::Relaxed)
-                                });
-                            // 采样率每次合成后读引擎现值：热切换后随引擎变化，且
-                            // audiocpp 首响应校准值（client 按响应 wav 头 set）能传回
-                            // 播放侧（此前 spawn 前一次性捕获，采样率≠初始值时是真缺陷）
-                            let payload = match result {
-                                Ok(samples) => SynthResult::Done {
-                                    gen_id,
-                                    samples,
-                                    sample_rate: tts.sample_rate() as u32,
-                                },
-                                Err(e) => SynthResult::Error { gen_id, message: e },
+                            let payload = if tts.supports_streaming() {
+                                // 流式路径：闭包双查 cancel（打断）与 send（会话退出
+                                // rx drop）——任一失败即停止读取 SSE（取消延迟 =
+                                // chunk 边界）；正常完成与协作取消统一补终态，
+                                // 打断后由编排线程按 gen_id 丢弃
+                                let chunk_cancel = cancel_clone.clone();
+                                let chunk_tx = done_tx.clone();
+                                match tts.synthesize_streaming(
+                                    &text,
+                                    speed,
+                                    &voice,
+                                    &mut |samples, rate| {
+                                        if chunk_cancel.load(Ordering::Relaxed) {
+                                            return false;
+                                        }
+                                        chunk_tx
+                                            .send(SynthResult::StreamChunk {
+                                                gen_id,
+                                                samples: samples.to_vec(),
+                                                sample_rate: rate as u32,
+                                            })
+                                            .is_ok()
+                                    },
+                                ) {
+                                    Ok(()) => SynthResult::StreamDone { gen_id },
+                                    Err(e) => SynthResult::Error { gen_id, message: e },
+                                }
+                            } else {
+                                // progress 回调返回 false 可提前终止当前句（打断时减少
+                                // 无用计算）；闭包需 'static，clone 一份 cancel 再 move。
+                                let progress_cancel = cancel_clone.clone();
+                                let result =
+                                    tts.synthesize_with_progress(&text, speed, &voice, move |_p| {
+                                        !progress_cancel.load(Ordering::Relaxed)
+                                    });
+                                // 采样率每次合成后读引擎现值：热切换后随引擎变化，且
+                                // audiocpp 首响应校准值（client 按响应 wav 头 set）能
+                                // 传回播放侧（此前 spawn 前一次性捕获是真缺陷）
+                                match result {
+                                    Ok(samples) => SynthResult::Done {
+                                        gen_id,
+                                        samples,
+                                        sample_rate: tts.sample_rate() as u32,
+                                    },
+                                    Err(e) => SynthResult::Error { gen_id, message: e },
+                                }
                             };
                             let _ = done_tx.send(payload);
                         }
@@ -235,6 +286,10 @@ mod tests {
                             got.push((gen_id, samples.len(), sample_rate));
                         }
                         SynthResult::Error { message, .. } => panic!("不应失败: {message}"),
+                        // 假合成（非流式）不会产生流式结果；防回归的守卫臂
+                        SynthResult::StreamChunk { .. } | SynthResult::StreamDone { .. } => {
+                            panic!("假合成不应产生流式结果")
+                        }
                     }
                     break;
                 }
@@ -386,5 +441,252 @@ mod tests {
         drop(swap);
         // take 后为空（不重复消费）
         assert!(slot.lock().unwrap().take().is_none());
+    }
+
+    // ---------- 流式：tiny_http 延迟 SSE stub + 真实 audiocpp 引擎 ----------
+
+    /// 逐事件延迟推送的 SSE body：每次 read 前 sleep，模拟真实流的分块到达节奏。
+    /// 一次性全量 body 会让 cancel 测试失去确定性（读取方永远赶不上取消时刻）。
+    struct DelayedSseBody {
+        events: std::vec::IntoIter<Vec<u8>>,
+        current: Vec<u8>,
+        pos: usize,
+        delay: std::time::Duration,
+    }
+
+    impl std::io::Read for DelayedSseBody {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.pos >= self.current.len() {
+                match self.events.next() {
+                    Some(ev) => {
+                        std::thread::sleep(self.delay);
+                        self.current = ev;
+                        self.pos = 0;
+                    }
+                    None => return Ok(0), // EOF：流结束
+                }
+            }
+            let n = buf.len().min(self.current.len() - self.pos);
+            buf[..n].copy_from_slice(&self.current[self.pos..self.pos + n]);
+            self.pos += n;
+            Ok(n)
+        }
+    }
+
+    /// 构造 n 条 delta 事件 + done + [DONE]（每条 i16_count 个 i16 样本）。
+    fn sse_events(n: usize, i16_count: usize) -> Vec<Vec<u8>> {
+        use base64::Engine as _;
+        let mut events = Vec::new();
+        for _ in 0..n {
+            let pcm: Vec<u8> = std::iter::repeat_n([0x10u8, 0x27], i16_count)
+                .flatten()
+                .collect();
+            let b64 = base64::engine::general_purpose::STANDARD.encode(pcm);
+            events.push(
+                format!(
+                    "data: {}\n\n",
+                    serde_json::json!({"type": "speech.audio.delta", "audio": b64})
+                )
+                .into_bytes(),
+            );
+        }
+        events.push(b"data: {\"type\":\"speech.audio.done\"}\n\ndata: [DONE]\n\n".to_vec());
+        events
+    }
+
+    /// 起延迟 SSE stub（omnivoice 流式引擎的依赖）：逐事件间隔 `delay` 推送。
+    fn spawn_stub_sse_incremental(events: Vec<Vec<u8>>, delay: std::time::Duration) -> String {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let port = match server.server_addr() {
+            tiny_http::ListenAddr::IP(addr) => addr.port(),
+            #[cfg(unix)]
+            tiny_http::ListenAddr::Unix(_) => unreachable!("显式绑定 127.0.0.1"),
+        };
+        std::thread::spawn(move || {
+            for mut request in server.incoming_requests() {
+                let mut body = String::new();
+                let _ = std::io::Read::read_to_string(request.as_reader(), &mut body);
+                let header =
+                    tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/event-stream"[..])
+                        .unwrap();
+                let reader = DelayedSseBody {
+                    events: events.clone().into_iter(),
+                    current: Vec::new(),
+                    pos: 0,
+                    delay,
+                };
+                let _ = request.respond(tiny_http::Response::new(
+                    tiny_http::StatusCode(200),
+                    vec![header],
+                    reader,
+                    None,
+                    None,
+                ));
+            }
+        });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    /// omnivoice（流式族）真实引擎，直连 SSE stub。
+    fn stub_streaming_engine(base_url: &str) -> TtsEngine {
+        let cfg = crate::tts::config::ResolvedTtsConfig {
+            backend: crate::tts::config::TtsBackendKind::Audiocpp,
+            model_type: crate::tts::config::TtsModelKind::Omnivoice,
+            ..crate::tts::config::ResolvedTtsConfig::default()
+        };
+        TtsEngine::from_audiocpp_for_test(crate::audiocpp::client::AudiocppTts::new_with_base_url(
+            cfg, base_url,
+        ))
+    }
+
+    /// 收集结果直到拿到终态（Done/StreamDone/Error）或超时。
+    fn recv_until_terminal(h: &SynthHandle) -> Vec<SynthResult> {
+        let mut out = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if let Some(r) = h.try_recv() {
+                let terminal = matches!(
+                    r,
+                    SynthResult::Done { .. }
+                        | SynthResult::StreamDone { .. }
+                        | SynthResult::Error { .. }
+                );
+                out.push(r);
+                if terminal {
+                    break;
+                }
+            } else {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        }
+        out
+    }
+
+    /// 流式序列协议：[Chunk, Chunk, StreamDone] 严格同序同 gen_id。
+    #[test]
+    fn test_streaming_chunk_sequence_and_terminal() {
+        let url = spawn_stub_sse_incremental(sse_events(2, 240), std::time::Duration::ZERO);
+        let h = SynthHandle::new(
+            stub_streaming_engine(&url),
+            crate::tts::TtsVoiceParams::Sid(0),
+            1.0,
+        );
+        h.enqueue("一句话".to_string(), 7);
+
+        let results = recv_until_terminal(&h);
+        assert_eq!(results.len(), 3, "两块 + 终态: {results:?}");
+        assert!(matches!(
+            (&results[0], &results[1], &results[2]),
+            (
+                SynthResult::StreamChunk {
+                    gen_id: 7,
+                    sample_rate: 24_000,
+                    ..
+                },
+                SynthResult::StreamChunk { gen_id: 7, .. },
+                SynthResult::StreamDone { gen_id: 7 },
+            )
+        ));
+        // 块样本数按事件载荷（每事件 240 个 i16）
+        if let SynthResult::StreamChunk { samples, .. } = &results[0] {
+            assert_eq!(samples.len(), 240);
+        }
+    }
+
+    /// 热切换在流式下成立：句 1 流式（Chunk/StreamDone）→ swap → 句 2 整段（Done）。
+    /// 混合序列是 PR #162 句间零中断能力对流式路径的守卫。
+    #[test]
+    fn test_streaming_swap_engine_between_sentences() {
+        let url_sse = spawn_stub_sse_incremental(sse_events(1, 100), std::time::Duration::ZERO);
+        let url_wav = spawn_stub_wav(24_000);
+        let h = SynthHandle::new(
+            stub_streaming_engine(&url_sse),
+            crate::tts::TtsVoiceParams::Sid(0),
+            1.0,
+        );
+        h.enqueue("流式句".to_string(), 1);
+        let first = recv_until_terminal(&h);
+        assert_eq!(first.len(), 2, "一块 + 终态");
+        assert!(matches!(first[0], SynthResult::StreamChunk { .. }));
+        assert!(matches!(first[1], SynthResult::StreamDone { gen_id: 1 }));
+
+        h.swap_engine(stub_engine(&url_wav), crate::tts::TtsVoiceParams::Sid(0));
+        h.enqueue("整段句".to_string(), 1);
+        let second = recv_until_terminal(&h);
+        assert_eq!(second.len(), 1, "非流式句恰一个终态");
+        assert!(matches!(
+            second[0],
+            SynthResult::Done {
+                sample_rate: 24_000,
+                ..
+            }
+        ));
+    }
+
+    /// 流式中途取消：20 事件 ×100ms（全量 ~2s）；首块后 cancel_all →
+    /// 终态在下一 chunk 边界（≤1s）到达且分块数远小于全量。
+    #[test]
+    fn test_streaming_cancel_mid_sentence_stops_chunks() {
+        let url =
+            spawn_stub_sse_incremental(sse_events(20, 240), std::time::Duration::from_millis(100));
+        let h = SynthHandle::new(
+            stub_streaming_engine(&url),
+            crate::tts::TtsVoiceParams::Sid(0),
+            1.0,
+        );
+        h.enqueue("长句".to_string(), 1);
+
+        // 等首块到达再取消（保证取消发生在流中途而非流前置检查）
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if matches!(h.try_recv(), Some(SynthResult::StreamChunk { .. })) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        h.cancel_all();
+
+        let cancel_at = std::time::Instant::now();
+        let results = recv_until_terminal(&h);
+        let elapsed = cancel_at.elapsed();
+        assert!(!results.is_empty(), "取消后应仍有终态到达");
+        let chunks = results
+            .iter()
+            .filter(|r| matches!(r, SynthResult::StreamChunk { .. }))
+            .count();
+        assert!(chunks < 20, "取消后不应收完全量分块（got {chunks}）");
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "终态应在下一 chunk 边界到达（{elapsed:?}）"
+        );
+    }
+
+    /// 会话退出（drop 句柄 → rx drop → send 失败）在流在途时中止读取，
+    /// Drop 的 join 不挂起（无泄漏）。
+    #[test]
+    fn test_drop_during_streaming_joins_quickly() {
+        let url =
+            spawn_stub_sse_incremental(sse_events(20, 240), std::time::Duration::from_millis(100));
+        let h = SynthHandle::new(
+            stub_streaming_engine(&url),
+            crate::tts::TtsVoiceParams::Sid(0),
+            1.0,
+        );
+        h.enqueue("长句".to_string(), 1);
+        // 等首块确认流已建立
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if matches!(h.try_recv(), Some(SynthResult::StreamChunk { .. })) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let drop_at = std::time::Instant::now();
+        drop(h); // Shutdown + join；线程应在下一 chunk 边界（send 失败）退出
+        assert!(
+            drop_at.elapsed() < std::time::Duration::from_secs(2),
+            "drop 应快速返回（{}ms），全量流需 ~2s",
+            drop_at.elapsed().as_millis()
+        );
     }
 }
