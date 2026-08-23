@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { groupKokoroVoices, ttsModelKindLabel } from "./ttsMeta";
+import { TTS_PRESETS } from "@/hooks/useTtsModelSwitch";
 import type { TtsVoice } from "@/types/tauri";
 
 function kv(id: string, group: TtsVoice["group"], sid: number | null): TtsVoice {
@@ -11,6 +12,24 @@ describe("ttsModelKindLabel", () => {
     expect(ttsModelKindLabel("kokoro")).toBe("Kokoro");
     expect(ttsModelKindLabel("zipvoice")).toBe("ZipVoice 克隆");
     expect(ttsModelKindLabel("unknown")).toBe("TTS");
+  });
+
+  it("omnivoice 有专属标签（克隆族）", () => {
+    expect(ttsModelKindLabel("omnivoice")).toBe("OmniVoice 克隆");
+    expect(ttsModelKindLabel("pocket")).toBe("PocketTTS");
+  });
+});
+
+describe("TTS_PRESETS", () => {
+  it("含 omnivoice 条目且 id 与后端 registry 一致", () => {
+    const omni = TTS_PRESETS.find((p) => p.id === "tts-omnivoice-q8-audiocpp");
+    expect(omni).toBeDefined();
+    expect(omni?.kind).toBe("omnivoice");
+  });
+
+  it("id 唯一（防预设重复注册）", () => {
+    const ids = TTS_PRESETS.map((p) => p.id);
+    expect(new Set(ids).size).toBe(ids.length);
   });
 });
 

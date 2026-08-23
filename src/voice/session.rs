@@ -56,6 +56,24 @@ const SKIP_AFTER_REPLY: Duration = Duration::from_millis(300);
 /// LLM 模型加载超时（首次加载大模型较慢）。
 const LLM_LOAD_TIMEOUT: Duration = Duration::from_secs(180);
 
+/// 待换 TTS 引擎包裹：写方（`set_current_model` 的 TTS 事务臂）在 `spawn_blocking`
+/// 里构造新引擎后塞入 [`TtsSwapSlot`] 邮箱，会话编排循环每轮开头取走并**句间**
+/// 换入合成线程（`SynthHandle::swap_engine`，当前句不打断）。
+///
+/// 与 LLM 共享槽（`Arc<LlmEngine>` + ptr_eq 比较）的关键差异：`TtsEngine` 仅保证
+/// `Send`（sherpa `OfflineTts` 无 `Sync` 保证），不能跨线程共享引用，只能**转移
+/// 所有权**（邮箱 take 语义）；且引擎必须替换进合成线程（按值拥有），而非编排
+/// 线程重绑定。`cfg` 随行，供会话侧用**会话语境**（voice_id）解析新音色。
+pub struct TtsSwap {
+    pub engine: TtsEngine,
+    pub cfg: crate::tts::config::ResolvedTtsConfig,
+    /// 写方代际（连续切换防旧覆盖新 + 日志追溯）。
+    pub generation: u64,
+}
+
+/// TTS 热切换邮箱（宿主 `VoiceSessionState` 与会话各持一份 Arc）。
+pub type TtsSwapSlot = Arc<Mutex<Option<TtsSwap>>>;
+
 /// 语音会话编排器。
 pub struct VoiceSession {
     cfg: ResolvedSessionConfig,
@@ -69,6 +87,9 @@ pub struct VoiceSession {
     /// load），会话在每次编排循环开头检查槽内引擎是否变化并重新绑定，从而感知新模型。
     /// `None` = CLI 自建引擎，不感知外部切换。
     llm_slot: Option<Arc<Mutex<Option<Arc<LlmEngine>>>>>,
+    /// TTS 热切换邮箱（见 [`TtsSwap`]）：宿主（Tauri VoiceSessionState）持有的待换
+    /// 引擎，编排循环每轮开头取走并句间换入。`None` = CLI，不感知外部切换。
+    tts_swap_slot: Option<TtsSwapSlot>,
     speaker: Box<dyn AudioPlayer>,
     synth: SynthHandle,
     mic: MicLoop,
@@ -110,6 +131,7 @@ impl VoiceSession {
             Box::new(crate::voice::events::cli_sink),
             Arc::new(AtomicBool::new(true)),
             None,
+            None,
         )
     }
 
@@ -119,6 +141,8 @@ impl VoiceSession {
     ///
     /// - `llm_slot`：`Some` 复用宿主（Tauri `LlmState`）的共享引擎槽（**只加载一份模型**），
     ///   运行时引擎被外部切换时会动态感知并重新绑定；`None` 自建（CLI `voice run`）。
+    /// - `tts_swap_slot`：`Some` 接宿主（Tauri `VoiceSessionState`）的 TTS 热切换邮箱，
+    ///   运行中切 TTS 模型时句间换引擎（见 [`TtsSwap`]）；`None` 不感知（CLI）。
     /// - **说完判定由 session 内 RMS 静音统一控制**，因此这里强制禁用 sherpa endpoint
     ///   （避免其 rule1/rule2 的 1.2s/2.4s 尾静音在期望的 3s 前提前断句并 reset 流）。
     pub fn new_with_parts(
@@ -126,6 +150,7 @@ impl VoiceSession {
         emit: Box<dyn Fn(VoiceEvent) + Send>,
         running: Arc<AtomicBool>,
         llm_slot: Option<Arc<Mutex<Option<Arc<LlmEngine>>>>>,
+        tts_swap_slot: Option<TtsSwapSlot>,
     ) -> Result<Self, String> {
         cfg.asr.enable_endpoint = false;
         let kws = KwsEngine::new(cfg.kws.clone())?;
@@ -146,29 +171,14 @@ impl VoiceSession {
         };
         let llm_rx = llm.subscribe();
         let tts = TtsEngine::new(cfg.tts.clone())?;
-        // 合成参数：sherpa ZipVoice 走参考音频克隆（自定义音色 > 内置音色 > 配置默认）；
-        // sid 模型（Kokoro 等）按音色名解析说话人（配置默认 > 模型默认）；
-        // audiocpp（PocketTTS）走具名音色
-        let voice = if cfg.tts.uses_reference_audio() {
-            let (ref_wav, ref_text) = crate::tts::voice::resolve_reference(
-                &cfg.tts,
-                cfg.voice_id.as_deref(),
-                None,
-                None,
-            )?;
-            crate::tts::TtsVoiceParams::Reference {
-                wav_path: ref_wav,
-                reference_text: ref_text,
-            }
-        } else if cfg.tts.backend == crate::tts::config::TtsBackendKind::Audiocpp {
-            crate::tts::TtsVoiceParams::Named(
-                cfg.voice_id
-                    .clone()
-                    .unwrap_or_else(|| crate::audiocpp::DEFAULT_VOICE.to_string()),
-            )
-        } else {
-            crate::tts::voice::resolve_sid_voice(&cfg.tts, cfg.voice_id.as_deref(), None)?
-        };
+        // 合成音色参数统一解析（zipvoice/omnivoice 克隆 > kokoro 等 sid > audiocpp 具名）
+        let voice = crate::tts::voice::resolve_voice_params(
+            &cfg.tts,
+            cfg.voice_id.as_deref(),
+            None,
+            None,
+            None,
+        )?;
         let synth = SynthHandle::new(tts, voice, cfg.speed);
         let mic = MicLoop::new(
             cfg.mic_device.as_deref(),
@@ -185,6 +195,7 @@ impl VoiceSession {
             llm,
             llm_rx,
             llm_slot,
+            tts_swap_slot,
             speaker,
             synth,
             mic,
@@ -245,6 +256,8 @@ impl VoiceSession {
             // 共享引擎可能被外部切换（set_current_model / load）：每轮开头检查并重新绑定，
             // 使 voice 在空闲（待唤醒）时也能跟随用户切换的模型
             self.refresh_llm_if_switched()?;
+            // TTS 热切换（set_current_model TTS 事务臂塞邮箱）：句间换入合成线程
+            self.refresh_tts_if_switched();
             // 打断优先于状态推进
             if self.barge_in.load(Ordering::Relaxed)
                 && matches!(self.state, SessionState::Thinking | SessionState::Speaking)
@@ -292,6 +305,36 @@ impl VoiceSession {
         }
         tracing::info!("语音会话已切换到新 LLM 引擎");
         Ok(())
+    }
+
+    /// TTS 热切换感知：取走邮箱中的新引擎（[`TtsSwap`]），用**会话语境**（voice_id）
+    /// 解析新音色后句间换入合成线程。当前在途句子用旧引擎完成（零中断），后续句
+    /// 全部用新引擎。音色解析失败时兜底 `Sid(0)` 并告警（引擎仍换入；Sid 对克隆族
+    /// 是 auto voice、对固定音色族是默认音色，均为可用语义）。语速沿用会话构造值
+    /// （`set_tts_params` 的语速调整属于下一会话；避免句间变速跳变）。
+    fn refresh_tts_if_switched(&mut self) {
+        let Some(slot) = &self.tts_swap_slot else {
+            return;
+        };
+        let swap = slot.lock().ok().and_then(|mut guard| guard.take());
+        let Some(swap) = swap else {
+            return;
+        };
+        let voice = crate::tts::voice::resolve_voice_params(
+            &swap.cfg,
+            self.cfg.voice_id.as_deref(),
+            None,
+            None,
+            None,
+        )
+        .unwrap_or_else(|e| {
+            tracing::warn!("TTS 热切换音色解析失败（兜底 sid 0）：{e}");
+            crate::tts::TtsVoiceParams::Sid(0)
+        });
+        // 会话 cfg 快照同步（供后续读取一致；speed 由 SynthHandle 线程持有不变）
+        self.cfg.tts = swap.cfg;
+        tracing::info!("语音会话 TTS 热切换生效（gen {}）", swap.generation);
+        self.synth.swap_engine(swap.engine, voice);
     }
 
     /// 状态迁移 + 进入特定状态时复位对应累计器（ASR 流重建 / 等待计时清零）。

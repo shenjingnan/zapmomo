@@ -54,6 +54,14 @@ export const TTS_PRESETS = [
     tagline: "audio.cpp 引擎 · 固定音色 alba · 24kHz",
     sizeBytes: 127_856_704,
   },
+  {
+    id: "tts-omnivoice-q8-audiocpp",
+    name: "OmniVoice 多语种克隆",
+    kind: "omnivoice",
+    languages: "多语种",
+    tagline: "audio.cpp 引擎 · 声音克隆 · 600+ 语种 · 24kHz · 仅 Apple Silicon（Metal）",
+    sizeBytes: 1_350_288_416,
+  },
 ] as const;
 
 export interface TtsModelSwitchState {

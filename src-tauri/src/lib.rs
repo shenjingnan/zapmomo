@@ -122,6 +122,10 @@ struct VoiceSessionState {
     /// 当前会话的打断标志：会话线程创建 session 后写入，线程退出时清空。
     /// 全局快捷键「打断播报」置位 → 会话循环 `do_barge_in`（停生成/合成/播放，回 Armed）。
     barge_in: Mutex<Option<Arc<AtomicBool>>>,
+    /// 当前会话的 TTS 热切换邮箱：会话线程创建前写入，线程退出时清空（与 barge_in
+    /// 同款登记模式）。`set_current_model` TTS 事务臂把新引擎塞入邮箱，会话每轮
+    /// 循环开头取走并句间换入合成线程（`zapmomo::voice::TtsSwap`）。
+    tts_swap: Mutex<Option<zapmomo::voice::TtsSwapSlot>>,
 }
 
 impl VoiceSessionState {
@@ -130,6 +134,7 @@ impl VoiceSessionState {
             running: Arc::new(AtomicBool::new(false)),
             handle: Mutex::new(None),
             barge_in: Mutex::new(None),
+            tts_swap: Mutex::new(None),
         }
     }
 
@@ -1167,8 +1172,9 @@ fn synthesize_inner(
     Ok(())
 }
 
-/// 列出可用音色：ZipVoice 返回参考音色（模型包内置 + 用户自定义音色库）；
-/// Kokoro 返回 103 个预置音色（sid + 语言分组）；vits/matcha 单说话人返回空列表。
+/// 列出可用音色：ZipVoice/OmniVoice 返回参考音色（模型包内置 + 用户自定义
+/// 音色库；omnivoice 无内置仅自定义库）；Kokoro 返回 103 个预置音色（sid +
+/// 语言分组）；vits/matcha/pocket 等固定音色模型返回空列表。
 #[tauri::command]
 fn list_tts_voices() -> Result<Vec<zapmomo::tts::TtsVoice>, String> {
     let settings = zapmomo::config::settings::load_settings()?;
@@ -1282,28 +1288,16 @@ fn synthesize_tts(
         )
     })?;
 
-    // 合成参数：sherpa ZipVoice 走参考音频克隆（自定义 wav > 内置音色 id > 配置默认）；
-    // sid 模型（Kokoro 等）按音色名/sid 解析说话人；audiocpp（PocketTTS）走具名音色。
+    // 合成音色参数统一解析（克隆 > sid > audiocpp 具名，见 zapmomo::tts::voice）。
     // 在后台线程外解析，尽早报错。
-    let voice_params = if cfg.uses_reference_audio() {
-        let custom_wav = reference_wav.map(std::path::PathBuf::from);
-        let (ref_wav, ref_text) = zapmomo::tts::voice::resolve_reference(
-            &cfg,
-            voice.as_deref(),
-            custom_wav.as_deref(),
-            reference_text.as_deref(),
-        )?;
-        zapmomo::tts::TtsVoiceParams::Reference {
-            wav_path: ref_wav,
-            reference_text: ref_text,
-        }
-    } else if cfg.backend == zapmomo::tts::config::TtsBackendKind::Audiocpp {
-        zapmomo::tts::TtsVoiceParams::Named(
-            voice.unwrap_or_else(|| zapmomo::audiocpp::DEFAULT_VOICE.to_string()),
-        )
-    } else {
-        zapmomo::tts::voice::resolve_sid_voice(&cfg, voice.as_deref(), sid)?
-    };
+    let custom_wav = reference_wav.map(std::path::PathBuf::from);
+    let voice_params = zapmomo::tts::voice::resolve_voice_params(
+        &cfg,
+        voice.as_deref(),
+        sid,
+        custom_wav.as_deref(),
+        reference_text.as_deref(),
+    )?;
 
     let speed = speed.unwrap_or(cfg.speed);
 
@@ -1883,20 +1877,31 @@ fn start_voice_session_impl(app: AppHandle, state: &VoiceSessionState) -> Result
     running.store(true, Ordering::Relaxed);
     let emit = make_voice_emit(app.clone());
     let shared_llm_slot = llm_state.engine.clone();
+    // TTS 热切换邮箱：宿主（set_current_model 写方）与会话各持一份 Arc
+    let tts_swap_slot: zapmomo::voice::TtsSwapSlot = Arc::new(Mutex::new(None));
+    *app.state::<VoiceSessionState>()
+        .tts_swap
+        .lock()
+        .expect("voice tts_swap lock poisoned") = Some(tts_swap_slot.clone());
     let handle = std::thread::spawn(move || {
-        let mut session =
-            match VoiceSession::new_with_parts(cfg, emit, running.clone(), Some(shared_llm_slot)) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::error!("语音会话创建失败: {e}");
-                    running.store(false, Ordering::Relaxed);
-                    let _ = app.emit(
-                        "voice-session-stopped",
-                        VoiceStoppedPayload { error: Some(e) },
-                    );
-                    return;
-                }
-            };
+        let mut session = match VoiceSession::new_with_parts(
+            cfg,
+            emit,
+            running.clone(),
+            Some(shared_llm_slot),
+            Some(tts_swap_slot),
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!("语音会话创建失败: {e}");
+                running.store(false, Ordering::Relaxed);
+                let _ = app.emit(
+                    "voice-session-stopped",
+                    VoiceStoppedPayload { error: Some(e) },
+                );
+                return;
+            }
+        };
         // 暴露打断标志给宿主（全局快捷键「打断播报」置位用）
         *app.state::<VoiceSessionState>()
             .barge_in
@@ -1908,6 +1913,11 @@ fn start_voice_session_impl(app: AppHandle, state: &VoiceSessionState) -> Result
             .barge_in
             .lock()
             .expect("voice barge_in lock poisoned") = None;
+        // 清空热切换邮箱（写方此后走「只写 selection」路径；残留 pending 引擎随 drop 释放）
+        *app.state::<VoiceSessionState>()
+            .tts_swap
+            .lock()
+            .expect("voice tts_swap lock poisoned") = None;
         match &result {
             Ok(()) => tracing::info!("语音会话结束"),
             Err(e) => tracing::error!("语音会话异常: {e}"),
@@ -3272,6 +3282,9 @@ fn apply_companion_drag_mode(app: &AppHandle, mode: CompanionDragMode) -> Result
 
 /// 当前表演状态（`None` = 未表演）。static Mutex 供主线程菜单与异步命令共用。
 static PERFORMANCE: Mutex<Option<PerformanceState>> = Mutex::new(None);
+
+/// TTS 热切换写方代际（`set_current_model` 事务臂递增；连续切换防旧覆盖新 + 日志追溯）。
+static TTS_SWAP_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 struct PerformanceState {
     /// 每个活动通道一个停止信号（Both 场景有两个 worker）。
@@ -4660,9 +4673,27 @@ async fn set_current_model(
     let path = PathBuf::from(model.local_path.clone().ok_or("该模型没有可用路径")?);
     let mt = model.model_type;
 
-    // ---- KWS / ASR / TTS：只写 selection，不触碰 enabled ----
+    // ---- KWS / ASR / TTS：写 selection；KWS/ASR 监听中提示重启，TTS 会话中热切换 ----
     if mt != LibModelType::Llm {
+        // TTS 事务快照：热切换构造失败时整表回滚（set_selected_model 会同步清
+        // voice/engine_path 等伴生字段，单恢复 model_dir 不够）
+        let tts_snapshot = if mt == LibModelType::Tts {
+            settings::load_settings()?.and_then(|s| s.tts.clone())
+        } else {
+            None
+        };
         model_library::set_selected_model(mt, &path)?;
+
+        // TTS：dsh 播报常驻引擎缓存失效（下次播报按新配置懒重建）
+        if mt == LibModelType::Tts
+            && let Some(dsh_state) = app.try_state::<DshBridgeState>()
+        {
+            *dsh_state
+                .announcer
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = None;
+        }
+
         let (action, effective, mut message) = match mt {
             LibModelType::Kws if kws.is_listening() => (
                 LibRuntimeAction::RestartRequired,
@@ -4680,6 +4711,72 @@ async fn set_current_model(
                     model.display_name
                 ),
             ),
+            LibModelType::Tts => {
+                // 语音会话运行中 → 构造新引擎塞邮箱（句间热切换，下一句起生效，
+                // 当前句不打断、会话历史不断）；失败整表回滚（会话无感知继续旧引擎）。
+                // 会话未运行 / 邮箱已清（退出竞态）→ 只写 selection（下次合成生效）。
+                let voice_state = app.state::<VoiceSessionState>();
+                let slot = voice_state.tts_swap.lock().ok().and_then(|g| g.clone());
+                match slot {
+                    Some(slot) if voice_state.is_running() => {
+                        // selection 已写入 → resolve 新配置并预检（快速失败，不浪费引擎构造）
+                        let settings = settings::load_settings()?;
+                        let tts_settings = settings.as_ref().and_then(|s| s.tts.clone());
+                        let cfg = zapmomo::tts::config::resolve(tts_settings.as_ref(), None)
+                            .and_then(|cfg| zapmomo::tts::config::preflight(&cfg).map(|_| cfg))
+                            .map_err(|e| {
+                                // clone：快照还要留给后续引擎构造失败分支
+                                let _ = model_library::restore_tts_settings(tts_snapshot.clone());
+                                format!("切换失败（已回滚，语音会话继续使用原模型）：{e}")
+                            })?;
+                        // 重活放阻塞线程（sherpa 加载 1~2s / audiocpp spawn+加载 1~3s）
+                        let generation = TTS_SWAP_GEN.fetch_add(1, Ordering::Relaxed) + 1;
+                        let built = tauri::async_runtime::spawn_blocking(move || {
+                            zapmomo::tts::TtsEngine::new(cfg.clone()).map(|engine| {
+                                zapmomo::voice::TtsSwap {
+                                    engine,
+                                    cfg,
+                                    generation,
+                                }
+                            })
+                        })
+                        .await;
+                        match built {
+                            Ok(Ok(swap)) => {
+                                // 覆盖语义：连续切换时旧 pending 引擎 drop（释放内存/租约）
+                                *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(swap);
+                                (
+                                    LibRuntimeAction::None,
+                                    true,
+                                    format!(
+                                        "已将 {} 设为当前模型，语音会话下一句起生效",
+                                        model.display_name
+                                    ),
+                                )
+                            }
+                            // 引擎构造失败（模型文件损坏等）
+                            Ok(Err(e)) => {
+                                let _ = model_library::restore_tts_settings(tts_snapshot);
+                                return Err(format!(
+                                    "切换失败（已回滚，语音会话继续使用原模型）：{e}"
+                                ));
+                            }
+                            // 阻塞任务 panic（join 失败）：同样整表回滚
+                            Err(e) => {
+                                let _ = model_library::restore_tts_settings(tts_snapshot);
+                                return Err(format!(
+                                    "切换失败（已回滚，语音会话继续使用原模型）：{e}"
+                                ));
+                            }
+                        }
+                    }
+                    _ => (
+                        LibRuntimeAction::None,
+                        true,
+                        format!("已将 {} 设为当前模型", model.display_name),
+                    ),
+                }
+            }
             _ => (
                 LibRuntimeAction::None,
                 true,

@@ -369,6 +369,17 @@
       "sha256": "393f8a14e2f5fb96746aaab342997a40641001fbd5bf9592a080a8329178ee96",
       "size_bytes": 878702423,
       "license": "Apache-2.0"
+    },
+    {
+      "name": "omnivoice-audiocpp",
+      "role": "tts-audiocpp-omnivoice",
+      "version": "q8_0",
+      "kind": "raw",
+      "archive": "omnivoice-q8_0.gguf",
+      "source": "https://huggingface.co/audio-cpp/audio.cpp-gguf/resolve/main/OmniVoice-GGUF/omnivoice-q8_0.gguf",
+      "sha256": "2f4be637278043c6842de5b85d681532030e9eb6ffe0f8b0e320f68238e3da8b",
+      "size_bytes": 1350288416,
+      "license": "Apache-2.0"
     }
   ]
 }
