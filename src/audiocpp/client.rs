@@ -1,17 +1,25 @@
 use std::cell::Cell;
+use std::io::{BufRead, BufReader};
 use std::time::Duration;
 
 use super::AudiocppError;
 use super::families::{AudiocppFamilyDesc, VoiceSemantics, family_desc};
 use crate::tts::TtsVoiceParams;
 use crate::tts::config::ResolvedTtsConfig;
+use base64::Engine as _;
 
 /// 连接超时（server 未起/已退出时快速失败）。
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
-/// 合成请求超时（长文本合成可达数秒，留足余量）。
+/// 合成请求超时（长文本合成可达数秒，留足余量）。流式请求同为总时长上限
+/// （单句长度有限，不需区分首块/整段超时）。
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 /// 错误响应体截断上限（避免超长 body 刷屏）。
 const ERROR_BODY_MAX: usize = 500;
+/// SSE 流式文本分块粒度（`options.text_chunk_size`）。上游默认 160 时句长
+/// ≤160 字只切一块，流式退化为整段一次性返回（阶段 1 实测首块 ≈ 总耗时）；
+/// 实测 40 时 120 字长句首块延迟 auto -77% / clone -64%，20 与 40 等价
+/// （server 侧有效下限），总耗时 +21~27%（每块固定启动开销）。
+const STREAM_TEXT_CHUNK_SIZE: i32 = 40;
 
 /// audio.cpp TTS 后端：经 sidecar HTTP 合成。
 ///
@@ -71,11 +79,7 @@ impl AudiocppTts {
     /// 合成文本为 PCM（f32 mono）。语速处理与 sherpa 后端一致：模型按 1.0
     /// 合成，输出重采样实现（复用 `tts::apply_speed_to_samples`）。
     ///
-    /// 音色字段按族语义映射（`families::VoiceSemantics`）：
-    /// - 固定具名音色（pocket）：`Named`/`Sid` → `voice`；`Reference` 报错；
-    /// - 参考音频克隆（omnivoice）：`Reference` → `voice_ref`+`reference_text`
-    ///   （本地路径，sidecar 同机可读）；`Named` → 透传 `voice`（server 端
-    ///   preset/voice_dir 二期）；`Sid` → 省略 voice 字段（server auto voice）。
+    /// 音色字段按族语义映射（见 [`apply_voice_fields`]）。
     pub fn synthesize(
         &self,
         text: &str,
@@ -86,35 +90,8 @@ impl AudiocppTts {
             "model": self.desc.model_id,
             "input": text,
         });
-        match (self.desc.voice_semantics, voice) {
-            (VoiceSemantics::FixedNamed(_), TtsVoiceParams::Named(v)) => {
-                body["voice"] = serde_json::json!(v);
-            }
-            (VoiceSemantics::FixedNamed(default), TtsVoiceParams::Sid(_)) => {
-                body["voice"] = serde_json::json!(default);
-            }
-            (VoiceSemantics::FixedNamed(default), TtsVoiceParams::Reference { .. }) => {
-                return Err(AudiocppError::UnsupportedVoice(format!(
-                    "该 audio.cpp 模型为固定音色（{default}），不支持参考音频克隆"
-                ))
-                .to_user_message());
-            }
-            (
-                VoiceSemantics::ReferenceClone,
-                TtsVoiceParams::Reference {
-                    wav_path,
-                    reference_text,
-                },
-            ) => {
-                body["voice_ref"] = serde_json::json!(wav_path.to_string_lossy());
-                body["reference_text"] = serde_json::json!(reference_text);
-            }
-            (VoiceSemantics::ReferenceClone, TtsVoiceParams::Named(v)) => {
-                body["voice"] = serde_json::json!(v);
-            }
-            // 省略 voice 字段 → server auto voice（无显式音色时的可用兜底）
-            (VoiceSemantics::ReferenceClone, TtsVoiceParams::Sid(_)) => {}
-        }
+        apply_voice_fields(&mut body, self.desc.voice_semantics, voice)
+            .map_err(|e| e.to_user_message())?;
         let resp = self
             .client
             .post(format!("{}/v1/audio/speech", self.base_url))
@@ -137,6 +114,131 @@ impl AudiocppTts {
         self.sample_rate.set(rate);
         crate::tts::apply_speed_to_samples(&samples, rate, speed)
     }
+
+    /// 该模型族是否支持 SSE 流式合成（族静态；`TtsEngine` 门面转发）。
+    pub fn supports_streaming(&self) -> bool {
+        self.desc.supports_streaming
+    }
+
+    /// SSE 流式合成：`speech.audio.delta`（base64 PCM 16-bit LE mono）逐块回调，
+    /// `speech.audio.done` → `data: [DONE]` 结束。
+    ///
+    /// - `on_chunk(samples, sample_rate)` 返回 `false` 时**停止读取**并返回
+    ///   `Ok(())`（协作取消：drop Response 断开连接，server 停止后续块生成）；
+    ///   正常完成（含取消）与流结束同返回 `Ok(())`，由调用方区分语义。
+    /// - 采样率：事件无采样率字段（阶段 1 实测），用族默认值（`sample_rate()`
+    ///   缓存的校准值优先）；后续若校准变化由整段路径 wav 头负责。
+    /// - 流内 `{"type":"error"}` 事件（如 busy_timeout）→ [`AudiocppError::StreamEvent`]。
+    /// - SSE 解析对齐 `llm::http` 既有 blocking 先例（`BufReader::lines` + `data: ` 前缀）。
+    pub fn synthesize_streaming(
+        &self,
+        text: &str,
+        voice: &TtsVoiceParams,
+        on_chunk: &mut dyn FnMut(&[f32], i32) -> bool,
+    ) -> Result<(), AudiocppError> {
+        if !self.desc.supports_streaming {
+            return Err(AudiocppError::StreamingUnsupported(
+                self.desc.model_id.to_string(),
+            ));
+        }
+        let mut body = serde_json::json!({
+            "model": self.desc.model_id,
+            "input": text,
+            "response_format": "pcm",
+            "stream_format": "sse",
+            // 粒度是流式收益的充要条件：默认 160 时句长一块化（见常量注释）
+            "options": { "text_chunk_size": STREAM_TEXT_CHUNK_SIZE },
+        });
+        apply_voice_fields(&mut body, self.desc.voice_semantics, voice)?;
+        let resp = self
+            .client
+            .post(format!("{}/v1/audio/speech", self.base_url))
+            .header("Accept", "text/event-stream")
+            .json(&body)
+            .send()
+            .map_err(|e| AudiocppError::Connection(e.to_string()))?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body_text = resp.text().unwrap_or_default();
+            return Err(AudiocppError::HttpStatus {
+                status: status.as_u16(),
+                body: truncate(&body_text, ERROR_BODY_MAX),
+            });
+        }
+        let rate = self.sample_rate.get();
+        for line in BufReader::new(resp).lines() {
+            let line = line.map_err(|e| AudiocppError::Connection(e.to_string()))?;
+            let Some(data) = line.strip_prefix("data: ") else {
+                continue;
+            };
+            if data == "[DONE]" {
+                break;
+            }
+            let Ok(event) = serde_json::from_str::<serde_json::Value>(data) else {
+                continue;
+            };
+            match event["type"].as_str() {
+                // 音频增量：载荷键为 audio（阶段 1 实测事件 dump 确认）
+                Some("speech.audio.delta") => {
+                    if let Some(b64) = event["audio"].as_str().filter(|s| !s.is_empty()) {
+                        let samples = decode_pcm_chunk(b64)?;
+                        if !on_chunk(&samples, rate) {
+                            // 协作取消：停止读取，drop Response 断连接
+                            return Ok(());
+                        }
+                    }
+                }
+                Some("speech.audio.done") => {} // 等待 [DONE] 收尾
+                Some(other) if other.contains("error") => {
+                    return Err(AudiocppError::StreamEvent(truncate(data, ERROR_BODY_MAX)));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+}
+
+/// 把音色参数按族语义映射进请求体（整段与流式两条路径共用）。
+///
+/// - 固定具名音色（pocket）：`Named`/`Sid` → `voice`；`Reference` 报错；
+/// - 参考音频克隆（omnivoice）：`Reference` → `voice_ref`+`reference_text`
+///   （本地路径，sidecar 同机可读）；`Named` → 透传 `voice`（server 端
+///   preset/voice_dir 二期）；`Sid` → 省略 voice 字段（server auto voice）。
+fn apply_voice_fields(
+    body: &mut serde_json::Value,
+    semantics: VoiceSemantics,
+    voice: &TtsVoiceParams,
+) -> Result<(), AudiocppError> {
+    match (semantics, voice) {
+        (VoiceSemantics::FixedNamed(_), TtsVoiceParams::Named(v)) => {
+            body["voice"] = serde_json::json!(v);
+        }
+        (VoiceSemantics::FixedNamed(default), TtsVoiceParams::Sid(_)) => {
+            body["voice"] = serde_json::json!(default);
+        }
+        (VoiceSemantics::FixedNamed(default), TtsVoiceParams::Reference { .. }) => {
+            return Err(AudiocppError::UnsupportedVoice(format!(
+                "该 audio.cpp 模型为固定音色（{default}），不支持参考音频克隆"
+            )));
+        }
+        (
+            VoiceSemantics::ReferenceClone,
+            TtsVoiceParams::Reference {
+                wav_path,
+                reference_text,
+            },
+        ) => {
+            body["voice_ref"] = serde_json::json!(wav_path.to_string_lossy());
+            body["reference_text"] = serde_json::json!(reference_text);
+        }
+        (VoiceSemantics::ReferenceClone, TtsVoiceParams::Named(v)) => {
+            body["voice"] = serde_json::json!(v);
+        }
+        // 省略 voice 字段 → server auto voice（无显式音色时的可用兜底）
+        (VoiceSemantics::ReferenceClone, TtsVoiceParams::Sid(_)) => {}
+    }
+    Ok(())
 }
 
 /// 查模型族描述；sherpa-only kind 配 audiocpp 后端的非法组合报错。
@@ -196,6 +298,26 @@ pub(crate) fn decode_wav(bytes: &[u8]) -> Result<(Vec<f32>, i32), AudiocppError>
         return Err(AudiocppError::DecodeWav("wav 数据为空".to_string()));
     }
     Ok((samples, spec.sample_rate as i32))
+}
+
+/// 解码 SSE 流式 delta 载荷：base64 → bytes → i16 LE mono → f32（/32768 归一）。
+///
+/// 位宽为阶段 1 实测结论（i16 RMS 落在合理语音电平、按 f32 解释为 NaN），
+/// 与 wav 路径（audio.cpp server 返回 16-bit PCM mono）同源。
+fn decode_pcm_chunk(b64: &str) -> Result<Vec<f32>, AudiocppError> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .map_err(|e| AudiocppError::DecodeWav(format!("base64 解码失败: {e}")))?;
+    if bytes.len() % 2 != 0 {
+        return Err(AudiocppError::DecodeWav(format!(
+            "pcm 分块长度 {} 不是 2 字节对齐（i16）",
+            bytes.len()
+        )));
+    }
+    Ok(bytes
+        .chunks_exact(2)
+        .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / 32768.0)
+        .collect())
 }
 
 #[cfg(test)]
@@ -429,5 +551,223 @@ mod tests {
         };
         assert!(e.to_user_message().contains("启动超时（3s）"));
         assert!(e.to_user_message().contains("tail"));
+        let e = AudiocppError::StreamingUnsupported("pocket-tts-english".to_string());
+        assert!(e.to_user_message().contains("不支持流式合成"));
+        let e = AudiocppError::StreamEvent("busy".to_string());
+        assert!(e.to_user_message().contains("流式合成被服务端中断"));
+    }
+
+    // ---------- SSE 流式（tiny_http stub，事件格式对齐阶段 1 实测 dump） ----------
+
+    /// i16 样本 → SSE delta 事件行（`{"type":"speech.audio.delta","audio":<base64>}`）。
+    fn sse_delta(samples: &[i16]) -> String {
+        let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+        format!(
+            "data: {}\n\n",
+            serde_json::json!({"type": "speech.audio.delta", "audio": b64})
+        )
+    }
+
+    /// 起 SSE stub：/v1/audio/speech 返回固定事件流（Content-Type: text/event-stream），
+    /// 记录（请求体, Accept 头）。返回 (base_url, 记录列表, 线程句柄)。
+    fn spawn_stub_sse(
+        events: String,
+    ) -> (
+        String,
+        std::sync::Arc<std::sync::Mutex<Vec<(serde_json::Value, Option<String>)>>>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let port = match server.server_addr() {
+            tiny_http::ListenAddr::IP(addr) => addr.port(),
+            #[cfg(unix)]
+            tiny_http::ListenAddr::Unix(_) => unreachable!("显式绑定 127.0.0.1"),
+        };
+        let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let received_clone = received.clone();
+        let handle = std::thread::spawn(move || {
+            for mut request in server.incoming_requests() {
+                let mut body = String::new();
+                let _ = std::io::Read::read_to_string(request.as_reader(), &mut body);
+                let accept = request
+                    .headers()
+                    .iter()
+                    .find(|h| h.field.equiv("Accept"))
+                    .map(|h| h.value.as_str().to_string());
+                let json: serde_json::Value =
+                    serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
+                received_clone.lock().unwrap().push((json, accept));
+                if request.url() == "/v1/audio/speech" {
+                    let header = tiny_http::Header::from_bytes(
+                        &b"Content-Type"[..],
+                        &b"text/event-stream"[..],
+                    )
+                    .unwrap();
+                    let _ = request.respond(
+                        tiny_http::Response::from_string(events.clone()).with_header(header),
+                    );
+                } else {
+                    let _ = request
+                        .respond(tiny_http::Response::from_string("nf").with_status_code(404));
+                }
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), received, handle)
+    }
+
+    /// 三块 PCM + done + [DONE] 的标准事件流（块样本数递增便于断言块序）。
+    fn standard_events() -> String {
+        let mut s = String::new();
+        for n in [240u16, 480, 960] {
+            s.push_str(&sse_delta(&vec![100i16; n as usize]));
+        }
+        s.push_str("data: {\"type\":\"speech.audio.done\",\"timing\":{\"ttft_ms\":1}}\n\n");
+        s.push_str("data: [DONE]\n\n");
+        s
+    }
+
+    /// 全链路：请求体（stream 字段/粒度/音色省略）+ Accept 头 + 块序 + 采样率。
+    #[test]
+    fn test_synthesize_streaming_full_flow_omnivoice() {
+        let (base_url, received, _handle) = spawn_stub_sse(standard_events());
+        let tts = AudiocppTts::new_with_base_url(omnivoice_cfg(), &base_url);
+        assert!(tts.supports_streaming());
+
+        let mut chunks = Vec::new();
+        tts.synthesize_streaming("你好", &TtsVoiceParams::Sid(0), &mut |samples, rate| {
+            chunks.push((samples.len(), rate));
+            true
+        })
+        .unwrap();
+
+        // 块序即 SSE 事件序，样本数按 i16 归一（每 i16 → 1 f32）
+        assert_eq!(
+            chunks,
+            vec![(240, 24000), (480, 24000), (960, 24000)],
+            "三块按序回调"
+        );
+        let reqs = received.lock().unwrap();
+        let (body, accept) = reqs.last().unwrap();
+        assert_eq!(body["model"], "omnivoice");
+        assert_eq!(body["input"], "你好");
+        assert_eq!(body["response_format"], "pcm");
+        assert_eq!(body["stream_format"], "sse");
+        assert_eq!(body["options"]["text_chunk_size"], 40, "粒度是收益充要条件");
+        assert!(
+            body.get("voice").is_none() && body.get("voice_ref").is_none(),
+            "Sid 省略全部音色字段"
+        );
+        assert_eq!(accept.as_deref(), Some("text/event-stream"));
+    }
+
+    /// 克隆语义映射复用：Reference → voice_ref + reference_text。
+    #[test]
+    fn test_synthesize_streaming_voice_ref_mapping() {
+        let (base_url, received, _handle) = spawn_stub_sse(standard_events());
+        let tts = AudiocppTts::new_with_base_url(omnivoice_cfg(), &base_url);
+        tts.synthesize_streaming(
+            "克隆",
+            &TtsVoiceParams::Reference {
+                wav_path: std::path::PathBuf::from("/voices/me.wav"),
+                reference_text: "参考转写".into(),
+            },
+            &mut |_, _| true,
+        )
+        .unwrap();
+        let (body, _) = received.lock().unwrap().last().unwrap().clone();
+        assert_eq!(
+            body["voice_ref"].as_str().unwrap().replace('\\', "/"),
+            "/voices/me.wav"
+        );
+        assert_eq!(body["reference_text"], "参考转写");
+    }
+
+    /// 协作取消：回调首块返回 false → Ok(()) 且不再回调（drop Response 断连接）。
+    #[test]
+    fn test_synthesize_streaming_cooperative_cancel() {
+        let (base_url, _received, _handle) = spawn_stub_sse(standard_events());
+        let tts = AudiocppTts::new_with_base_url(omnivoice_cfg(), &base_url);
+        let mut calls = 0;
+        tts.synthesize_streaming("x", &TtsVoiceParams::Sid(0), &mut |_, _| {
+            calls += 1;
+            false
+        })
+        .unwrap();
+        assert_eq!(calls, 1, "首块取消后不再回调");
+    }
+
+    /// 流内错误事件（busy_timeout 等）→ StreamEvent。
+    #[test]
+    fn test_synthesize_streaming_error_event() {
+        let events = format!(
+            "{}data: {}\n\n",
+            sse_delta(&vec![0i16; 8]),
+            serde_json::json!({"type": "error", "message": "busy timeout"})
+        );
+        let (base_url, _received, _handle) = spawn_stub_sse(events);
+        let tts = AudiocppTts::new_with_base_url(omnivoice_cfg(), &base_url);
+        let err = tts
+            .synthesize_streaming("x", &TtsVoiceParams::Sid(0), &mut |_, _| true)
+            .unwrap_err();
+        assert!(matches!(err, AudiocppError::StreamEvent(_)));
+        assert!(err.to_user_message().contains("busy timeout"));
+    }
+
+    /// 非 2xx（offline-mode server 拒绝 SSE 的实测形态）→ HttpStatus。
+    #[test]
+    fn test_synthesize_streaming_http_error() {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let port = match server.server_addr() {
+            tiny_http::ListenAddr::IP(addr) => addr.port(),
+            #[cfg(unix)]
+            tiny_http::ListenAddr::Unix(_) => unreachable!("显式绑定 127.0.0.1"),
+        };
+        std::thread::spawn(move || {
+            for request in server.incoming_requests() {
+                let _ = request
+                    .respond(tiny_http::Response::from_string("no stream").with_status_code(500));
+            }
+        });
+        let tts =
+            AudiocppTts::new_with_base_url(omnivoice_cfg(), &format!("http://127.0.0.1:{port}"));
+        let err = tts
+            .synthesize_streaming("x", &TtsVoiceParams::Sid(0), &mut |_, _| true)
+            .unwrap_err();
+        assert!(matches!(err, AudiocppError::HttpStatus { status: 500, .. }));
+    }
+
+    /// 非流式族（pocket）：连接前拦截 → StreamingUnsupported。
+    #[test]
+    fn test_synthesize_streaming_pocket_unsupported() {
+        let tts = AudiocppTts::new_with_base_url(audiocpp_cfg(), "http://127.0.0.1:1");
+        assert!(!tts.supports_streaming());
+        let err = tts
+            .synthesize_streaming("x", &TtsVoiceParams::Sid(0), &mut |_, _| true)
+            .unwrap_err();
+        assert!(matches!(err, AudiocppError::StreamingUnsupported(_)));
+    }
+
+    /// pcm 解码往返：已知 i16 LE 字节 → base64 → f32 ≈ v/32768。
+    #[test]
+    fn test_decode_pcm_chunk_roundtrip() {
+        let samples: Vec<i16> = vec![0, 1, -1, 32767, -32768, 12345];
+        let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+        let out = decode_pcm_chunk(&b64).unwrap();
+        assert_eq!(out.len(), samples.len());
+        for (a, b) in out.iter().zip(&samples) {
+            assert!((a - *b as f32 / 32768.0).abs() < 1e-9);
+        }
+    }
+
+    /// pcm 解码拒绝坏输入：坏 base64 / 奇数字节长度。
+    #[test]
+    fn test_decode_pcm_chunk_rejects_garbage() {
+        let err = decode_pcm_chunk("!!!not-base64!!!").unwrap_err();
+        assert!(matches!(err, AudiocppError::DecodeWav(_)));
+        // "QQ==" = 1 字节 0x41（非 2 字节对齐）
+        let err = decode_pcm_chunk("QQ==").unwrap_err();
+        assert!(matches!(err, AudiocppError::DecodeWav(_)));
     }
 }
