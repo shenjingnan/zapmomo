@@ -689,4 +689,78 @@ mod tests {
             drop_at.elapsed().as_millis()
         );
     }
+
+    /// 流式全链路 E2E（真实引擎 + 真实 sidecar streaming 模式 + 真实 SSE）：
+    /// 量化「首块延迟 vs 流结束」并验证多块协议。环境约定与
+    /// `tts::test_omnivoice_synthesize_produces_audio` 相同：
+    /// `OMNIVOICE_E2E_DIR=/path/to/omnivoice-audiocpp cargo test -- --ignored`
+    /// （可选 OMNIVOICE_E2E_REF / OMNIVOICE_E2E_REF_TEXT 验证克隆）。
+    #[test]
+    #[ignore = "需要 omnivoice GGUF 在 OMNIVOICE_E2E_DIR 目录 + audiocpp 引擎可定位"]
+    fn test_omnivoice_streaming_first_chunk_latency() {
+        let Some(dir) = std::env::var("OMNIVOICE_E2E_DIR").ok() else {
+            eprintln!("跳过：未设置 OMNIVOICE_E2E_DIR");
+            return;
+        };
+        let cfg = crate::tts::config::ResolvedTtsConfig {
+            backend: crate::tts::config::TtsBackendKind::Audiocpp,
+            model_type: crate::tts::config::TtsModelKind::Omnivoice,
+            model_dir: std::path::PathBuf::from(&dir),
+            // 阶段 1 实测：omnivoice CPU RTF 6.6 不可用，Metal 0.41 达标
+            provider: "metal".to_string(),
+            ..crate::tts::config::ResolvedTtsConfig::default()
+        };
+        let engine = TtsEngine::new(cfg).unwrap();
+        assert!(engine.supports_streaming(), "omnivoice 应支持流式");
+
+        let voice = match std::env::var("OMNIVOICE_E2E_REF") {
+            Ok(ref_wav) => crate::tts::TtsVoiceParams::Reference {
+                wav_path: std::path::PathBuf::from(ref_wav),
+                reference_text: std::env::var("OMNIVOICE_E2E_REF_TEXT").unwrap_or_else(|_| {
+                    "那还是36年前, 1987年. 我呢考上了武汉大学的计算机系.".to_string()
+                }),
+            },
+            Err(_) => crate::tts::TtsVoiceParams::Sid(0), // auto voice
+        };
+        let text = "语音合成的流式输出能显著降低首响延迟，让对话体验更加自然流畅。当模型逐块生成音频时，播放器可以立即开始播放第一块内容，而不需要等待整句合成完成。";
+        let h = SynthHandle::new(engine, voice, 1.0);
+        let t0 = std::time::Instant::now();
+        h.enqueue(text.to_string(), 1);
+
+        let mut first_chunk: Option<std::time::Duration> = None;
+        let mut chunk_count = 0usize;
+        let mut sample_count = 0usize;
+        let terminal_at = loop {
+            match h.try_recv() {
+                Some(SynthResult::StreamChunk { samples, .. }) => {
+                    if first_chunk.is_none() {
+                        first_chunk = Some(t0.elapsed());
+                    }
+                    chunk_count += 1;
+                    sample_count += samples.len();
+                }
+                Some(SynthResult::StreamDone { .. }) => break t0.elapsed(),
+                Some(SynthResult::Error { message, .. }) => panic!("流式合成失败: {message}"),
+                Some(SynthResult::Done { .. }) => panic!("流式路径不应返回整段 Done"),
+                None => std::thread::sleep(std::time::Duration::from_millis(5)),
+            }
+        };
+        eprintln!(
+            "omnivoice streaming e2e: 首块 {:.2}s / 流结束 {:.2}s / 块数 {} / 音频 {:.1}s",
+            first_chunk.unwrap().as_secs_f32(),
+            terminal_at.as_secs_f32(),
+            chunk_count,
+            sample_count as f32 / 24000.0
+        );
+        assert!(
+            chunk_count >= 2,
+            "120 字长句在 chunk=40 粒度下应多块（got {chunk_count}）"
+        );
+        let first = first_chunk.unwrap().as_secs_f32();
+        let total = terminal_at.as_secs_f32();
+        assert!(
+            first < total * 0.8,
+            "首块延迟应显著早于流结束（{first:.2}s vs {total:.2}s）"
+        );
+    }
 }
