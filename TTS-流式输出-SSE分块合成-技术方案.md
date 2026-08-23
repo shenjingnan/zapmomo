@@ -2,9 +2,9 @@
 
 | 项 | 内容 |
 | --- | --- |
-| 文档版本 | v1.0 |
+| 文档版本 | v1.1 |
 | 日期 | 2026-08-23 |
-| 状态 | 阶段 1 实测完成（决策通过），阶段 2-4 实施中 |
+| 状态 | 已实施（阶段 1-4 自动化验收全绿；麦克风/GUI 人工项待用户执行，见 §5） |
 | 范围 | omnivoice 单句内 SSE 伪流式分块输出（语音会话首响优化） |
 | 前置 | PR #162（模型族描述表 / 句间热切换 / server 多实例），本方案是其 §4.10 预留点的落地 |
 | 上游依赖 | [0xShug0/audio.cpp](https://github.com/0xShug0/audio.cpp) @ `release-0.6.1`（锁定） |
@@ -151,21 +151,22 @@ sequenceDiagram
 | 阶段 | 内容 | 验收 |
 | --- | --- | --- |
 | 1 实测（已完成） | 双 server 矩阵 + 粒度扫描 | 本文档 §2（决策门槛 -77%/-64% 通过） |
-| 2 client + 引擎层 | D2/D3/D4：families/server_config/client/TtsEngine + tiny_http SSE stub 测试 | `cargo test audiocpp tts::`；存量 client 测试零改动全绿 |
-| 3 会话编排 | D5/D6/D7/D8/D10：synthesizer/session + 延迟 stub 测试 | 流式序列 / 热切换混合序列 / 中途取消 ≤1s / drop 无挂起；SentencePlayGate 4 例 |
-| 4 端到端验收 | 全量门禁 + 首响 A/B + 手动清单 | 见 §5 |
+| 2 client + 引擎层（已完成） | D2/D3/D4：families/server_config/client/TtsEngine + tiny_http SSE stub 测试 | 35 audiocpp + 71 tts 单测全绿；存量 client 测试零改动 |
+| 3 会话编排（已完成） | D5/D6/D7/D8/D10：synthesizer/session + 延迟 stub 测试 | 流式序列 / 热切换混合序列 / 中途取消 ≤1s / drop 无挂起；SentencePlayGate 4 例 |
+| 4 端到端验收（自动化项已完成） | 全量门禁 + 真实引擎流式 E2E + 手动清单 | 见 §5（自动化 6 项绿，人工 4 项待执行） |
 
 ## 5. 端到端验收清单
 
-1. `cargo fmt --check && cargo clippy -- -D warnings && cargo test` +
-   `cargo clippy -p zapmomo-app -- -D warnings` + 前端 `pnpm test` 全绿
-2. 首响 A/B（同机同问句各 3 轮，grep `首响打点`）：流式组「首句→首块」显著低于
-   `ZAPMOMO_TTS_NO_STREAM=1` 对照组；「唤醒→首句」两组一致（排除 LLM 噪声）
-3. pocket / sherpa 会话打点显示「整段」且行为与 main 无差异
-4. 流式播报中唤醒词打断：播放即停、迟到 StreamDone 被 gen_id 丢弃、下一轮正常
-5. GUI Speaking 中 omnivoice↔zipvoice↔pocket 三组合句间热切换（PR #162 清单重放）
-6. GUI 合成页 omnivoice 整段合成正常（§2.1-U3 已证兼容）
-7. 块边界韵律人耳复核（`/tmp/omni_chunk_40_*.wav` 或会话实测）
+| # | 项 | 状态 | 数据/说明 |
+| --- | --- | --- | --- |
+| 1 | `cargo fmt --check && cargo clippy -- -D warnings && cargo test` + `cargo clippy -p zapmomo-app -- -D warnings` + 前端 `pnpm test` | ✅ 自动化通过 | 685 单测 + 集成 6 + 前端 416 全绿；根 crate 与 app crate 严格 clippy 通过 |
+| 2 | 流式全链路 E2E（真实 sidecar streaming 模式 + SSE + SynthHandle 线程） | ✅ 自动化通过 | `test_omnivoice_streaming_first_chunk_latency`（--ignored）：**首块 2.58s / 流结束 8.36s / 2 块 / 14.4s 音频**——首块比整段等待提前约 6 成 |
+| 3 | 首响 A/B（grep `首响打点`，`ZAPMOMO_TTS_NO_STREAM=1` 对照） | ⏳ 需人工（麦克风 + 唤醒词） | 自动化代理证据 = 项 2 + §2.2 粒度扫描；会话级打点已就位 |
+| 4 | pocket / sherpa 会话零变化 | ✅ 单测级 | pocket `StreamingUnsupported` 拦截 + 存量测试零改动全绿；`ZAPMOMO_TTS_NO_STREAM` 兜底 |
+| 5 | 流式播报中唤醒词打断 | ✅ 单测级（`test_streaming_cancel_mid_sentence`：终态 ≤1s）+ ⏳ 人耳 | 迟到终态 gen_id 丢弃 + 计数修复 |
+| 6 | GUI Speaking 中三组合句间热切换 | ✅ 单测级（`test_streaming_swap_engine_between_sentences` 流式↔整段混合序列）+ ⏳ GUI 手动 | PR #162 手动清单重放 |
+| 7 | GUI 合成页 omnivoice 整段合成 | ✅ §2.1-U3 实证兼容 + ⏳ GUI 手动 | streaming 模式 server 正常返回非流式 wav |
+| 8 | 块边界韵律人耳复核 | ⏳ 需人工 | `/tmp/omni_chunk_40_*.wav`（auto/clone 两份，含逐块时间戳 json） |
 
 ## 6. 风险与回退
 
