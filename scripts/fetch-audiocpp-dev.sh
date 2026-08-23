@@ -8,10 +8,11 @@
 #
 # 编译参数与 release.yml 一致：裁剪 pocket_tts + DEPLOYMENT_BUILD（spec 内嵌）
 # + NATIVE_CPU=OFF（可移植）。产物 11MB 级、编译约 1.5 分钟（macOS 实测）。
+# 注意：上游 tag 命名是 release-X.Y.Z（无 v 前缀，v* 只有远古 windows-prebuilt）。
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-REF="${AUDIOCPP_REF:-v0.6.1}"
+REF="${AUDIOCPP_REF:-release-0.6.1}"
 
 triple() {
   local t
@@ -36,6 +37,19 @@ if [ "${1:-}" = "--build" ]; then
   git clone --depth 1 --branch "$REF" https://github.com/0xShug0/audio.cpp .audiocpp-src
   METAL_FLAG="-DENGINE_ENABLE_METAL=ON"
   [ "$(uname -m)" = "arm64" ] || METAL_FLAG="-DENGINE_ENABLE_METAL=OFF"
+  # macOS：Apple Clang 不带 OpenMP，需要 brew 的 libomp（keg-only，须用
+  # OpenMP_ROOT 让 CMake 的 FindOpenMP 定位；与 release.yml 的 arm64 job 一致）
+  if [ "$(uname -s)" = "Darwin" ]; then
+    LIBOMP_PREFIX="$(brew --prefix libomp 2>/dev/null || true)"
+    if [ -n "$LIBOMP_PREFIX" ] && [ -d "$LIBOMP_PREFIX/lib" ]; then
+      export OpenMP_ROOT="$LIBOMP_PREFIX"
+      echo "==> 使用 libomp: $LIBOMP_PREFIX"
+    else
+      echo "错误：未检测到 libomp（audio.cpp 的 ENGINE_ENABLE_OPENMP 默认 ON）。" >&2
+      echo "请先执行: brew install libomp" >&2
+      exit 1
+    fi
+  fi
   # shellcheck disable=SC2086
   cmake -S .audiocpp-src -B .audiocpp-build \
     -DAUDIOCPP_MODEL_SET=custom -DAUDIOCPP_MODELS=pocket_tts \

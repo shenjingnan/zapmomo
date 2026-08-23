@@ -134,13 +134,25 @@ jobs:
         # （默认 -march=native 只能在构建机级 CPU 上跑）。externalBin 要求带 target
         # triple 后缀的文件名（tauri.conf.json bundle.externalBin）。
         # 引擎版本升级只改 AUDIOCPP_REF（与 tauri.conf.json 同步审查）。
+        # 注意：上游 tag 命名是 release-X.Y.Z（无 v 前缀，v* 只有远古 windows-prebuilt）。
         shell: bash
         env:
-          AUDIOCPP_REF: v0.6.1
+          AUDIOCPP_REF: release-0.6.1
           AUDIOCPP_TRIPLE: ${{ matrix.audiocpp_triple }}
           AUDIOCPP_EXTRA: ${{ matrix.audiocpp_extra }}
         run: |
           git clone --depth 1 --branch "$AUDIOCPP_REF" https://github.com/0xShug0/audio.cpp .audiocpp-src
+          # macOS：Apple Clang 不带 OpenMP。native（arm64）job 装 brew libomp 并以
+          # OpenMP_ROOT 定位（keg-only）；x86_64 交叉编译 job 无 x86_64 版 libomp
+          # 可用，关 OpenMP（与该 job METAL=OFF 同等的可移植性取舍）。
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            if [[ "$AUDIOCPP_EXTRA" == *CMAKE_OSX_ARCHITECTURES* ]]; then
+              export AUDIOCPP_EXTRA="$AUDIOCPP_EXTRA -DENGINE_ENABLE_OPENMP=OFF"
+            else
+              brew install libomp
+              export OpenMP_ROOT="$(brew --prefix libomp)"
+            fi
+          fi
           COMMON_FLAGS="-DAUDIOCPP_MODEL_SET=custom -DAUDIOCPP_MODELS=pocket_tts \
             -DAUDIOCPP_DEPLOYMENT_BUILD=ON -DENGINE_ENABLE_NATIVE_CPU=OFF \
             -DENGINE_ENABLE_CUDA=OFF -DENGINE_ENABLE_VULKAN=OFF -DENGINE_ENABLE_HIP=OFF"
