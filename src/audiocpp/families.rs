@@ -37,6 +37,12 @@ pub struct AudiocppFamilyDesc {
     pub default_provider: &'static str,
     /// 音色语义。
     pub voice_semantics: VoiceSemantics,
+    /// 是否支持 SSE 伪流式（server config `mode` 与请求体 `stream_format` 的依据）。
+    /// 流式矩阵（audio.cpp release-0.6.1 实测/README）：omnivoice ✅、voxcpm2 ✅、
+    /// pocket_tts ❌、sherpa 全族 ❌（`OfflineTts` 整段合成，无 sidecar 语义）。
+    /// offline-mode server 会拒绝 SSE 请求（实测 HTTP 500），故该标记同时决定
+    /// server config 的 `mode:"streaming"` 翻转——两者必须同源。
+    pub supports_streaming: bool,
     /// preflight 缺文件时的安装提示命令。
     pub registry_hint: &'static str,
 }
@@ -64,6 +70,7 @@ pub const POCKET: AudiocppFamilyDesc = AudiocppFamilyDesc {
     sample_rate: 24_000,
     default_provider: "cpu",
     voice_semantics: VoiceSemantics::FixedNamed("alba"),
+    supports_streaming: false,
     registry_hint: "zapmomo tts install-model --registry-id tts-pocket-english-audiocpp",
 };
 
@@ -78,6 +85,7 @@ pub const OMNIVOICE: AudiocppFamilyDesc = AudiocppFamilyDesc {
     sample_rate: 24_000,
     default_provider: "metal",
     voice_semantics: VoiceSemantics::ReferenceClone,
+    supports_streaming: true,
     registry_hint: "zapmomo tts install-model --registry-id tts-omnivoice-q8-audiocpp",
 };
 
@@ -124,6 +132,7 @@ mod tests {
         assert_eq!(omni.required_files, &["omnivoice-q8_0.gguf"]);
         assert_eq!(omni.default_provider, "metal");
         assert_eq!(omni.voice_semantics, VoiceSemantics::ReferenceClone);
+        assert!(omni.supports_streaming, "omnivoice 支持 SSE 伪流式");
         assert_eq!(omni.load_options(), serde_json::json!({}));
 
         let pocket = family_desc(TtsModelKind::Pocket).unwrap();
@@ -132,6 +141,7 @@ mod tests {
         assert_eq!(pocket.required_files[1], POCKET_EMBEDDINGS_FILE);
         assert_eq!(pocket.default_provider, "cpu");
         assert_eq!(pocket.voice_semantics, VoiceSemantics::FixedNamed("alba"));
+        assert!(!pocket.supports_streaming, "pocket 上游无流式支持");
         assert_eq!(
             pocket.load_options(),
             serde_json::json!({ "language": "english" })
