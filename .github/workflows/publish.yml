@@ -27,7 +27,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
 
       - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@1.97.1
+        uses: dtolnay/rust-toolchain@1.100.0
 
       - name: Cache cargo build artifacts
         # cargo publish 的编译验证较重（llama-cpp-2 / sherpa-onnx 等），缓存加速
@@ -76,7 +76,7 @@ jobs:
           persist-credentials: false
 
       - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@1.97.1
+        uses: dtolnay/rust-toolchain@1.100.0
 
       - name: Run release-plz
         uses: release-plz/action@v0.5
