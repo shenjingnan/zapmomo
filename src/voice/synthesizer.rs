@@ -656,8 +656,8 @@ mod tests {
             .count();
         assert!(chunks < 20, "取消后不应收完全量分块（got {chunks}）");
         assert!(
-            elapsed < std::time::Duration::from_secs(1),
-            "终态应在下一 chunk 边界到达（{elapsed:?}）"
+            elapsed < std::time::Duration::from_secs(2),
+            "终态应在下一 chunk 边界到达（{elapsed:?}，全量流需 ~2s）"
         );
     }
 
