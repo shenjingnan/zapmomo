@@ -1057,6 +1057,31 @@
         "extra_roles": [],
         "kind": "raw"
       }
+    },
+    {
+      "id": "tts-voxcpm2-q8-audiocpp",
+      "name": "voxcpm2-audiocpp",
+      "display_name": "VoxCPM2 高保真克隆 (audio.cpp)",
+      "model_type": "tts",
+      "tts_kind": "voxcpm2",
+      "runtime": "audiocpp",
+      "format": "GGUF",
+      "description": "VoxCPM2（OpenBMB MiniCPM-4 2B 基座）零样本声音克隆 + 声音设计，30 语种免语言标签，q8_0 量化，48kHz 录音室级输出（AudioVAE V2 内置超分）；由 audio.cpp 引擎驱动，支持音频帧级流式（实测首块 0.36s）。体积约 2.75 GiB，推理依赖 Metal 加速，运行内存峰值约 7.6GB，建议 16GB 以上内存（32GB 更稳）的 Apple Silicon 设备使用。",
+      "languages": ["zh", "en"],
+      "tags": ["tts", "audiocpp", "clone", "multilingual", "48khz", "streaming"],
+      "parameter_count": "2B",
+      "quantization": "q8_0",
+      "version": "q8_0",
+      "size_bytes": 2955000480,
+      "homepage": "https://huggingface.co/OpenBMB/VoxCPM2",
+      "required_assets": ["tts-audiocpp-voxcpm2"],
+      "optional_assets": [],
+      "platforms": ["darwin-aarch64"],
+      "download": {
+        "manifest_role": "tts-audiocpp-voxcpm2",
+        "extra_roles": [],
+        "kind": "raw"
+      }
     }
   ]
 }

@@ -145,10 +145,20 @@
 - **许可证**: Apache-2.0（依据 audio.cpp 仓库标注；如需商用请以模型发布页的许可说明为准）
 - **sha256**: `2f4be637278043c6842de5b85d681532030e9eb6ffe0f8b0e320f68238e3da8b`
 
+## voxcpm2-q8_0.gguf（audio.cpp TTS）
+
+- **用途**: 多语种文本转语音 + 零样本声音克隆（TTS，VoxCPM2，OpenBMB MiniCPM-4 2B
+  基座，q8_0 量化，48kHz 录音室级输出，AudioVAE V2 内置超分），由内置的
+  audio.cpp 引擎（sidecar 进程，Metal 后端）驱动
+- **来源**: https://huggingface.co/audio-cpp/audio.cpp-gguf/tree/main/VoxCPM2-GGUF
+- **发布方**: audio-cpp（audio.cpp 官方 GGUF 仓库；模型源自 OpenBMB/VoxCPM2）
+- **许可证**: Apache-2.0（依据 audio.cpp 仓库标注；如需商用请以模型发布页的许可说明为准）
+- **sha256**: `c8e01ab4416011e12a28f24ede298a1aa5ce64b43f8e8aaad53b1e2fe7c96432`
+
 ## audiocpp_server（audio.cpp 引擎二进制，随安装包分发）
 
 - **用途**: TTS 第二推理后端（ggml 系 audio.cpp 的 HTTP server sidecar，裁剪构建
-  仅含 pocket_tts + omnivoice 模型族；编译参数见 `.github/workflows/release.yml`）
+  仅含 pocket_tts + omnivoice + voxcpm2 模型族；编译参数见 `.github/workflows/release.yml`）
 - **来源**: https://github.com/0xShug0/audio.cpp（版本 pin 见 release.yml 的 AUDIOCPP_REF）
 - **发布方**: ShugoAI LLC（audio.cpp 项目）
 - **许可证**: Apache-2.0。随 ZapMomo（GPL-3.0-only）以独立进程形式聚合分发，

@@ -62,6 +62,14 @@ export const TTS_PRESETS = [
     tagline: "audio.cpp 引擎 · 声音克隆 · 600+ 语种 · 24kHz · 仅 Apple Silicon（Metal）",
     sizeBytes: 1_350_288_416,
   },
+  {
+    id: "tts-voxcpm2-q8-audiocpp",
+    name: "VoxCPM2 高保真克隆",
+    kind: "voxcpm2",
+    languages: "多语种",
+    tagline: "audio.cpp 引擎 · 帧级流式 · 48kHz 录音室级 · 30 语种 · 仅 Apple Silicon（Metal）· 建议 16GB+ 内存",
+    sizeBytes: 2_955_000_480,
+  },
 ] as const;
 
 export interface TtsModelSwitchState {

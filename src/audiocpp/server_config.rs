@@ -36,9 +36,11 @@ pub struct ServerModelConfig {
 
 /// 由解析后的 TTS 配置生成 server config（纯函数，快照单测锚定两族）。
 ///
-/// 模型族信息（id/family/gguf 路径/load_options）查 [`super::families`] 描述表；
-/// sherpa-only kind 配 audiocpp 后端的非法组合返回错误。`mode` 本期恒 "offline"，
-/// SSE 流式二期经 `AudiocppFamilyDesc` 扩展（schema 已就绪）。
+/// 模型族信息（id/family/gguf 路径/load_options/mode）查 [`super::families`] 描述表；
+/// sherpa-only kind 配 audiocpp 后端的非法组合返回错误。`mode` 为族静态能力
+/// （`supports_streaming` → "streaming"/"offline"）——offline-mode server 会拒绝
+/// SSE 请求（实测 HTTP 500），故流式族的 mode 翻转是必要条件。mode 不进
+/// `config_hash`：hash 已含 `model_type`，而 mode 是其纯函数（同版本内不会变）。
 pub fn build_server_config(cfg: &ResolvedTtsConfig, port: u16) -> Result<ServerConfig, String> {
     let desc = super::families::family_desc(cfg.model_type)
         .ok_or_else(|| format!("模型类型 {} 不支持 audiocpp 后端", cfg.model_type.as_str()))?;
@@ -53,7 +55,12 @@ pub fn build_server_config(cfg: &ResolvedTtsConfig, port: u16) -> Result<ServerC
             family: desc.family.to_string(),
             path: cfg.model_dir.join(desc.gguf_file).display().to_string(),
             task: "tts".to_string(),
-            mode: "offline".to_string(),
+            mode: if desc.supports_streaming {
+                "streaming"
+            } else {
+                "offline"
+            }
+            .to_string(),
             load_options: desc.load_options(),
         }],
     })
@@ -119,7 +126,7 @@ mod tests {
             "/models/pocket-tts-english-audiocpp/pocket-tts-english-q8_0.gguf"
         );
         assert_eq!(m.task, "tts");
-        assert_eq!(m.mode, "offline");
+        assert_eq!(m.mode, "offline", "pocket 无流式支持，mode 保持 offline");
         assert_eq!(m.load_options["language"], "english");
     }
 
@@ -138,7 +145,8 @@ mod tests {
             m.path.replace('\\', "/"),
             "/models/omnivoice-audiocpp/omnivoice-q8_0.gguf"
         );
-        assert_eq!(m.mode, "offline");
+        // 流式族 mode 翻转为 streaming（offline server 拒绝 SSE 请求，实测 HTTP 500）
+        assert_eq!(m.mode, "streaming");
         assert_eq!(m.load_options, serde_json::json!({}));
     }
 

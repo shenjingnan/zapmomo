@@ -6,7 +6,7 @@
 #   scripts/fetch-audiocpp-dev.sh            # 从本仓库最新 Release 下载（日常，快）
 #   scripts/fetch-audiocpp-dev.sh --build    # 本地源码编译（首次发版前 / 修改引擎时）
 #
-# 编译参数与 release.yml 一致：裁剪 pocket_tts+omnivoice + DEPLOYMENT_BUILD
+# 编译参数与 release.yml 一致：裁剪 pocket_tts+omnivoice+voxcpm2 + DEPLOYMENT_BUILD
 # （spec 内嵌）+ NATIVE_CPU=OFF（可移植）。产物约 12MB、编译约 2.5 分钟（macOS 实测）。
 # 注意：上游 tag 命名是 release-X.Y.Z（无 v 前缀，v* 只有远古 windows-prebuilt）。
 set -euo pipefail
@@ -52,7 +52,7 @@ if [ "${1:-}" = "--build" ]; then
   fi
   # shellcheck disable=SC2086
   cmake -S .audiocpp-src -B .audiocpp-build \
-    -DAUDIOCPP_MODEL_SET=custom -DAUDIOCPP_MODELS=pocket_tts,omnivoice \
+    -DAUDIOCPP_MODEL_SET=custom -DAUDIOCPP_MODELS=pocket_tts,omnivoice,voxcpm2 \
     -DAUDIOCPP_DEPLOYMENT_BUILD=ON -DENGINE_ENABLE_NATIVE_CPU=OFF \
     -DENGINE_ENABLE_CUDA=OFF -DENGINE_ENABLE_VULKAN=OFF -DENGINE_ENABLE_HIP=OFF \
     $METAL_FLAG -DCMAKE_BUILD_TYPE=Release

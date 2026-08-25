@@ -38,6 +38,9 @@ sherpa-onnx = "1.13"
 # wav 解码（audio.cpp sidecar 返回 wav bytes → f32 样本；纯 Rust 零传递依赖）
 hound = "3.5"
 
+# base64 解码（audio.cpp SSE 流式 delta 载荷；纯 Rust 零传递依赖）
+base64 = "0.22"
+
 # 本地 LLM（llama.cpp Rust 绑定）：默认后端在 macOS ARM64 自动启用 Metal，其余平台 CPU fallback
 llama-cpp-2 = "0.1.154"
 

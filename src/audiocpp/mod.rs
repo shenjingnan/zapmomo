@@ -41,6 +41,10 @@ pub enum AudiocppError {
     DecodeWav(String),
     /// 后端不支持的音色参数（如对 PocketTTS 传参考音频克隆）
     UnsupportedVoice(String),
+    /// 该模型族不支持 SSE 流式合成（`families::supports_streaming == false`）
+    StreamingUnsupported(String),
+    /// SSE 流内错误事件（server 在流中途上报 `{"type":"error",...}`）
+    StreamEvent(String),
 }
 
 impl AudiocppError {
@@ -75,6 +79,10 @@ impl AudiocppError {
             }
             Self::DecodeWav(e) => format!("解码合成音频失败: {e}"),
             Self::UnsupportedVoice(e) => e.clone(),
+            Self::StreamingUnsupported(model_id) => {
+                format!("该模型（{model_id}）不支持流式合成，请使用整段合成或更换模型。")
+            }
+            Self::StreamEvent(e) => format!("流式合成被服务端中断: {e}"),
         }
     }
 }

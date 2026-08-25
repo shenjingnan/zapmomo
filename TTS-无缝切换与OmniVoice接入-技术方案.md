@@ -413,7 +413,7 @@ license 以 HF 页面实际标注为准（阶段 1 复核），并同步 `models
 
 | 扩展点 | 预留方式 |
 | --- | --- |
-| SSE 流式 | `ServerModelConfig.mode` 字段 + `AudiocppFamilyDesc` 后续加 `supports_streaming`；client 请求体结构不变（`stream_format` 二期加） |
+| SSE 流式 | `ServerModelConfig.mode` 字段 + `AudiocppFamilyDesc` 后续加 `supports_streaming`；client 请求体结构不变（`stream_format` 二期加）。**已落地**：见《TTS-流式输出-SSE分块合成-技术方案.md》（阶段 1 实测 chunk=40 首块 -77%） |
 | voxcpm2 等新族 | families.rs 加一行 + registry/manifest 各一条 + 前端 preset 一条 |
 | server 端音色库（voice_dir） | client `Named` 音色已透传 `voice` 字段，天然兼容 |
 | 声音设计 instruct | 上游 HTTP 传参方式待文档化，不占本期结构 |

@@ -217,6 +217,7 @@ pub fn required_files_for_role(role: &str) -> &'static [&'static str] {
         "tts-audiocpp-pocket" => &[crate::audiocpp::families::POCKET.gguf_file],
         "tts-audiocpp-pocket-embeddings" => &[crate::audiocpp::families::POCKET_EMBEDDINGS_FILE],
         "tts-audiocpp-omnivoice" => &[crate::audiocpp::families::OMNIVOICE.gguf_file],
+        "tts-audiocpp-voxcpm2" => &[crate::audiocpp::families::VOXCPM2.gguf_file],
         // Kokoro 两量化变体：registry 层按 role 钉死主模型文件名（staging 校验抓错误归档），
         // 引擎层用 kokoro_model_file_in 双名探测容忍两种包
         "tts-kokoro" => &crate::tts::config::KOKORO_FP32_REQUIRED_FILES,
@@ -245,8 +246,8 @@ mod tests {
         let models = all_models();
         assert_eq!(
             models.len(),
-            31,
-            "应为 7 个首批（含 2 KWS）+ 5 个 ASR + 6 个补充 LLM + 2 个新 TTS + 3 个新 ASR + 2 个流式 Paraformer + 1 个新 KWS（gigaspeech）+ 2 个 Kokoro TTS + 1 个 Qwen3-ASR + 1 个 audiocpp PocketTTS + 1 个 audiocpp OmniVoice"
+            32,
+            "应为 7 个首批（含 2 KWS）+ 5 个 ASR + 6 个补充 LLM + 2 个新 TTS + 3 个新 ASR + 2 个流式 Paraformer + 1 个新 KWS（gigaspeech）+ 2 个 Kokoro TTS + 1 个 Qwen3-ASR + 1 个 audiocpp PocketTTS + 1 个 audiocpp OmniVoice + 1 个 audiocpp VoxCPM2"
         );
         assert!(
             models

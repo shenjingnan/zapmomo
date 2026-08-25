@@ -128,7 +128,7 @@ pub(crate) fn build_offline_model_config(cfg: &ResolvedTtsConfig) -> OfflineTtsM
         }
         // audiocpp-only 族：无 sherpa 配置分支（引擎构造在 AudiocppTts，
         // preflight 已按族清单拦截非法组合）
-        TtsModelKind::Omnivoice => {}
+        TtsModelKind::Omnivoice | TtsModelKind::Voxcpm2 => {}
     }
     config
 }
@@ -317,6 +317,68 @@ impl TtsEngine {
                 let out = a.synthesize(text, speed, voice)?;
                 let _ = progress(1.0);
                 Ok(out)
+            }
+        }
+    }
+
+    /// 该引擎是否支持流式分块合成（audiocpp 流式族 true；sherpa 全族 false）。
+    ///
+    /// 环境变量 `ZAPMOMO_TTS_NO_STREAM` 非空时强制 false：A/B 首响测量对照与
+    /// 线上流式异常时的一键回退开关（合成线程据此走整段路径）。
+    pub fn supports_streaming(&self) -> bool {
+        if std::env::var_os("ZAPMOMO_TTS_NO_STREAM").is_some_and(|v| !v.is_empty()) {
+            return false;
+        }
+        match &self.inner {
+            TtsBackendInner::Sherpa { .. } => false,
+            TtsBackendInner::Audiocpp(a) => a.supports_streaming(),
+        }
+    }
+
+    /// SSE 流式合成：逐块回调 `on_chunk(samples, sample_rate)`，回调返回 `false`
+    /// 协作取消（停止读取并断开连接，见 `audiocpp::client`）。全部块回调完返回
+    /// `Ok(())`（正常完成与取消不区分，取消语义由调用方掌握）。
+    ///
+    /// 样本已应用语速：与 [`Self::synthesize`] 同语义（样本在 `rate/speed` 域、
+    /// 按 `rate` 播放）。语速经**跨 chunk 持久** `Resampler` 实现——
+    /// `LinearResampler` 带内部相位状态，逐块独立重采样会丢余量样本（时长
+    /// 漂移 + 块边界爆音），增量喂入 + 末尾 flush 与 `audio::record_voice` 同模式。
+    /// sherpa 后端不支持流式（`OfflineTts` 整段合成），调用前应先查
+    /// [`Self::supports_streaming`]。
+    pub fn synthesize_streaming(
+        &self,
+        text: &str,
+        speed: f32,
+        voice: &TtsVoiceParams,
+        on_chunk: &mut dyn FnMut(&[f32], i32) -> bool,
+    ) -> Result<(), String> {
+        match &self.inner {
+            TtsBackendInner::Sherpa { .. } => Err("sherpa 后端不支持流式合成".to_string()),
+            TtsBackendInner::Audiocpp(a) => {
+                // 预建持久重采样器：采样率用引擎缓存值（构造初值 = 族固定值，
+                // 整段路径首响应 wav 头校准后随之更新；流式事件无采样率字段）
+                let rate = a.sample_rate();
+                let mut resampler = if (speed - 1.0).abs() < 1e-6 {
+                    None // 常用路径（语速 1.0）零拷贝直通
+                } else {
+                    let out_rate = (rate as f32 / speed) as i32;
+                    Some(crate::audio::Resampler::new(rate, out_rate)?)
+                };
+                a.synthesize_streaming(text, voice, &mut |samples, rate| match &mut resampler {
+                    Some(r) => {
+                        let out = r.process(samples, false);
+                        on_chunk(&out, rate)
+                    }
+                    None => on_chunk(samples, rate),
+                })?;
+                // 终态冲刷重采样器尾部缓冲（非空则补投一块）
+                if let Some(r) = &mut resampler {
+                    let tail = r.process(&[], true);
+                    if !tail.is_empty() {
+                        let _ = on_chunk(&tail, rate);
+                    }
+                }
+                Ok(())
             }
         }
     }
@@ -847,5 +909,85 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("无法读取参考音频"), "err: {err}");
+    }
+
+    // ---------- 流式能力门面（tiny_http SSE stub，直连构造无需模型文件） ----------
+
+    /// 起 SSE stub：两块各 `samples_per_chunk` 个 i16 样本（24kHz）+ done + [DONE]。
+    fn spawn_streaming_stub(samples_per_chunk: usize) -> String {
+        use base64::Engine as _;
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let port = match server.server_addr() {
+            tiny_http::ListenAddr::IP(addr) => addr.port(),
+            #[cfg(unix)]
+            tiny_http::ListenAddr::Unix(_) => unreachable!("显式绑定 127.0.0.1"),
+        };
+        std::thread::spawn(move || {
+            for mut request in server.incoming_requests() {
+                let mut body = String::new();
+                let _ = std::io::Read::read_to_string(request.as_reader(), &mut body);
+                let mut events = String::new();
+                for _ in 0..2 {
+                    let pcm: Vec<u8> = vec![0x10, 0x27]
+                        .iter()
+                        .cycle()
+                        .take(samples_per_chunk * 2)
+                        .copied()
+                        .collect();
+                    let b64 = base64::engine::general_purpose::STANDARD.encode(pcm);
+                    events.push_str(&format!(
+                        "data: {}\n\n",
+                        serde_json::json!({"type": "speech.audio.delta", "audio": b64})
+                    ));
+                }
+                events.push_str("data: {\"type\":\"speech.audio.done\"}\n\ndata: [DONE]\n\n");
+                let header =
+                    tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/event-stream"[..])
+                        .unwrap();
+                let _ =
+                    request.respond(tiny_http::Response::from_string(events).with_header(header));
+            }
+        });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    fn streaming_engine(model_type: TtsModelKind, base_url: &str) -> TtsEngine {
+        TtsEngine::from_audiocpp_for_test(crate::audiocpp::client::AudiocppTts::new_with_base_url(
+            crate::tts::config::ResolvedTtsConfig {
+                backend: crate::tts::config::TtsBackendKind::Audiocpp,
+                model_type,
+                ..crate::tts::config::ResolvedTtsConfig::default()
+            },
+            base_url,
+        ))
+    }
+
+    /// 能力分派：omnivoice true / pocket false（ZAPMOMO_TTS_NO_STREAM 未设时）。
+    #[test]
+    fn test_supports_streaming_dispatch() {
+        let url = spawn_streaming_stub(8);
+        assert!(streaming_engine(TtsModelKind::Omnivoice, &url).supports_streaming());
+        assert!(!streaming_engine(TtsModelKind::Pocket, &url).supports_streaming());
+    }
+
+    /// 语速跨 chunk 持久重采样：两块各 2400 样本（24k）speed 2.0 → 累计 ≈2400。
+    /// 逐块独立重采样会因相位余量丢失而漂移，本测试锚定持久实例语义。
+    #[test]
+    fn test_synthesize_streaming_applies_speed_across_chunks() {
+        let url = spawn_streaming_stub(2400);
+        let engine = streaming_engine(TtsModelKind::Omnivoice, &url);
+        let mut total = 0usize;
+        engine
+            .synthesize_streaming("x", 2.0, &TtsVoiceParams::Sid(0), &mut |samples, rate| {
+                assert_eq!(rate, 24000, "样本按模型采样率播放（speed 域在样本里）");
+                total += samples.len();
+                true
+            })
+            .unwrap();
+        // 4800 输入 @speed 2.0 → ≈2400 输出（线性重采样容差）
+        assert!(
+            (total as i64 - 2400).abs() <= 32,
+            "speed 2.0 累计输出 {total}"
+        );
     }
 }
