@@ -16,6 +16,7 @@ describe("ttsModelKindLabel", () => {
 
   it("omnivoice 有专属标签（克隆族）", () => {
     expect(ttsModelKindLabel("omnivoice")).toBe("OmniVoice 克隆");
+    expect(ttsModelKindLabel("voxcpm2")).toBe("VoxCPM2 克隆");
     expect(ttsModelKindLabel("pocket")).toBe("PocketTTS");
   });
 });
@@ -25,6 +26,12 @@ describe("TTS_PRESETS", () => {
     const omni = TTS_PRESETS.find((p) => p.id === "tts-omnivoice-q8-audiocpp");
     expect(omni).toBeDefined();
     expect(omni?.kind).toBe("omnivoice");
+  });
+
+  it("含 voxcpm2 条目且 id 与后端 registry 一致", () => {
+    const vox = TTS_PRESETS.find((p) => p.id === "tts-voxcpm2-q8-audiocpp");
+    expect(vox).toBeDefined();
+    expect(vox?.kind).toBe("voxcpm2");
   });
 
   it("id 唯一（防预设重复注册）", () => {

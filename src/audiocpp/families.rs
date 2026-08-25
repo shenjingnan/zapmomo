@@ -37,6 +37,10 @@ pub struct AudiocppFamilyDesc {
     pub default_provider: &'static str,
     /// 音色语义。
     pub voice_semantics: VoiceSemantics,
+    /// 是否透传 `Named` 具名音色（ReferenceClone 族的差异项）：omnivoice 支持
+    /// （server 端 preset/voice_dir 通道）；voxcpm2 上游仅接受 speaker reference，
+    /// 具名请求会被 server 拒绝——client 据此提前拦截并给中文文案。
+    pub allows_named_voice: bool,
     /// 是否支持 SSE 伪流式（server config `mode` 与请求体 `stream_format` 的依据）。
     /// 流式矩阵（audio.cpp release-0.6.1 实测/README）：omnivoice ✅、voxcpm2 ✅、
     /// pocket_tts ❌、sherpa 全族 ❌（`OfflineTts` 整段合成，无 sidecar 语义）。
@@ -48,10 +52,22 @@ pub struct AudiocppFamilyDesc {
 }
 
 impl AudiocppFamilyDesc {
-    /// server config `load_options`（pocket 需显式 language；omnivoice 自动检测）。
+    /// server config `load_options`（pocket 需显式 language；omnivoice/voxcpm2 自动）。
     pub fn load_options(&self) -> serde_json::Value {
         match self.family {
             "pocket_tts" => serde_json::json!({ "language": "english" }),
+            _ => serde_json::json!({}),
+        }
+    }
+
+    /// 请求体 `options` 的族差异项（整段与流式两路径都携带）。
+    ///
+    /// voxcpm2 必须 `"retry_badcase": false`：上游约束（重试已完成 bad case 是
+    /// offline-only 行为），且阶段 1 实测 streaming-mode server 下**非流式请求
+    /// 同样必须携带**（缺省 500）——因此收敛在本方法而非流式专用路径。
+    pub fn request_options(&self) -> serde_json::Value {
+        match self.family {
+            "voxcpm2" => serde_json::json!({ "retry_badcase": false }),
             _ => serde_json::json!({}),
         }
     }
@@ -70,6 +86,7 @@ pub const POCKET: AudiocppFamilyDesc = AudiocppFamilyDesc {
     sample_rate: 24_000,
     default_provider: "cpu",
     voice_semantics: VoiceSemantics::FixedNamed("alba"),
+    allows_named_voice: true,
     supports_streaming: false,
     registry_hint: "zapmomo tts install-model --registry-id tts-pocket-english-audiocpp",
 };
@@ -85,8 +102,27 @@ pub const OMNIVOICE: AudiocppFamilyDesc = AudiocppFamilyDesc {
     sample_rate: 24_000,
     default_provider: "metal",
     voice_semantics: VoiceSemantics::ReferenceClone,
+    allows_named_voice: true,
     supports_streaming: true,
     registry_hint: "zapmomo tts install-model --registry-id tts-omnivoice-q8-audiocpp",
+};
+
+/// VoxCPM2 q8_0（OpenBMB MiniCPM-4 2B 基座，48kHz 录音室级 + 30 语种克隆；Metal 必需）。
+///
+/// 单文件 GGUF（权重与 AudioVAE V2 内嵌）。流式为**音频帧级**（实测 0.16s/块连续
+/// 吐出、首块 0.36s），与 omnivoice 的文本块伪流式不同；`options.retry_badcase=false`
+/// 为硬约束（见 [`AudiocppFamilyDesc::request_options`]）。
+pub const VOXCPM2: AudiocppFamilyDesc = AudiocppFamilyDesc {
+    model_id: "voxcpm2",
+    family: "voxcpm2",
+    gguf_file: "voxcpm2-q8_0.gguf",
+    required_files: &["voxcpm2-q8_0.gguf"],
+    sample_rate: 48_000,
+    default_provider: "metal",
+    voice_semantics: VoiceSemantics::ReferenceClone,
+    allows_named_voice: false,
+    supports_streaming: true,
+    registry_hint: "zapmomo tts install-model --registry-id tts-voxcpm2-q8-audiocpp",
 };
 
 /// 按模型类型查表；sherpa-only kind 返回 None（audiocpp 后端不支持该组合）。
@@ -94,6 +130,7 @@ pub fn family_desc(kind: TtsModelKind) -> Option<&'static AudiocppFamilyDesc> {
     match kind {
         TtsModelKind::Pocket => Some(&POCKET),
         TtsModelKind::Omnivoice => Some(&OMNIVOICE),
+        TtsModelKind::Voxcpm2 => Some(&VOXCPM2),
         _ => None,
     }
 }
@@ -112,6 +149,10 @@ mod tests {
         assert_eq!(
             family_desc(TtsModelKind::Omnivoice).unwrap().family,
             "omnivoice"
+        );
+        assert_eq!(
+            family_desc(TtsModelKind::Voxcpm2).unwrap().family,
+            "voxcpm2"
         );
         for kind in [
             TtsModelKind::Zipvoice,
@@ -149,5 +190,18 @@ mod tests {
         // model_id 与 registry id 提示一一对应（preflight 提示语可执行）
         assert!(pocket.registry_hint.contains("tts-pocket-english-audiocpp"));
         assert!(omni.registry_hint.contains("tts-omnivoice-q8-audiocpp"));
+
+        // voxcpm2：48kHz / 帧级流式 / Named 不透传 / retry_badcase 硬约束
+        let vox = family_desc(TtsModelKind::Voxcpm2).unwrap();
+        assert_eq!(vox.required_files, &["voxcpm2-q8_0.gguf"]);
+        assert_eq!(vox.sample_rate, 48_000, "VoxCPM2 输出 48kHz");
+        assert_eq!(vox.default_provider, "metal");
+        assert!(vox.supports_streaming);
+        assert!(!vox.allows_named_voice, "上游仅接受 speaker reference");
+        assert_eq!(
+            vox.request_options(),
+            serde_json::json!({ "retry_badcase": false })
+        );
+        assert_eq!(omni.request_options(), serde_json::json!({}));
     }
 }

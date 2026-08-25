@@ -90,8 +90,12 @@ impl AudiocppTts {
             "model": self.desc.model_id,
             "input": text,
         });
-        apply_voice_fields(&mut body, self.desc.voice_semantics, voice)
-            .map_err(|e| e.to_user_message())?;
+        // 族差异请求选项（voxcpm2 的 retry_badcase 对整段路径同样是硬约束）
+        let options = self.desc.request_options();
+        if options.as_object().is_some_and(|m| !m.is_empty()) {
+            body["options"] = options;
+        }
+        apply_voice_fields(&mut body, self.desc, voice).map_err(|e| e.to_user_message())?;
         let resp = self
             .client
             .post(format!("{}/v1/audio/speech", self.base_url))
@@ -141,15 +145,18 @@ impl AudiocppTts {
                 self.desc.model_id.to_string(),
             ));
         }
+        // 流式 options = 族差异项（voxcpm2 的 retry_badcase 等）+ 文本分块粒度
+        // （粒度是伪流式族的收益充要条件；帧级流式族忽略亦无害）
+        let mut options = self.desc.request_options();
+        options["text_chunk_size"] = serde_json::json!(STREAM_TEXT_CHUNK_SIZE);
         let mut body = serde_json::json!({
             "model": self.desc.model_id,
             "input": text,
             "response_format": "pcm",
             "stream_format": "sse",
-            // 粒度是流式收益的充要条件：默认 160 时句长一块化（见常量注释）
-            "options": { "text_chunk_size": STREAM_TEXT_CHUNK_SIZE },
+            "options": options,
         });
-        apply_voice_fields(&mut body, self.desc.voice_semantics, voice)?;
+        apply_voice_fields(&mut body, self.desc, voice)?;
         let resp = self
             .client
             .post(format!("{}/v1/audio/speech", self.base_url))
@@ -202,15 +209,16 @@ impl AudiocppTts {
 /// 把音色参数按族语义映射进请求体（整段与流式两条路径共用）。
 ///
 /// - 固定具名音色（pocket）：`Named`/`Sid` → `voice`；`Reference` 报错；
-/// - 参考音频克隆（omnivoice）：`Reference` → `voice_ref`+`reference_text`
-///   （本地路径，sidecar 同机可读）；`Named` → 透传 `voice`（server 端
-///   preset/voice_dir 二期）；`Sid` → 省略 voice 字段（server auto voice）。
+/// - 参考音频克隆（omnivoice/voxcpm2）：`Reference` → `voice_ref`+`reference_text`
+///   （本地路径，sidecar 同机可读）；`Named` → 视 `allows_named_voice` 透传
+///   `voice`（omnivoice 走 server 端 preset/voice_dir 通道）或提前拦截（voxcpm2
+///   上游仅接受 speaker reference）；`Sid` → 省略 voice 字段（server auto voice）。
 fn apply_voice_fields(
     body: &mut serde_json::Value,
-    semantics: VoiceSemantics,
+    desc: &AudiocppFamilyDesc,
     voice: &TtsVoiceParams,
 ) -> Result<(), AudiocppError> {
-    match (semantics, voice) {
+    match (desc.voice_semantics, voice) {
         (VoiceSemantics::FixedNamed(_), TtsVoiceParams::Named(v)) => {
             body["voice"] = serde_json::json!(v);
         }
@@ -233,7 +241,14 @@ fn apply_voice_fields(
             body["reference_text"] = serde_json::json!(reference_text);
         }
         (VoiceSemantics::ReferenceClone, TtsVoiceParams::Named(v)) => {
-            body["voice"] = serde_json::json!(v);
+            if desc.allows_named_voice {
+                body["voice"] = serde_json::json!(v);
+            } else {
+                return Err(AudiocppError::UnsupportedVoice(format!(
+                    "{} 仅支持参考音频克隆（speaker reference），不支持具名音色",
+                    desc.model_id
+                )));
+            }
         }
         // 省略 voice 字段 → server auto voice（无显式音色时的可用兜底）
         (VoiceSemantics::ReferenceClone, TtsVoiceParams::Sid(_)) => {}
@@ -337,6 +352,14 @@ mod tests {
         ResolvedTtsConfig {
             backend: TtsBackendKind::Audiocpp,
             model_type: crate::tts::config::TtsModelKind::Omnivoice,
+            ..ResolvedTtsConfig::default()
+        }
+    }
+
+    fn voxcpm2_cfg() -> ResolvedTtsConfig {
+        ResolvedTtsConfig {
+            backend: TtsBackendKind::Audiocpp,
+            model_type: crate::tts::config::TtsModelKind::Voxcpm2,
             ..ResolvedTtsConfig::default()
         }
     }
@@ -769,5 +792,50 @@ mod tests {
         // "QQ==" = 1 字节 0x41（非 2 字节对齐）
         let err = decode_pcm_chunk("QQ==").unwrap_err();
         assert!(matches!(err, AudiocppError::DecodeWav(_)));
+    }
+
+    // ---------- VoxCPM2：retry_badcase 硬约束 + Named 拦截 + 48kHz ----------
+
+    /// voxcpm2 流式请求体：族选项 retry_badcase=false 与 text_chunk_size 并存，
+    /// 分块回调携带族采样率 48kHz。
+    #[test]
+    fn test_synthesize_streaming_voxcpm2_options() {
+        let (base_url, received, _handle) = spawn_stub_sse(standard_events());
+        let tts = AudiocppTts::new_with_base_url(voxcpm2_cfg(), &base_url);
+        let mut rates = Vec::new();
+        tts.synthesize_streaming("你好", &TtsVoiceParams::Sid(0), &mut |_s, rate| {
+            rates.push(rate);
+            true
+        })
+        .unwrap();
+        assert!(rates.iter().all(|&r| r == 48_000), "voxcpm2 族采样率 48k");
+        let (body, _) = received.lock().unwrap().last().unwrap().clone();
+        assert_eq!(body["model"], "voxcpm2");
+        assert_eq!(body["options"]["retry_badcase"], false, "上游硬约束");
+        assert_eq!(body["options"]["text_chunk_size"], 40);
+        // omnivoice 不应携带 retry_badcase（族差异项隔离）
+        let (base2, recv2, _h2) = spawn_stub_sse(standard_events());
+        let omni = AudiocppTts::new_with_base_url(omnivoice_cfg(), &base2);
+        omni.synthesize_streaming("x", &TtsVoiceParams::Sid(0), &mut |_, _| true)
+            .unwrap();
+        let (body2, _) = recv2.lock().unwrap().last().unwrap().clone();
+        assert!(body2["options"].get("retry_badcase").is_none());
+    }
+
+    /// voxcpm2 整段请求体也带 retry_badcase（streaming-mode server 下非流式
+    /// 同样必须，阶段 1 实测 500）；Named 具名音色提前拦截。
+    #[test]
+    fn test_synthesize_voxcpm2_plain_options_and_named_intercept() {
+        let (base_url, received, _handle) = spawn_stub();
+        let tts = AudiocppTts::new_with_base_url(voxcpm2_cfg(), &base_url);
+        tts.synthesize("你好", 1.0, &TtsVoiceParams::Sid(0))
+            .unwrap();
+        let body = received.lock().unwrap().last().unwrap().clone();
+        assert_eq!(body["options"]["retry_badcase"], false, "整段路径同样必带");
+        // Named → 提前拦截（上游仅接受 speaker reference，阶段 1 实测 server 拒绝）
+        let err = tts
+            .synthesize("x", 1.0, &TtsVoiceParams::Named("demo".into()))
+            .unwrap_err();
+        assert!(err.contains("仅支持参考音频克隆"), "err: {err}");
     }
 }
