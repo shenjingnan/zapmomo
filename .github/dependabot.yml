@@ -39,3 +39,8 @@ updates:
     commit-message:
       prefix: 'chore'
       include: 'scope'
+    ignore:
+      # pixi.js 钉死 6.5.10：pixi-live2d-display 是 pixi v6/v7 时代的库，
+      # v8 重构了 Application 初始化与渲染内核，升级会直接弄坏 Live2D 渲染
+      # （#83、#174 两次事故）。未来如需升级须连同 pixi-live2d-display 替代方案一起评估。
+      - dependency-name: 'pixi.js'
