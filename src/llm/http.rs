@@ -1,10 +1,28 @@
-/// OpenAI 兼容 Responses API 的 HTTP provider。
+/// OpenAI 兼容 Chat Completions API 的 HTTP provider（基于 async-openai）。
 ///
-/// 通过 `POST {base_url}/v1/responses` 调用，SSE 流式解析。
-/// 可用于 OpenAI 官方 API，或任何兼容 `/v1/responses` 的 server（如较新版本的 llama.cpp `llama-server`）。
-use std::io::{BufRead, BufReader};
+/// 通过 `POST {base_url}/chat/completions` 流式调用（SSE 由 SDK 解析）。
+/// 可用于智谱 GLM（open.bigmodel.cn）、DeepSeek、OpenRouter，或任何兼容
+/// `/v1/chat/completions` 的 server（如 llama.cpp `llama-server`）。
+///
+/// 注意：Responses API（`/v1/responses`）是 OpenAI 专有协议，第三方平台普遍不支持
+/// （智谱实测 404），因此这里走生态通用的 Chat Completions。
+///
+/// 同步/异步桥接：provider 内部持有 current_thread tokio runtime，`generate` 里
+/// `block_on` 驱动流式请求；runtime 与 provider 同生命周期、不跨线程移动，
+/// 不违反 `LlmProvider` 不加 `Send` 的约定。
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+use async_openai::Client;
+use async_openai::config::OpenAIConfig;
+use async_openai::types::chat::{
+    ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls,
+    ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
+    ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestToolMessageArgs,
+    ChatCompletionRequestUserMessageArgs, ChatCompletionTool, ChatCompletionTools,
+    CreateChatCompletionRequestArgs, FinishReason as ApiFinishReason, FunctionCall, FunctionObject,
+};
+use futures_util::StreamExt;
 
 use crate::llm::config::ResolvedLlmConfig;
 use crate::llm::error::LlmError;
@@ -13,15 +31,14 @@ use crate::llm::types::{
     ChatRole, FinishReason, GenParams, InputItem, OutputItem, TokenDelta, ToolCall, ToolDefinition,
 };
 
-pub struct OpenAIResponsesProvider {
-    client: reqwest::blocking::Client,
-    base_url: String,
-    api_key: Option<String>,
+pub struct OpenAiChatProvider {
+    client: Client<OpenAIConfig>,
     model: String,
     system_prompt: String,
+    runtime: tokio::runtime::Runtime,
 }
 
-impl OpenAIResponsesProvider {
+impl OpenAiChatProvider {
     pub fn new(config: &ResolvedLlmConfig) -> Result<Self, LlmError> {
         let base_url = config
             .base_url
@@ -31,72 +48,216 @@ impl OpenAIResponsesProvider {
             .model
             .clone()
             .ok_or_else(|| LlmError::BackendUnavailable("未配置模型名（model）".to_string()))?;
+        let openai_config = OpenAIConfig::new()
+            .with_api_base(base_url)
+            // 无 key 的本地 server（llama-server）传空串即可，服务端忽略 Authorization
+            .with_api_key(config.api_key.clone().unwrap_or_default());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| LlmError::BackendUnavailable(format!("创建 tokio runtime 失败：{e}")))?;
         Ok(Self {
-            client: reqwest::blocking::Client::new(),
-            base_url,
-            api_key: config.api_key.clone(),
+            client: Client::with_config(openai_config),
             model,
             system_prompt: config.system_prompt.clone(),
+            runtime,
         })
     }
 
-    fn role_str(role: ChatRole) -> &'static str {
-        match role {
-            ChatRole::System => "system",
-            ChatRole::User => "user",
-            ChatRole::Assistant => "assistant",
-            ChatRole::Tool => "tool",
-        }
-    }
-
-    /// 把 `InputItem` 转成 Responses API 的 `input` 数组。
-    fn to_input(input: &[InputItem]) -> Vec<serde_json::Value> {
-        input
+    /// 把 `InputItem` 列表转成 Chat Completions 的 `messages`。
+    ///
+    /// 若调用方未提供 system 消息，则在开头注入配置的 system prompt。
+    pub fn build_messages(
+        &self,
+        input: &[InputItem],
+    ) -> Result<Vec<ChatCompletionRequestMessage>, LlmError> {
+        let has_system = input
             .iter()
-            .map(|item| match item {
-                InputItem::Message(m) => serde_json::json!({
-                    "type": "message",
-                    "role": Self::role_str(m.role),
-                    "content": m.content,
-                }),
-                InputItem::ToolCall(c) => serde_json::json!({
-                    "type": "function_call",
-                    "name": c.name,
-                    "arguments": c.arguments,
-                    "call_id": c.id,
-                }),
-                InputItem::ToolResult(t) => serde_json::json!({
-                    "type": "function_call_output",
-                    "call_id": t.id,
-                    "output": t.content,
-                }),
-            })
-            .collect()
+            .any(|item| matches!(item, InputItem::Message(m) if m.role == ChatRole::System));
+        let mut messages: Vec<ChatCompletionRequestMessage> = Vec::with_capacity(input.len() + 1);
+        if !has_system {
+            messages.push(
+                ChatCompletionRequestSystemMessageArgs::default()
+                    .content(self.system_prompt.as_str())
+                    .build()
+                    .map_err(|e| LlmError::InferenceFailed(e.to_string()))?
+                    .into(),
+            );
+        }
+        for item in input {
+            messages.push(Self::to_message(item)?);
+        }
+        Ok(messages)
     }
 
-    /// 把 `ToolDefinition` 转成 Responses API 的 `tools` 数组。
-    fn to_tools(tools: &[ToolDefinition]) -> Vec<serde_json::Value> {
+    fn to_message(item: &InputItem) -> Result<ChatCompletionRequestMessage, LlmError> {
+        let build_err =
+            |e: async_openai::error::OpenAIError| LlmError::InferenceFailed(e.to_string());
+        Ok(match item {
+            InputItem::Message(m) => match m.role {
+                ChatRole::System => ChatCompletionRequestSystemMessageArgs::default()
+                    .content(m.content.as_str())
+                    .build()
+                    .map_err(build_err)?
+                    .into(),
+                ChatRole::User => ChatCompletionRequestUserMessageArgs::default()
+                    .content(m.content.as_str())
+                    .build()
+                    .map_err(build_err)?
+                    .into(),
+                ChatRole::Assistant => ChatCompletionRequestAssistantMessageArgs::default()
+                    .content(m.content.as_str())
+                    .build()
+                    .map_err(build_err)?
+                    .into(),
+                // 工具结果正常走 InputItem::ToolResult；裸 Tool 角色消息按 user 处理，
+                // 避免构造缺少 tool_call_id 的非法 tool 消息。
+                ChatRole::Tool => ChatCompletionRequestUserMessageArgs::default()
+                    .content(m.content.as_str())
+                    .build()
+                    .map_err(build_err)?
+                    .into(),
+            },
+            InputItem::ToolCall(c) => ChatCompletionRequestAssistantMessageArgs::default()
+                .tool_calls(vec![ChatCompletionMessageToolCalls::Function(
+                    ChatCompletionMessageToolCall {
+                        id: c.id.clone().unwrap_or_default(),
+                        function: FunctionCall {
+                            name: c.name.clone(),
+                            arguments: c.arguments.clone(),
+                        },
+                    },
+                )])
+                .build()
+                .map_err(build_err)?
+                .into(),
+            InputItem::ToolResult(t) => ChatCompletionRequestToolMessageArgs::default()
+                .tool_call_id(t.id.as_str())
+                .content(t.content.as_str())
+                .build()
+                .map_err(build_err)?
+                .into(),
+        })
+    }
+
+    /// 把 `ToolDefinition` 转成 Chat Completions 的 `tools`。
+    pub fn to_tools(tools: &[ToolDefinition]) -> Vec<ChatCompletionTools> {
         tools
             .iter()
             .map(|t| {
-                serde_json::json!({
-                    "type": "function",
-                    "name": t.name,
-                    "description": t.description,
-                    "parameters": t.parameters,
+                ChatCompletionTools::Function(ChatCompletionTool {
+                    function: FunctionObject {
+                        name: t.name.clone(),
+                        description: Some(t.description.clone()),
+                        parameters: Some(t.parameters.clone()),
+                        strict: None,
+                    },
                 })
             })
             .collect()
     }
+
+    /// 流式生成主循环（async 部分）：逐 chunk  emit 文本增量、按 index 合并 tool call 碎片。
+    async fn generate_stream(
+        &self,
+        messages: Vec<ChatCompletionRequestMessage>,
+        tools: &[ToolDefinition],
+        params: &GenParams,
+        emit: &mut dyn FnMut(OutputItem),
+        cancel: &AtomicBool,
+    ) -> Result<FinishReason, LlmError> {
+        let mut args = CreateChatCompletionRequestArgs::default();
+        args.model(&self.model)
+            .messages(messages)
+            // llama.cpp 专有参数（top_k/min_p/repeat_penalty/seed/threads/gpu_layers/
+            // context_size/batch_size）在 OpenAI 兼容 API 无对应项，忽略
+            .max_tokens(params.max_tokens as u32)
+            .temperature(params.temperature)
+            .top_p(params.top_p);
+        if !tools.is_empty() {
+            args.tools(Self::to_tools(tools));
+        }
+        let request = args
+            .build()
+            .map_err(|e| LlmError::InferenceFailed(e.to_string()))?;
+
+        let mut stream = self
+            .client
+            .chat()
+            .create_stream(request)
+            .await
+            .map_err(|e| LlmError::BackendUnavailable(format!("chat completions 请求失败：{e}")))?;
+
+        // tool call 累加器：按 chunk.index 合并（id, name, arguments）
+        let mut tool_acc: Vec<(Option<String>, String, String)> = Vec::new();
+        let mut finish = FinishReason::Eos;
+        while let Some(item) = stream.next().await {
+            if cancel.load(Ordering::Relaxed) {
+                return Ok(FinishReason::Cancelled);
+            }
+            let chunk =
+                item.map_err(|e| LlmError::InferenceFailed(format!("流式解析失败：{e}")))?;
+            for choice in chunk.choices {
+                let delta = choice.delta;
+                // reasoning_content（智谱思考链）等非标准扩展字段已被 SDK 反序列化丢弃
+                if let Some(content) = delta.content.filter(|s| !s.is_empty()) {
+                    emit(OutputItem::MessageDelta(TokenDelta::new(content)));
+                }
+                if let Some(tool_calls) = delta.tool_calls {
+                    for tc in tool_calls {
+                        let index = tc.index as usize;
+                        while tool_acc.len() <= index {
+                            tool_acc.push((None, String::new(), String::new()));
+                        }
+                        let acc = &mut tool_acc[index];
+                        if tc.id.is_some() {
+                            acc.0 = tc.id;
+                        }
+                        if let Some(f) = tc.function {
+                            if let Some(name) = f.name {
+                                acc.1 = name;
+                            }
+                            if let Some(args) = f.arguments {
+                                acc.2.push_str(&args);
+                            }
+                        }
+                    }
+                }
+                if let Some(reason) = choice.finish_reason {
+                    finish = match reason {
+                        ApiFinishReason::Stop
+                        | ApiFinishReason::ToolCalls
+                        | ApiFinishReason::FunctionCall => FinishReason::Eos,
+                        ApiFinishReason::Length => FinishReason::MaxTokens,
+                        ApiFinishReason::ContentFilter => {
+                            return Err(LlmError::InferenceFailed(
+                                "内容被服务端安全过滤拦截".to_string(),
+                            ));
+                        }
+                    };
+                }
+            }
+        }
+
+        // 流结束后统一 emit 合并完成的 tool call
+        for (id, name, arguments) in tool_acc {
+            emit(OutputItem::ToolCall(ToolCall {
+                name,
+                arguments,
+                id,
+            }));
+        }
+        Ok(finish)
+    }
 }
 
-impl LlmProvider for OpenAIResponsesProvider {
+impl LlmProvider for OpenAiChatProvider {
     fn is_ready(&self) -> bool {
+        // 远程服务无本地加载态，构造成功即可用
         true
     }
 
     fn load(&mut self) -> Result<(), LlmError> {
-        // HTTP provider 无需本地加载。
         Ok(())
     }
 
@@ -110,142 +271,396 @@ impl LlmProvider for OpenAIResponsesProvider {
         emit: &mut dyn FnMut(OutputItem),
         cancel: Arc<AtomicBool>,
     ) -> Result<FinishReason, LlmError> {
-        // 1. 注入 system prompt（若调用方未提供）
-        let mut full: Vec<serde_json::Value> = Vec::with_capacity(input.len() + 1);
-        let has_system = input
-            .iter()
-            .any(|item| matches!(item, InputItem::Message(m) if m.role == ChatRole::System));
-        if !has_system {
-            full.push(serde_json::json!({
-                "type": "message",
-                "role": "system",
-                "content": self.system_prompt,
-            }));
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(FinishReason::Cancelled);
         }
-        full.extend(Self::to_input(input));
-
-        // 2. 构造 Responses API 请求体
-        let body = serde_json::json!({
-            "model": self.model,
-            "input": full,
-            "tools": Self::to_tools(tools),
-            "stream": true,
-            "max_output_tokens": params.max_tokens,
-            "temperature": params.temperature,
-            "top_p": params.top_p,
-        });
-
-        // 3. 发送请求
-        let url = format!("{}/responses", self.base_url.trim_end_matches('/'));
-        let mut req = self.client.post(&url).json(&body);
-        if let Some(key) = &self.api_key {
-            req = req.bearer_auth(key);
-        }
-        let resp = req
-            .send()
-            .map_err(|e| LlmError::BackendUnavailable(e.to_string()))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().unwrap_or_default();
-            return Err(LlmError::BackendUnavailable(format!(
-                "HTTP {status}: {text}"
-            )));
-        }
-
-        // 4. SSE 流式解析
-        let reader = BufReader::new(resp);
-        // function_call 状态机：跟踪当前工具调用的 name + arguments
-        let mut current_fn: Option<(String, String)> = None;
-        for line in reader.lines() {
-            if cancel.load(Ordering::Relaxed) {
-                return Ok(FinishReason::Cancelled);
-            }
-            let line = line.map_err(|e| LlmError::InferenceFailed(e.to_string()))?;
-            let Some(data) = line.strip_prefix("data: ") else {
-                continue;
-            };
-            if data == "[DONE]" {
-                break;
-            }
-            let Ok(event) = serde_json::from_str::<serde_json::Value>(data) else {
-                continue;
-            };
-            match event["type"].as_str() {
-                Some("response.output_text.delta") => {
-                    if let Some(delta) = event["delta"].as_str().filter(|s| !s.is_empty()) {
-                        emit(OutputItem::MessageDelta(TokenDelta::new(delta)));
-                    }
-                }
-                Some("response.output_item.added") => {
-                    if event["item"]["type"].as_str() == Some("function_call") {
-                        let name = event["item"]["name"].as_str().unwrap_or("").to_string();
-                        current_fn = Some((name, String::new()));
-                    }
-                }
-                Some("response.function_call_arguments.delta") => {
-                    if let (Some(delta), Some((_, args))) =
-                        (event["delta"].as_str(), current_fn.as_mut())
-                    {
-                        args.push_str(delta);
-                    }
-                }
-                Some("response.function_call_arguments.done") => {
-                    if let Some((name, args)) = current_fn.take() {
-                        let id = event["call_id"].as_str().map(str::to_string);
-                        emit(OutputItem::ToolCall(ToolCall {
-                            name,
-                            arguments: args,
-                            id,
-                        }));
-                    }
-                }
-                Some("response.completed") => return Ok(FinishReason::Eos),
-                Some("response.failed") => {
-                    let msg = event["error"]["message"].as_str().unwrap_or("unknown");
-                    return Err(LlmError::InferenceFailed(msg.to_string()));
-                }
-                _ => {}
-            }
-        }
-
-        Ok(FinishReason::Eos)
+        let messages = self.build_messages(input)?;
+        self.runtime
+            .block_on(self.generate_stream(messages, tools, params, emit, &cancel))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::types::{ChatMessage, ChatRole};
+    use crate::llm::types::{ChatMessage, ChatRole, ToolResult};
+    use std::io::Read;
+    use std::path::PathBuf;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    fn test_config(base_url: Option<String>, model: Option<String>) -> ResolvedLlmConfig {
+        ResolvedLlmConfig {
+            enabled: true,
+            provider: "openai".to_string(),
+            model_path: PathBuf::new(),
+            system_prompt: "测试系统提示".to_string(),
+            params: GenParams::default(),
+            auto_load: false,
+            base_url,
+            api_key: Some("test-key".to_string()),
+            model,
+        }
+    }
+
+    /// 启动一个只服务一次请求的 mock server，返回给定状态码 + SSE body。
+    /// 返回 (端口, 请求接收端)：接收端会收到 (请求路径, 请求体)。
+    fn spawn_mock(body: &'static str, status: u16) -> (u16, mpsc::Receiver<(String, String)>) {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let port = match server.server_addr() {
+            tiny_http::ListenAddr::IP(addr) => addr.port(),
+            #[cfg(unix)]
+            tiny_http::ListenAddr::Unix(_) => unreachable!("显式绑定 127.0.0.1"),
+        };
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            if let Ok(mut req) = server.recv() {
+                let url = req.url().to_string();
+                let mut req_body = String::new();
+                req.as_reader().read_to_string(&mut req_body).ok();
+                let _ = tx.send((url, req_body));
+                let header =
+                    tiny_http::Header::from_bytes("Content-Type", "text/event-stream").unwrap();
+                let resp = tiny_http::Response::from_string(body)
+                    .with_status_code(status)
+                    .with_header(header);
+                req.respond(resp).ok();
+            }
+        });
+        (port, rx)
+    }
+
+    fn user_input(text: &str) -> Vec<InputItem> {
+        vec![InputItem::Message(ChatMessage::new(ChatRole::User, text))]
+    }
+
+    // ---------- 构造校验 ----------
 
     #[test]
-    fn test_to_input_converts_message_and_tool_result() {
-        let input = vec![
-            InputItem::Message(ChatMessage::new(ChatRole::User, "你好")),
-            InputItem::ToolResult(crate::llm::types::ToolResult {
-                id: "call_1".into(),
-                name: "get_time".into(),
-                content: "12:00".into(),
-            }),
-        ];
-        let result = OpenAIResponsesProvider::to_input(&input);
-        assert_eq!(result[0]["type"], "message");
-        assert_eq!(result[0]["role"], "user");
-        assert_eq!(result[0]["content"], "你好");
-        assert_eq!(result[1]["type"], "function_call_output");
-        assert_eq!(result[1]["call_id"], "call_1");
+    fn test_new_requires_base_url() {
+        let cfg = test_config(None, Some("glm-4.7-flash".to_string()));
+        let err = OpenAiChatProvider::new(&cfg).err().unwrap();
+        assert!(err.to_string().contains("base_url"), "实际错误：{err}");
     }
 
     #[test]
-    fn test_to_tools_converts_definition() {
+    fn test_new_requires_model() {
+        let cfg = test_config(Some("http://127.0.0.1:1".to_string()), None);
+        let err = OpenAiChatProvider::new(&cfg).err().unwrap();
+        assert!(err.to_string().contains("model"), "实际错误：{err}");
+    }
+
+    #[test]
+    fn test_load_is_noop_ok() {
+        let cfg = test_config(
+            Some("http://127.0.0.1:1".to_string()),
+            Some("glm-4.7-flash".to_string()),
+        );
+        let mut p = OpenAiChatProvider::new(&cfg).unwrap();
+        assert!(p.is_ready());
+        assert!(p.load().is_ok());
+        p.unload();
+    }
+
+    // ---------- 消息/工具转换 ----------
+
+    #[test]
+    fn test_build_messages_injects_system_prompt_when_missing() {
+        let cfg = test_config(
+            Some("http://127.0.0.1:1".to_string()),
+            Some("glm-4.7-flash".to_string()),
+        );
+        let p = OpenAiChatProvider::new(&cfg).unwrap();
+        let messages = p.build_messages(&user_input("你好")).unwrap();
+        let value = serde_json::to_value(&messages).unwrap();
+        assert_eq!(value[0]["role"], "system");
+        assert_eq!(value[0]["content"], "测试系统提示");
+        assert_eq!(value[1]["role"], "user");
+        assert_eq!(value[1]["content"], "你好");
+    }
+
+    #[test]
+    fn test_build_messages_keeps_existing_system_prompt() {
+        let cfg = test_config(
+            Some("http://127.0.0.1:1".to_string()),
+            Some("glm-4.7-flash".to_string()),
+        );
+        let p = OpenAiChatProvider::new(&cfg).unwrap();
+        let input = vec![
+            InputItem::Message(ChatMessage::new(ChatRole::System, "已有提示")),
+            InputItem::Message(ChatMessage::new(ChatRole::User, "你好")),
+        ];
+        let messages = p.build_messages(&input).unwrap();
+        let value = serde_json::to_value(&messages).unwrap();
+        assert_eq!(value.as_array().unwrap().len(), 2, "不应重复注入 system");
+        assert_eq!(value[0]["role"], "system");
+        assert_eq!(value[0]["content"], "已有提示");
+    }
+
+    #[test]
+    fn test_build_messages_maps_tool_call_and_tool_result() {
+        let cfg = test_config(
+            Some("http://127.0.0.1:1".to_string()),
+            Some("glm-4.7-flash".to_string()),
+        );
+        let p = OpenAiChatProvider::new(&cfg).unwrap();
+        let input = vec![
+            InputItem::Message(ChatMessage::new(ChatRole::User, "几点了")),
+            InputItem::ToolCall(ToolCall {
+                name: "get_time".to_string(),
+                arguments: "{}".to_string(),
+                id: Some("call_1".to_string()),
+            }),
+            InputItem::ToolResult(ToolResult {
+                id: "call_1".to_string(),
+                name: "get_time".to_string(),
+                content: "12:00".to_string(),
+            }),
+        ];
+        let messages = p.build_messages(&input).unwrap();
+        let value = serde_json::to_value(&messages).unwrap();
+        // system 注入 + user + assistant(tool_calls) + tool
+        assert_eq!(value[1]["role"], "user");
+        assert_eq!(value[2]["role"], "assistant");
+        assert_eq!(value[2]["tool_calls"][0]["id"], "call_1");
+        assert_eq!(value[2]["tool_calls"][0]["type"], "function");
+        assert_eq!(value[2]["tool_calls"][0]["function"]["name"], "get_time");
+        assert_eq!(value[2]["tool_calls"][0]["function"]["arguments"], "{}");
+        assert_eq!(value[3]["role"], "tool");
+        assert_eq!(value[3]["tool_call_id"], "call_1");
+        assert_eq!(value[3]["content"], "12:00");
+    }
+
+    #[test]
+    fn test_to_tools_maps_definitions() {
         let tools = vec![ToolDefinition {
-            name: "get_time".into(),
-            description: "获取当前时间".into(),
+            name: "get_time".to_string(),
+            description: "获取当前时间".to_string(),
             parameters: serde_json::json!({"type": "object"}),
         }];
-        let result = OpenAIResponsesProvider::to_tools(&tools);
-        assert_eq!(result[0]["type"], "function");
-        assert_eq!(result[0]["name"], "get_time");
-        assert_eq!(result[0]["parameters"]["type"], "object");
+        let result = OpenAiChatProvider::to_tools(&tools);
+        let value = serde_json::to_value(&result).unwrap();
+        assert_eq!(value[0]["type"], "function");
+        assert_eq!(value[0]["function"]["name"], "get_time");
+        assert_eq!(value[0]["function"]["description"], "获取当前时间");
+        assert_eq!(value[0]["function"]["parameters"]["type"], "object");
+    }
+
+    // ---------- 流式生成（mock SSE server） ----------
+
+    const SSE_TEXT: &str = concat!(
+        "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"glm-4.7-flash\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"你好\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"glm-4.7-flash\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"世界\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"glm-4.7-flash\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+
+    #[test]
+    fn test_generate_streams_text_deltas() {
+        let (port, rx) = spawn_mock(SSE_TEXT, 200);
+        let cfg = test_config(
+            Some(format!("http://127.0.0.1:{port}")),
+            Some("glm-4.7-flash".to_string()),
+        );
+        let mut p = OpenAiChatProvider::new(&cfg).unwrap();
+
+        let mut out: Vec<OutputItem> = Vec::new();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let reason = p
+            .generate(
+                &user_input("打个招呼"),
+                &[],
+                &GenParams::default(),
+                &mut |item| out.push(item),
+                cancel,
+            )
+            .unwrap();
+
+        assert_eq!(reason, FinishReason::Eos);
+        let texts: Vec<&str> = out
+            .iter()
+            .map(|item| match item {
+                OutputItem::MessageDelta(d) => d.text.as_str(),
+                other => panic!("期望 MessageDelta，实际 {other:?}"),
+            })
+            .collect();
+        assert_eq!(texts, ["你好", "世界"]);
+
+        // 请求契约：chat/completions 路径 + 关键字段
+        let (url, req_body) = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(url, "/chat/completions");
+        let req: serde_json::Value = serde_json::from_str(&req_body).unwrap();
+        assert_eq!(req["model"], "glm-4.7-flash");
+        assert_eq!(req["stream"], true);
+        assert_eq!(req["messages"][0]["role"], "system");
+        assert_eq!(req["messages"][1]["role"], "user");
+        assert_eq!(req["messages"][1]["content"], "打个招呼");
+        assert_eq!(req["max_tokens"], 512);
+        assert!((req["temperature"].as_f64().unwrap() - 0.7).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_generate_ignores_reasoning_content() {
+        // 智谱 GLM 的思考链走非标准字段 reasoning_content，应被静默丢弃（不进 TTS）
+        let sse = concat!(
+            "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"glm-4.7-flash\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"reasoning_content\":\"让我想想\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"glm-4.7-flash\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"答案\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let (port, _rx) = spawn_mock(sse, 200);
+        let cfg = test_config(
+            Some(format!("http://127.0.0.1:{port}")),
+            Some("glm-4.7-flash".to_string()),
+        );
+        let mut p = OpenAiChatProvider::new(&cfg).unwrap();
+
+        let mut out: Vec<OutputItem> = Vec::new();
+        let cancel = Arc::new(AtomicBool::new(false));
+        p.generate(
+            &user_input("hi"),
+            &[],
+            &GenParams::default(),
+            &mut |item| out.push(item),
+            cancel,
+        )
+        .unwrap();
+
+        let texts: Vec<&str> = out
+            .iter()
+            .map(|item| match item {
+                OutputItem::MessageDelta(d) => d.text.as_str(),
+                other => panic!("期望 MessageDelta，实际 {other:?}"),
+            })
+            .collect();
+        assert_eq!(texts, ["答案"], "reasoning_content 不应产生输出");
+    }
+
+    #[test]
+    fn test_generate_merges_tool_call_chunks() {
+        let sse = concat!(
+            "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"glm-4.7-flash\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"get_time\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"glm-4.7-flash\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"city\\\":\"}}]},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"glm-4.7-flash\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"上海\\\"}\"}}]},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"glm-4.7-flash\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let (port, _rx) = spawn_mock(sse, 200);
+        let cfg = test_config(
+            Some(format!("http://127.0.0.1:{port}")),
+            Some("glm-4.7-flash".to_string()),
+        );
+        let mut p = OpenAiChatProvider::new(&cfg).unwrap();
+
+        let tools = vec![ToolDefinition {
+            name: "get_time".to_string(),
+            description: "获取当前时间".to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+        }];
+        let mut out: Vec<OutputItem> = Vec::new();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let reason = p
+            .generate(
+                &user_input("几点了"),
+                &tools,
+                &GenParams::default(),
+                &mut |item| out.push(item),
+                cancel,
+            )
+            .unwrap();
+
+        assert_eq!(reason, FinishReason::Eos);
+        assert_eq!(out.len(), 1, "碎片应合并为一次 ToolCall，实际 {out:?}");
+        match &out[0] {
+            OutputItem::ToolCall(call) => {
+                assert_eq!(call.id.as_deref(), Some("call_1"));
+                assert_eq!(call.name, "get_time");
+                assert_eq!(call.arguments, "{\"city\":\"上海\"}");
+            }
+            other => panic!("期望 ToolCall，实际 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_generate_maps_length_to_max_tokens() {
+        let sse = concat!(
+            "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"glm-4.7-flash\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"截断\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"glm-4.7-flash\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let (port, _rx) = spawn_mock(sse, 200);
+        let cfg = test_config(
+            Some(format!("http://127.0.0.1:{port}")),
+            Some("glm-4.7-flash".to_string()),
+        );
+        let mut p = OpenAiChatProvider::new(&cfg).unwrap();
+
+        let mut out: Vec<OutputItem> = Vec::new();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let reason = p
+            .generate(
+                &user_input("hi"),
+                &[],
+                &GenParams::default(),
+                &mut |item| out.push(item),
+                cancel,
+            )
+            .unwrap();
+        assert_eq!(reason, FinishReason::MaxTokens);
+    }
+
+    #[test]
+    fn test_generate_cancelled_before_request() {
+        // 不可达地址：若实现未在发请求前检查 cancel，将返回连接错误而非 Cancelled
+        let cfg = test_config(
+            Some("http://127.0.0.1:1".to_string()),
+            Some("glm-4.7-flash".to_string()),
+        );
+        let mut p = OpenAiChatProvider::new(&cfg).unwrap();
+
+        let mut out: Vec<OutputItem> = Vec::new();
+        let cancel = Arc::new(AtomicBool::new(true));
+        let reason = p
+            .generate(
+                &user_input("hi"),
+                &[],
+                &GenParams::default(),
+                &mut |item| out.push(item),
+                cancel,
+            )
+            .unwrap();
+        assert_eq!(reason, FinishReason::Cancelled);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn test_generate_http_error_maps_to_backend_unavailable() {
+        // 用 401（不可重试）验证错误映射；429/5xx 由 SDK 内置 OpenAIRetryLayer 自动指数退避重试
+        // （覆盖智谱 1305 限流场景），这里不重复测试以免拖慢套件。
+        let (port, _rx) = spawn_mock(
+            "{\"error\":{\"code\":\"1001\",\"message\":\"invalid api key\"}}",
+            401,
+        );
+        let cfg = test_config(
+            Some(format!("http://127.0.0.1:{port}")),
+            Some("glm-4.7-flash".to_string()),
+        );
+        let mut p = OpenAiChatProvider::new(&cfg).unwrap();
+
+        let mut out: Vec<OutputItem> = Vec::new();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let err = p
+            .generate(
+                &user_input("hi"),
+                &[],
+                &GenParams::default(),
+                &mut |item| out.push(item),
+                cancel,
+            )
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("invalid api key"),
+            "实际错误：{err}"
+        );
     }
 }

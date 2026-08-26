@@ -241,14 +241,14 @@ impl Drop for LlmEngine {
 
 /// 根据配置创建 provider。
 ///
-/// 本地 llama.cpp（"local"）与 OpenAI 兼容 Responses（"openai" / "llamacpp-server"）
-/// 共用同一 `LlmProvider` 抽象；Chat Completions fallback 留待后续。
+/// 本地 llama.cpp（"local"）与 OpenAI 兼容 Chat Completions（"openai" / "llamacpp-server"）
+/// 共用同一 `LlmProvider` 抽象。
 pub fn create_provider(
     config: ResolvedLlmConfig,
 ) -> Result<Box<dyn provider::LlmProvider>, LlmError> {
     match config.provider.as_str() {
         "local" => Ok(Box::new(local::LocalLlamaProvider::new(config)?)),
-        "openai" | "llamacpp-server" => Ok(Box::new(http::OpenAIResponsesProvider::new(&config)?)),
+        "openai" | "llamacpp-server" => Ok(Box::new(http::OpenAiChatProvider::new(&config)?)),
         other => Err(LlmError::UnsupportedProvider(other.to_string())),
     }
 }

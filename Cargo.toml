@@ -50,6 +50,10 @@ encoding_rs = "0.8"
 # HTTP 客户端（OpenAI 兼容 Responses / llama.cpp-server）
 reqwest = { version = "0.13", features = ["blocking", "json"] }
 
+# 远程 LLM（OpenAI 兼容 Chat Completions：智谱 GLM / DeepSeek / OpenRouter / llama-server 等）
+# 0.41 起 API 域按 feature 拆分，default 仅 rustls；只需 chat-completion
+async-openai = { version = "0.41", features = ["chat-completion"] }
+
 # 汉字 → 带声调拼音（把用户输入的原始中文关键词转成模型可编码的 ppinyin token）
 pinyin = "0.11"
 
@@ -90,7 +94,7 @@ bzip2 = "0.6"
 
 # --- 可选依赖（按需取消注释） ---
 # url = "2"                                              # URL 解析
-# futures-util = "0.3"                                   # 异步流处理
+futures-util = "0.3"                                     # 异步流处理（async-openai SSE 流）
 
 # macOS 麦克风权限请求（AVCaptureDevice requestAccess，弹系统授权窗）。
 # 仅 macOS target 编译：cpal 枚举输入设备在未授权时为空，需显式请求权限后恢复。
