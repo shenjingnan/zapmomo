@@ -83,6 +83,12 @@ pub struct VoiceSession {
     llm: Arc<LlmEngine>,
     /// 会话订阅的 LLM 事件流（与 GUI 的 forward 订阅互不抢事件）
     llm_rx: Receiver<LlmEvent>,
+    /// 文字输入收件箱（Tauri 宿主注入，输入条窗口的消息经此进入会话；CLI 为 `None`）。
+    /// 文字与 ASR 最终文本等价，走同一个 [`Self::handle_user_final`] 入口。
+    text_rx: Option<Receiver<String>>,
+    /// 待处理文字队列：收到时若引擎仍在生成（打断后 cancel 未落地）或状态不允许
+    /// 直接处理，先排队，每轮循环重试
+    pending_texts: VecDeque<String>,
     /// 宿主（Tauri LlmState）共享引擎槽：运行时引擎可能被外部切换（set_current_model /
     /// load），会话在每次编排循环开头检查槽内引擎是否变化并重新绑定，从而感知新模型。
     /// `None` = CLI 自建引擎，不感知外部切换。
@@ -143,6 +149,7 @@ impl VoiceSession {
             Arc::new(AtomicBool::new(true)),
             None,
             None,
+            None,
         )
     }
 
@@ -154,6 +161,8 @@ impl VoiceSession {
     ///   运行时引擎被外部切换时会动态感知并重新绑定；`None` 自建（CLI `voice run`）。
     /// - `tts_swap_slot`：`Some` 接宿主（Tauri `VoiceSessionState`）的 TTS 热切换邮箱，
     ///   运行中切 TTS 模型时句间换引擎（见 [`TtsSwap`]）；`None` 不感知（CLI）。
+    /// - `text_rx`：`Some` 接宿主的文字输入收件箱（输入条窗口），文字与 ASR 最终文本
+    ///   等价进入对话链路；`None` 仅语音（CLI）。
     /// - **说完判定由 session 内 RMS 静音统一控制**，因此这里强制禁用 sherpa endpoint
     ///   （避免其 rule1/rule2 的 1.2s/2.4s 尾静音在期望的 3s 前提前断句并 reset 流）。
     pub fn new_with_parts(
@@ -162,6 +171,7 @@ impl VoiceSession {
         running: Arc<AtomicBool>,
         llm_slot: Option<Arc<Mutex<Option<Arc<LlmEngine>>>>>,
         tts_swap_slot: Option<TtsSwapSlot>,
+        text_rx: Option<Receiver<String>>,
     ) -> Result<Self, String> {
         cfg.asr.enable_endpoint = false;
         let kws = KwsEngine::new(cfg.kws.clone())?;
@@ -205,6 +215,8 @@ impl VoiceSession {
             asr,
             llm,
             llm_rx,
+            text_rx,
+            pending_texts: VecDeque::new(),
             llm_slot,
             tts_swap_slot,
             speaker,
@@ -281,6 +293,8 @@ impl VoiceSession {
                 self.do_barge_in();
                 continue;
             }
+            // 文字输入（输入条窗口）：每轮开头轮询收件箱，与 LLM/TTS 热切换同模式
+            self.poll_text_input()?;
             match self.state {
                 SessionState::Idle => break,
                 SessionState::Armed => self.step_armed()?,
@@ -512,6 +526,56 @@ impl VoiceSession {
         } else if self.silence_accum >= self.cfg.asr_max_trailing_silence {
             let text = self.force_finalize_asr();
             self.handle_user_final(text)?;
+        }
+        Ok(())
+    }
+
+    /// 轮询文字输入收件箱（输入条窗口）。文字与 ASR 最终文本等价，复用
+    /// [`Self::handle_user_final`] 进入 LLM → TTS → 落盘的完整对话链路。
+    ///
+    /// 两个时序坑的规避：
+    /// - `do_barge_in` 的 `llm.cancel()` 只置标志，worker 释放 `generating` 互斥有延迟，
+    ///   此刻发起 `generate` 必得 `Busy`——故生成中只排队，后续轮次（≤100ms 粒度）重试；
+    /// - 被打断轮次的迟到 `Finished`/`Token` 会残留在 `llm_rx`，若带进新一轮会让
+    ///   `step_thinking` 的 `reply_done` 提前置位形成空轮——故发起前轮前排空。
+    fn poll_text_input(&mut self) -> Result<(), String> {
+        // 先收集到局部 Vec 再处理（try_iter 的不可变借用不能横跨 &mut self 调用）
+        let incoming: Vec<String> = self
+            .text_rx
+            .as_ref()
+            .map(|rx| rx.try_iter().collect())
+            .unwrap_or_default();
+        for text in incoming {
+            let text = text.trim().to_string();
+            if !text.is_empty() {
+                self.pending_texts.push_back(text);
+            }
+        }
+        if self.pending_texts.is_empty() {
+            return Ok(());
+        }
+        // 上一轮 cancel 尚未落地（或 GUI 正在生成）：等下一轮循环
+        if self.llm.is_generating() {
+            return Ok(());
+        }
+        match self.state {
+            // 欢迎语/生成/播报中：先打断（清理 reply/synth/speaker），文字留队列下轮处理
+            SessionState::Greeting | SessionState::Thinking | SessionState::Speaking => {
+                self.do_barge_in();
+            }
+            SessionState::Armed | SessionState::WaitingSpeech | SessionState::Listening => {
+                let text = self.pending_texts.pop_front().expect("队列非空已检查");
+                // Listening 中 ASR 可能残留 partial 音频，丢弃避免后续误转写混入
+                if matches!(self.state, SessionState::Listening) {
+                    self.asr.reset(&self.cfg.asr);
+                }
+                // 排空上一轮遗留的 LLM 事件，再发起新一轮
+                while self.llm_rx.try_recv().is_ok() {}
+                self.handle_user_final(text)?;
+            }
+            SessionState::Idle => {
+                self.pending_texts.clear();
+            }
         }
         Ok(())
     }

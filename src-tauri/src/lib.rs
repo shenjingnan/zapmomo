@@ -24,8 +24,8 @@ use tauri_plugin_global_shortcut::GlobalShortcutExt;
 use zapmomo::asr::config::AsrParamsPatch;
 use zapmomo::asr::{AsrReaction, AsrResult};
 use zapmomo::config::settings::{
-    self, AsrSettings, CompanionDragMode, CompanionWindowLayer, CompanionWindowPosition,
-    KwsSettings, Live2dSettings, LlmSettings, TtsSettings,
+    self, AsrSettings, ChatboxSettings, CompanionDragMode, CompanionWindowLayer,
+    CompanionWindowPosition, KwsSettings, Live2dSettings, LlmSettings, TtsSettings,
 };
 use zapmomo::datetime::iso_timestamp_now;
 use zapmomo::kws::{KwsResult, Reaction, ReactionOutcome};
@@ -68,6 +68,29 @@ tauri_nspanel::tauri_panel! {
         }
     })
 }
+
+// 文字输入条的 macOS 非激活面板：与角色窗口同为 nonactivating panel，聚焦输入框
+// 不需要激活整个 App（Spotlight 式），因此「显隐快捷键呼出输入条并聚焦」不会把
+// 本应用其它可见窗口（如设置窗）一并带到最前。可以成为 key window 以接收键盘与
+// 中文 IME 输入，但永不成为 main window。
+// 宏展开含 use 声明，须包在独立模块内避免与上方 CompanionPanel 冲突。
+#[cfg(target_os = "macos")]
+mod chatbox_panel {
+    // 宏生成代码需调用 WebviewWindow::app_handle()（Manager trait 方法）
+    use tauri::Manager as _;
+
+    tauri_nspanel::tauri_panel! {
+        panel!(ChatboxPanel {
+            config: {
+                is_floating_panel: true,
+                can_become_key_window: true,
+                can_become_main_window: false,
+            }
+        })
+    }
+}
+#[cfg(target_os = "macos")]
+use chatbox_panel::ChatboxPanel;
 
 /// 监听线程状态：共享停止标志 + 线程句柄 + 运行时实际模型目录（RuntimeActual）。
 struct ListenState {
@@ -126,6 +149,9 @@ struct VoiceSessionState {
     /// 同款登记模式）。`set_current_model` TTS 事务臂把新引擎塞入邮箱，会话每轮
     /// 循环开头取走并句间换入合成线程（`zapmomo::voice::TtsSwap`）。
     tts_swap: Mutex<Option<zapmomo::voice::TtsSwapSlot>>,
+    /// 文字输入通道（输入条窗口）：会话线程启动时写入，退出时清空。
+    /// `send_voice_text` 命令经此把用户打字内容送进会话编排循环。
+    text_tx: Mutex<Option<std::sync::mpsc::Sender<String>>>,
 }
 
 impl VoiceSessionState {
@@ -135,6 +161,7 @@ impl VoiceSessionState {
             handle: Mutex::new(None),
             barge_in: Mutex::new(None),
             tts_swap: Mutex::new(None),
+            text_tx: Mutex::new(None),
         }
     }
 
@@ -1894,6 +1921,12 @@ fn start_voice_session_impl(app: AppHandle, state: &VoiceSessionState) -> Result
         .tts_swap
         .lock()
         .expect("voice tts_swap lock poisoned") = Some(tts_swap_slot.clone());
+    // 文字输入通道：输入条窗口的 send_voice_text 命令 → 会话编排循环 poll_text_input
+    let (text_tx, text_rx) = std::sync::mpsc::channel::<String>();
+    *app.state::<VoiceSessionState>()
+        .text_tx
+        .lock()
+        .expect("voice text_tx lock poisoned") = Some(text_tx);
     let handle = std::thread::spawn(move || {
         let mut session = match VoiceSession::new_with_parts(
             cfg,
@@ -1901,11 +1934,17 @@ fn start_voice_session_impl(app: AppHandle, state: &VoiceSessionState) -> Result
             running.clone(),
             Some(shared_llm_slot),
             Some(tts_swap_slot),
+            Some(text_rx),
         ) {
             Ok(s) => s,
             Err(e) => {
                 tracing::error!("语音会话创建失败: {e}");
                 running.store(false, Ordering::Relaxed);
+                // 构造失败即线程退出：清空已登记的宿主通道，避免 send_voice_text /
+                // TTS 事务臂拿到指向死接收端的句柄（残留会导致「会话已停止」误报）
+                let voice = app.state::<VoiceSessionState>();
+                *voice.text_tx.lock().expect("voice text_tx lock poisoned") = None;
+                *voice.tts_swap.lock().expect("voice tts_swap lock poisoned") = None;
                 let _ = app.emit(
                     "voice-session-stopped",
                     VoiceStoppedPayload { error: Some(e) },
@@ -1929,6 +1968,11 @@ fn start_voice_session_impl(app: AppHandle, state: &VoiceSessionState) -> Result
             .tts_swap
             .lock()
             .expect("voice tts_swap lock poisoned") = None;
+        // 清空文字输入通道（此后 send_voice_text 报「会话未运行」）
+        *app.state::<VoiceSessionState>()
+            .text_tx
+            .lock()
+            .expect("voice text_tx lock poisoned") = None;
         match &result {
             Ok(()) => tracing::info!("语音会话结束"),
             Err(e) => tracing::error!("语音会话异常: {e}"),
@@ -2131,6 +2175,22 @@ fn stop_voice_session(state: State<'_, VoiceSessionState>) -> Result<(), String>
 #[tauri::command]
 fn is_voice_session_running(state: State<'_, VoiceSessionState>) -> bool {
     state.is_running()
+}
+
+/// 发送文字消息（输入条窗口）：经 mpsc 送进会话编排循环，与 ASR 最终文本等价
+/// 走 LLM → TTS → 落盘的完整对话链路。会话未运行时拒绝（不隐式启动/开麦克风）。
+#[tauri::command]
+fn send_voice_text(state: State<'_, VoiceSessionState>, text: String) -> Result<(), String> {
+    if text.trim().is_empty() {
+        return Ok(()); // 空消息静默忽略（前端已拦截，这里兜底）
+    }
+    let tx = state
+        .text_tx
+        .lock()
+        .expect("voice text_tx lock poisoned")
+        .clone()
+        .ok_or("语音互动未运行：请先在「对话记录」页开启语音互动，再发送文字消息".to_string())?;
+    tx.send(text).map_err(|_| "语音会话已停止".to_string())
 }
 
 // ---- dsh 桥（deepseek-harness 任务事件 → 桌宠说话）----
@@ -3218,6 +3278,51 @@ fn save_companion_position(x: i32, y: i32) -> Result<(), String> {
     settings::save_settings(&settings)
 }
 
+/// 持久化文字输入条窗口位置（逻辑像素），供下次启动恢复。
+///
+/// 由前端在用户手动拖动窗口后（debounce）调用，写入 `~/.zapmomo/settings.toml`
+/// 的 `[chatbox.window_position]` 段。
+#[tauri::command]
+fn save_chatbox_position(x: i32, y: i32) -> Result<(), String> {
+    let mut settings = settings::load_settings()?.unwrap_or_default();
+    let chatbox = settings
+        .chatbox
+        .get_or_insert_with(ChatboxSettings::default);
+    chatbox.window_position = Some(CompanionWindowPosition { x, y });
+    settings::save_settings(&settings)
+}
+
+/// 隐藏文字输入条窗口并持久化开关（前端 Esc 关闭时调用，保持菜单勾选态一致）。
+#[tauri::command]
+fn hide_chatbox(app: AppHandle) {
+    set_chatbox_visible(&app, false, false);
+}
+
+/// 显示/隐藏文字输入条窗口并持久化开关状态（托盘/右键菜单勾选共用）。
+///
+/// `focus` 仅显示时生效（显示后可直接打字）。macOS 上 chatbox 是非激活面板，
+/// 聚焦不激活应用；其它平台为普通窗口，聚焦会激活应用。
+fn set_chatbox_visible(app: &AppHandle, visible: bool, focus: bool) {
+    if let Some(window) = app.get_webview_window("chatbox") {
+        let _ = if visible && focus {
+            window.show().and_then(|()| window.set_focus())
+        } else if visible {
+            window.show()
+        } else {
+            window.hide()
+        };
+    }
+    if let Ok(mut settings) = settings::load_settings() {
+        let settings = settings.get_or_insert_with(Default::default);
+        let chatbox = settings
+            .chatbox
+            .get_or_insert_with(ChatboxSettings::default);
+        chatbox.visible = Some(visible);
+        let _ = settings::save_settings(settings);
+    }
+    rebuild_tray_menu(app);
+}
+
 /// 保存角色窗口缩放比例并通知角色窗口（内部实现，供 command 与原生菜单事件共用）。
 fn apply_companion_scale(app: &AppHandle, scale: f64) -> Result<(), String> {
     let mut settings = settings::load_settings()?.unwrap_or_default();
@@ -3817,6 +3922,13 @@ fn handle_menu(app: &AppHandle, id: &str) {
         "show_settings" | "open_settings" => show_settings_window(app),
         "toggle_companion" => toggle_companion_window(app),
         "hide_companion" => hide_companion_window(app),
+        // 文字输入条：勾选态即目标态（点击时 muda 已自动翻转 checked，这里取反读到的
+        // 配置值等价于「切到另一态」；set_chatbox_visible 内 rebuild 刷新勾选）
+        "toggle_chatbox" => {
+            let visible = !current_chatbox_visible();
+            // 菜单勾选是用户显式打开输入条：显示后直接聚焦可打字
+            set_chatbox_visible(app, visible, true);
+        }
         // 退出/重启前清理 dsh 桥发现文件：桥线程随进程终止无 epilogue，
         // 不清理会残留指向死端口的文件（崩溃残留仍由下次启动兜底清理）
         "restart" => {
@@ -3933,6 +4045,7 @@ fn build_companion_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let layer_submenu = build_layer_submenu(app)?;
     let click_through = build_click_through_item(app)?;
     let locked = build_locked_item(app)?;
+    let chatbox = build_chatbox_item(app)?;
     let open_settings = MenuItem::with_id(app, "open_settings", "打开设置", true, None::<&str>)?;
     let hide = MenuItem::with_id(app, "hide_companion", "隐藏角色", true, None::<&str>)?;
     let restart = MenuItem::with_id(app, "restart", "重启", true, None::<&str>)?;
@@ -3947,6 +4060,7 @@ fn build_companion_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             &layer_submenu,
             &click_through,
             &locked,
+            &chatbox,
             &open_settings,
             &hide,
             &restart,
@@ -3967,6 +4081,7 @@ fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let click_through = build_click_through_item(app)?;
     let locked = build_locked_item(app)?;
     let autostart = build_autostart_item(app)?;
+    let chatbox = build_chatbox_item(app)?;
     let toggle_companion =
         MenuItem::with_id(app, "toggle_companion", "显示/隐藏角色", true, None::<&str>)?;
     let open_settings = MenuItem::with_id(app, "open_settings", "打开设置", true, None::<&str>)?;
@@ -3983,6 +4098,7 @@ fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             &tray_layer,
             &click_through,
             &locked,
+            &chatbox,
             &autostart,
             &open_settings,
             &restart,
@@ -4039,6 +4155,26 @@ fn current_companion_click_through() -> bool {
         Ok(Some(s)) => resolve_click_through(s.live2d.as_ref()),
         _ => false,
     }
+}
+
+/// 读当前文字输入条可见性（读失败或缺省回退 false）。
+fn current_chatbox_visible() -> bool {
+    match settings::load_settings() {
+        Ok(Some(s)) => s.chatbox.as_ref().and_then(|c| c.visible).unwrap_or(false),
+        _ => false,
+    }
+}
+
+/// 「文字输入条」勾选项（勾选 = 输入条窗口显示中）。托盘与角色右键菜单共用。
+fn build_chatbox_item(app: &AppHandle) -> tauri::Result<CheckMenuItem<tauri::Wry>> {
+    CheckMenuItem::with_id(
+        app,
+        "toggle_chatbox",
+        "文字输入条",
+        true,
+        current_chatbox_visible(),
+        None::<&str>,
+    )
 }
 
 /// 解析位置锁定开关：缺省（未配置 / 旧版配置）视为关闭。
@@ -4236,7 +4372,7 @@ fn show_settings_window(app: &AppHandle) {
     }
 }
 
-/// 切换常驻角色窗口的显隐。
+/// 切换常驻角色窗口的显隐（文字输入条联动：显隐状态与角色保持一致）。
 fn toggle_companion_window(app: &AppHandle) {
     let Some(window) = app.get_webview_window("companion") else {
         return;
@@ -4244,13 +4380,16 @@ fn toggle_companion_window(app: &AppHandle) {
     if window.is_visible().unwrap_or(true) {
         stop_performance_sync(app);
         let _ = window.hide();
+        set_chatbox_visible(app, false, false);
     } else {
         let _ = window.show();
         // 置底时 show 会把窗口顶到 Z 序顶部：Windows 需压回底部（macOS show 不改 level/点穿）。
         if cfg!(windows) && current_companion_layer() == CompanionWindowLayer::Back {
             apply_companion_layer_platform(app, CompanionWindowLayer::Back);
         }
-        let _ = window.set_focus();
+        // 输入条随角色一起显示并聚焦（show 后可直接打字）。macOS 上 chatbox 是
+        // 非激活面板，聚焦不激活 App，不会把开着的设置窗带到最前。
+        set_chatbox_visible(app, true, true);
     }
 }
 
@@ -4327,8 +4466,12 @@ fn register_shortcuts_at_startup(app: &AppHandle) {
         };
         let result = app
             .global_shortcut()
-            .on_shortcut(acc.as_str(), move |app, _sc, _ev| {
-                dispatch_shortcut(app, action);
+            .on_shortcut(acc.as_str(), move |app, _sc, ev| {
+                // 插件在按下和松开各回调一次：只响应按下，否则一次按键切换两次
+                // （表现为「按住消失、松开又出现」）
+                if ev.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                    dispatch_shortcut(app, action);
+                }
             });
         match result {
             Ok(()) => tracing::info!("全局快捷键已注册：{} = {}", action.as_str(), acc),
@@ -4378,8 +4521,11 @@ fn set_shortcut(app: AppHandle, action: String, accelerator: String) -> Result<(
     }
     let old = shortcuts.get(action).map(str::to_string);
     app.global_shortcut()
-        .on_shortcut(accelerator.as_str(), move |app, _sc, _ev| {
-            dispatch_shortcut(app, action);
+        .on_shortcut(accelerator.as_str(), move |app, _sc, ev| {
+            // 同启动注册路径：只响应按下，避免松开时二次触发
+            if ev.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                dispatch_shortcut(app, action);
+            }
         })
         .map_err(|e| format!("注册失败，可能已被其他应用占用：{e}"))?;
     // 新键注册成功后才解绑旧键
@@ -5637,6 +5783,13 @@ const COMPANION_MARGIN: f64 = 16.0;
 /// 模型渲染区整体下移一条，堆叠卡片不遮挡模型。需与前端 `BUBBLE_STRIP`
 /// （CompanionRoot.tsx）保持一致。
 const COMPANION_BUBBLE_STRIP: f64 = 72.0;
+/// 文字输入条窗口尺寸（逻辑像素，与 `setup` 中的 `inner_size` 保持一致）。
+/// 高度预留：底部 26px 透明外边距给 CSS 阴影留扩散空间（透明窗口会裁剪窗口外阴影），
+/// 其余留给多行生长与行内错误提示（发送失败时展示，正常时不占视觉空间——透明窗口）。
+const CHATBOX_W: f64 = 520.0;
+const CHATBOX_H: f64 = 96.0;
+/// 输入条默认位置距屏幕工作区底边的留白（逻辑像素）：galgame 对话框位，明显高于贴边。
+const CHATBOX_BOTTOM_MARGIN: f64 = 120.0;
 
 /// 计算角色窗口首次出现的右下角位置（逻辑像素）。
 ///
@@ -5652,6 +5805,41 @@ fn default_bottom_right_position(app: &AppHandle) -> Option<(f64, f64)> {
         right - COMPANION_INITIAL_W - COMPANION_MARGIN,
         bottom - COMPANION_INITIAL_H - COMPANION_MARGIN,
     ))
+}
+
+/// 计算输入条窗口首次出现的位置（逻辑像素）：主屏工作区底部居中
+/// （galgame 对话框位；排除 Dock / 任务栏）。拖动后由配置记忆接管。
+fn default_chatbox_position(app: &AppHandle) -> Option<(f64, f64)> {
+    let monitor = app.primary_monitor().ok().flatten()?;
+    let work = monitor.work_area();
+    let scale = monitor.scale_factor();
+    let left = work.position.x as f64 / scale;
+    let top = work.position.y as f64 / scale;
+    let w = work.size.width as f64 / scale;
+    let h = work.size.height as f64 / scale;
+    Some((
+        left + (w - CHATBOX_W) / 2.0,
+        top + h - CHATBOX_H - CHATBOX_BOTTOM_MARGIN,
+    ))
+}
+
+/// 逻辑像素坐标是否落在任一显示器的可见工作区内。
+///
+/// 用于过滤「拔掉外接屏后残留的屏幕外记忆位置」：多屏布局变化后恢复窗口
+/// 会导致窗口出现在不可见区域，此时应回退默认定位。查询失败时不拦截（保持恢复行为）。
+fn position_on_any_monitor(app: &AppHandle, x: f64, y: f64) -> bool {
+    match app.available_monitors() {
+        Ok(monitors) => monitors.iter().any(|m| {
+            let scale = m.scale_factor();
+            let work = m.work_area();
+            let left = work.position.x as f64 / scale;
+            let top = work.position.y as f64 / scale;
+            let right = left + work.size.width as f64 / scale;
+            let bottom = top + work.size.height as f64 / scale;
+            x >= left && x < right && y >= top && y < bottom
+        }),
+        Err(_) => true,
+    }
 }
 
 /// Tauri 应用入口。
@@ -5748,6 +5936,7 @@ pub fn run() {
             start_voice_session,
             stop_voice_session,
             is_voice_session_running,
+            send_voice_text,
             get_dsh_config,
             set_dsh_enabled,
             set_dsh_params,
@@ -5789,6 +5978,8 @@ pub fn run() {
             remove_companion,
             save_cover_image,
             save_companion_position,
+            save_chatbox_position,
+            hide_chatbox,
             set_companion_scale,
             set_companion_opacity,
             set_companion_click_through,
@@ -5955,10 +6146,15 @@ pub fn run() {
                 companion = companion.accept_first_mouse(true);
             }
 
-            // 有记忆位置 → 恢复；否则 → 首次定位到屏幕右下角。
-            if let Some(pos) = live2d.as_ref().and_then(|l| l.window_position.clone()) {
-                companion = companion.position(pos.x as f64, pos.y as f64);
-            } else if let Some((x, y)) = default_bottom_right_position(app.handle()) {
+            // 有记忆位置 → 恢复（落在所有显示器之外时说明多屏布局已变化，回退默认右下角）；
+            // 否则 → 首次定位到屏幕右下角。
+            let saved_pos = live2d
+                .as_ref()
+                .and_then(|l| l.window_position.clone())
+                .map(|p| (p.x as f64, p.y as f64))
+                .filter(|&(x, y)| position_on_any_monitor(app.handle(), x, y));
+            if let Some((x, y)) = saved_pos.or_else(|| default_bottom_right_position(app.handle()))
+            {
                 companion = companion.position(x, y);
             }
             companion.build()?;
@@ -6039,6 +6235,69 @@ pub fn run() {
                 settings = settings.decorations(false).shadow(false);
             }
             settings.build()?;
+
+            // 文字输入条窗口：默认隐藏，由托盘/右键菜单「文字输入条」勾选打开；
+            // 关闭走全局 CloseRequested → hide。macOS 建窗后转为非激活面板
+            // （见下方 to_panel::<ChatboxPanel>）：聚焦输入不激活应用，IME 行为
+            // 由 can_become_key_window 保证；其它平台保持普通可激活窗口。
+            let chatbox_cfg = loaded.as_ref().and_then(|s| s.chatbox.clone());
+            let mut chatbox =
+                WebviewWindowBuilder::new(app, "chatbox", WebviewUrl::App("chatbox.html".into()))
+                    .title("ZapMomo 输入")
+                    .inner_size(CHATBOX_W, CHATBOX_H)
+                    .resizable(false)
+                    .decorations(false)
+                    .transparent(true)
+                    .always_on_top(true)
+                    .skip_taskbar(true)
+                    // 透明窗口的原生阴影按整个窗口矩形绘制，与居中的圆角胶囊错位
+                    // （视觉上像错位的边框）——与角色窗口一致关闭，胶囊自带 CSS shadow。
+                    .shadow(false)
+                    .visible(false);
+            // macOS：首次点击直达 webview（无需先点一下聚焦），与角色窗口一致——
+            // 否则按住把手的第一下只用于激活窗口，第二下才能拖动。
+            #[cfg(target_os = "macos")]
+            {
+                chatbox = chatbox.accept_first_mouse(true);
+            }
+            // 定位：配置记忆（落在所有显示器之外时视为多屏布局已变化，回退默认）> 屏幕底部居中
+            let saved_pos = chatbox_cfg
+                .as_ref()
+                .and_then(|c| c.window_position.clone())
+                .map(|p| (p.x as f64, p.y as f64))
+                .filter(|&(x, y)| position_on_any_monitor(app.handle(), x, y));
+            if let Some((x, y)) = saved_pos.or_else(|| default_chatbox_position(app.handle())) {
+                chatbox = chatbox.position(x, y);
+            }
+            chatbox.build()?;
+            // macOS：转成非激活面板——聚焦输入框不激活应用（不会把开着的设置窗带到最前），
+            // 键盘/中文 IME 输入由 can_become_key_window 保证。
+            #[cfg(target_os = "macos")]
+            {
+                use tauri_nspanel::{CollectionBehavior, StyleMask, WebviewWindowExt};
+
+                if let Some(window) = app.get_webview_window("chatbox")
+                    && let Ok(panel) = window.to_panel::<ChatboxPanel>()
+                {
+                    panel.set_style_mask(StyleMask::empty().nonactivating_panel().into());
+                    panel.set_collection_behavior(
+                        CollectionBehavior::new()
+                            .stationary()
+                            .move_to_active_space()
+                            .full_screen_auxiliary()
+                            .into(),
+                    );
+                }
+            }
+            // 恢复持久化的可见性（缺省隐藏）
+            if chatbox_cfg
+                .as_ref()
+                .and_then(|c| c.visible)
+                .unwrap_or(false)
+                && let Some(window) = app.get_webview_window("chatbox")
+            {
+                let _ = window.show();
+            }
 
             // 自动打开设置窗口：仅用于「无全局菜单栏」的场景（macOS Accessory 模式或非 macOS），
             // 否则 Cmd+, 快捷键不可靠，自动打开可避免「找不到设置」；普通模式有菜单栏，无需自动弹出。

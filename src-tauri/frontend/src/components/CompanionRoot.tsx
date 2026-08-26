@@ -2,6 +2,7 @@ import { getCurrentWindow, LogicalPosition, LogicalSize } from "@tauri-apps/api/
 import type { Live2DModel } from "pixi-live2d-display/cubism4";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { EventBubble } from "@/components/companion/EventBubble";
+import { VoiceReplyBubble } from "@/components/companion/VoiceReplyBubble";
 import { GifStage } from "@/components/gif/GifStage";
 import {
   Live2dStage,
@@ -112,11 +113,20 @@ export function CompanionRoot() {
     return { width, height };
   }, []);
 
-  /** 统一设置窗口尺寸并同步本地 state；以窗口中心为锚点，角色缩放时保持原位。 */
+  /** 统一设置窗口尺寸并同步本地 state。
+   *  anchor="center"：以窗口中心为锚点（用户缩放/外部改比例时角色保持原位）；
+   *  anchor="topleft"：锚定左上角（启动恢复阶段使用——记忆的坐标就是最终窗口的左上角，
+   *  若用中心锚点，初始尺寸与最终尺寸的差异会让窗口每次启动都偏移并随记忆保存累积）。 */
   const resizeTo = useCallback(
-    async (ratio: number, s: number) => {
+    async (ratio: number, s: number, anchor: "center" | "topleft" = "center") => {
       const win = getCurrentWindow();
       const { width, height } = computeSize(ratio, s);
+      if (anchor === "topleft") {
+        // setSize 默认固定左上角，正是恢复语义；不动位置就不会触发 onMoved 回写。
+        await win.setSize(new LogicalSize(width, height));
+        setSize({ width, height });
+        return;
+      }
       // setSize 默认固定左上角（向右下生长），会使居中的角色表现为从左上角缩放。
       // 读取当前物理位置/尺寸并换算，把左上角移到「保持窗口中心不变」的位置。
       const factor = await win.scaleFactor();
@@ -166,6 +176,8 @@ export function CompanionRoot() {
   }, [config]);
 
   // 恢复持久化的缩放比例与透明度，并据此 resize 一次（确保前端 state 与后端建窗尺寸一致）。
+  // 启动恢复用左上角锚定：后端已把窗口放在记忆坐标（即最终窗口左上角），
+  // 中心锚点会因初始/最终尺寸差把窗口推偏，且偏移会被 onMoved 回写、下次启动再偏。
   useEffect(() => {
     if (!config) return;
     const s = config.window_scale ?? 1.0;
@@ -175,7 +187,7 @@ export function CompanionRoot() {
     // 旧后端 / 测试桩可能不返回该字段，兜底为未锁定。
     setLocked(config.locked ?? false);
     setDragMode(config.drag_mode ?? "direct");
-    void resizeTo(aspectRatioRef.current, s);
+    void resizeTo(aspectRatioRef.current, s, "topleft");
   }, [config, resizeTo]);
 
   useEffect(() => {
@@ -248,6 +260,8 @@ export function CompanionRoot() {
   }, []);
 
   // 模型加载后更新真实宽高比，并用当前 scale 重算尺寸（不持久化 scale）。
+  // 启动阶段（首次回调）同样用左上角锚定，理由同 config 恢复 effect。
+  const startupAnchorRef = useRef(true);
   const handleModelMetrics = useCallback(
     async (metrics: { aspectRatio: number }) => {
       const ratio =
@@ -255,7 +269,9 @@ export function CompanionRoot() {
           ? metrics.aspectRatio
           : DEFAULT_ASPECT_RATIO;
       setAspectRatio(ratio);
-      await resizeTo(ratio, scaleRef.current);
+      const anchor = startupAnchorRef.current ? "topleft" : "center";
+      startupAnchorRef.current = false;
+      await resizeTo(ratio, scaleRef.current, anchor);
     },
     [resizeTo],
   );
@@ -383,6 +399,8 @@ export function CompanionRoot() {
       </div>
       {/* dsh 任务事件气泡（pointer-events-none，不挡拖动/右键） */}
       <EventBubble />
+      {/* AI 伙伴回复气泡（galgame 对话框位，底部 overlay；打字/语音对话都展示） */}
+      {layer === "front" && <VoiceReplyBubble text={voice.pendingReply} phase={voice.phase} />}
       {/* 置底为纯背景装饰，不显示语音状态点 */}
       {layer === "front" && (
         <span className="absolute right-2 top-2">
