@@ -19,6 +19,11 @@ describe("ttsModelKindLabel", () => {
     expect(ttsModelKindLabel("voxcpm2")).toBe("VoxCPM2 克隆");
     expect(ttsModelKindLabel("pocket")).toBe("PocketTTS");
   });
+
+  it("qwen3_tts 两尺寸均为 Qwen3-TTS 克隆标签", () => {
+    expect(ttsModelKindLabel("qwen3_tts_06")).toBe("Qwen3-TTS 克隆");
+    expect(ttsModelKindLabel("qwen3_tts_17")).toBe("Qwen3-TTS 克隆");
+  });
 });
 
 describe("TTS_PRESETS", () => {
@@ -32,6 +37,16 @@ describe("TTS_PRESETS", () => {
     const vox = TTS_PRESETS.find((p) => p.id === "tts-voxcpm2-q8-audiocpp");
     expect(vox).toBeDefined();
     expect(vox?.kind).toBe("voxcpm2");
+  });
+
+  it("含 qwen3-tts 两尺寸条目且 id 与后端 registry 一致", () => {
+    const q06 = TTS_PRESETS.find((p) => p.id === "tts-qwen3-06b-base-q8-audiocpp");
+    expect(q06).toBeDefined();
+    expect(q06?.kind).toBe("qwen3_tts_06");
+
+    const q17 = TTS_PRESETS.find((p) => p.id === "tts-qwen3-17b-base-q8-audiocpp");
+    expect(q17).toBeDefined();
+    expect(q17?.kind).toBe("qwen3_tts_17");
   });
 
   it("id 唯一（防预设重复注册）", () => {

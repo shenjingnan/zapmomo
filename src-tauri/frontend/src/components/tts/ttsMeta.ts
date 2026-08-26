@@ -51,6 +51,9 @@ export function ttsModelKindLabel(kind: string): string {
       return "OmniVoice 克隆";
     case "voxcpm2":
       return "VoxCPM2 克隆";
+    case "qwen3_tts_06":
+    case "qwen3_tts_17":
+      return "Qwen3-TTS 克隆";
     default:
       return "TTS";
   }

@@ -70,6 +70,22 @@ export const TTS_PRESETS = [
     tagline: "audio.cpp 引擎 · 帧级流式 · 48kHz 录音室级 · 30 语种 · 仅 Apple Silicon（Metal）· 建议 16GB+ 内存",
     sizeBytes: 2_955_000_480,
   },
+  {
+    id: "tts-qwen3-06b-base-q8-audiocpp",
+    name: "Qwen3-TTS 0.6B 克隆",
+    kind: "qwen3_tts_06",
+    languages: "多语种",
+    tagline: "audio.cpp 引擎 · 声音克隆 · 10 语种 · 24kHz · 仅 Apple Silicon（Metal）· 需选择克隆音色",
+    sizeBytes: 1_991_211_136,
+  },
+  {
+    id: "tts-qwen3-17b-base-q8-audiocpp",
+    name: "Qwen3-TTS 1.7B 克隆",
+    kind: "qwen3_tts_17",
+    languages: "多语种",
+    tagline: "audio.cpp 引擎 · 声音克隆 · 10 语种 · 质量优先 · 24kHz · 仅 Apple Silicon（Metal）· 建议 16GB+ 内存 · 需选择克隆音色",
+    sizeBytes: 2_695_175_104,
+  },
 ] as const;
 
 export interface TtsModelSwitchState {
