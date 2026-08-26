@@ -166,7 +166,7 @@
 ## audiocpp_server（audio.cpp 引擎二进制，随安装包分发）
 
 - **用途**: TTS 第二推理后端（ggml 系 audio.cpp 的 HTTP server sidecar，裁剪构建
-  仅含 pocket_tts + omnivoice + voxcpm2 模型族；编译参数见 `.github/workflows/release.yml`）
+  仅含 pocket_tts + omnivoice + voxcpm2 + qwen3_tts 模型族；编译参数见 `.github/workflows/release.yml`）
 - **来源**: https://github.com/0xShug0/audio.cpp（版本 pin 见 release.yml 的 AUDIOCPP_REF）
 - **发布方**: ShugoAI LLC（audio.cpp 项目）
 - **许可证**: Apache-2.0。随 ZapMomo（GPL-3.0-only）以独立进程形式聚合分发，
