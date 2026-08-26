@@ -636,6 +636,12 @@ fn cmd_tts(cmd: TtsCmd) -> Result<(), String> {
                             desc.family
                         );
                     }
+                    crate::audiocpp::families::VoiceSemantics::ReferenceCloneRequired => {
+                        println!(
+                            "audiocpp 后端（{}）为必须克隆音色模型：必须用 --reference-wav 指定参考音频\n（Base 版无 auto voice 兜底，不可省略参考音色）",
+                            desc.family
+                        );
+                    }
                 }
                 return Ok(());
             }
