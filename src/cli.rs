@@ -457,10 +457,7 @@ async fn cmd_asr(cmd: AsrCmd) -> Result<(), String> {
             }
             Ok(())
         }
-        AsrCmd::InstallModel {
-            model_dir,
-            force,
-        } => {
+        AsrCmd::InstallModel { model_dir, force } => {
             use crate::asr::{
                 DownloadProgress, DownloadStage, install_model_to, install_punctuation_model_to,
                 punctuation_user_model_dir, user_model_dir,
@@ -697,8 +694,8 @@ async fn cmd_llm(cmd: LlmCmd) -> Result<(), String> {
     match cmd {
         LlmCmd::Load => {
             let cfg = llm_config()?;
-            let mut provider = crate::llm::create_provider(cfg.clone())
-                .map_err(|e| e.to_string())?;
+            let mut provider =
+                crate::llm::create_provider(cfg.clone()).map_err(|e| e.to_string())?;
             provider.load().map_err(|e| e.to_string())?;
             println!("provider: {}", cfg.provider);
             println!(
@@ -710,8 +707,8 @@ async fn cmd_llm(cmd: LlmCmd) -> Result<(), String> {
         }
         LlmCmd::Chat { text } => {
             let cfg = llm_config()?;
-            let mut provider = crate::llm::create_provider(cfg.clone())
-                .map_err(|e| e.to_string())?;
+            let mut provider =
+                crate::llm::create_provider(cfg.clone()).map_err(|e| e.to_string())?;
             provider.load().map_err(|e| e.to_string())?;
 
             let input = vec![InputItem::Message(ChatMessage::new(ChatRole::User, text))];
@@ -754,7 +751,8 @@ async fn cmd_voice(cmd: VoiceCmd) -> Result<(), String> {
         kws_model_dir,
         asr_model_dir,
         tts_model_dir,
-    } = cmd;    let overrides = crate::voice::config::CliOverrides {
+    } = cmd;
+    let overrides = crate::voice::config::CliOverrides {
         device,
         keywords,
         voice,

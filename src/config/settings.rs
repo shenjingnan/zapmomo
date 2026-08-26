@@ -240,12 +240,82 @@ pub struct AppConfig {
     /// 语音会话（KWS→ASR→LLM→TTS 全链路）配置
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub voice: Option<VoiceSettings>,
+    /// 模型库配置（用户通过「添加本地模型」注册的 external 模型等）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_library: Option<ModelLibrarySettings>,
     /// 全局快捷键配置
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shortcuts: Option<ShortcutsSettings>,
     /// dsh 桥配置（接收 deepseek-harness 插件推送的任务事件）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dsh: Option<DshSettings>,
+}
+
+/// 用户「添加本地模型」注册的模型（external）。
+///
+/// 只保存注册路径，**不复制/不管理用户文件**；移除时只删除本条目。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct LocalModel {
+    /// 稳定 id（`local-` + sha256(规范化绝对路径) 前 12 位）
+    pub id: String,
+    /// 目录/文件基名（展示用）
+    pub name: String,
+    /// 能力类型：kws | asr | llm | tts
+    pub model_type: String,
+    /// 绝对路径（LLM 必须是具体 .gguf 文件路径）
+    pub path: String,
+    /// 注册时间（RFC3339）
+    pub added_at: String,
+    /// 显式关联的 Registry 模型 id（从 Registry 卡片导入时携带；顶部添加本地模型为 None）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registry_id: Option<String>,
+}
+
+/// 模型库配置段。
+///
+/// 只保存**用户配置**（本地注册 + 目录/下载源），不保存 installed inventory。
+/// "电脑上装了哪些模型" 的唯一事实来源是 `~/.zapmomo/models/**/.zapmomo-lib.json` 扫描。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ModelLibrarySettings {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub local_models: Vec<LocalModel>,
+    /// 在线目录 base URL（默认 huggingface.co，预留 ModelScope 等）。
+    #[serde(default = "default_hf_catalog_base_url")]
+    pub hf_catalog_base_url: String,
+    /// 下载源：auto（HF 失败 fallback 镜像）| huggingface | mirror。
+    #[serde(default = "default_hf_download_source")]
+    pub hf_download_source: String,
+    /// 自定义镜像 base URL（默认 https://hf-mirror.com，可改为任意镜像）。
+    #[serde(default = "default_hf_mirror_url")]
+    pub hf_mirror_url: String,
+    /// Hugging Face token（明文 settings.toml；**不是安全存储**）。
+    /// 只进 Authorization header；绝不进 log / error message / cache key / 前端配置 View。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hf_token: Option<String>,
+}
+
+fn default_hf_catalog_base_url() -> String {
+    "https://huggingface.co".to_string()
+}
+
+fn default_hf_download_source() -> String {
+    "auto".to_string()
+}
+
+fn default_hf_mirror_url() -> String {
+    "https://hf-mirror.com".to_string()
+}
+
+impl Default for ModelLibrarySettings {
+    fn default() -> Self {
+        Self {
+            local_models: Vec::new(),
+            hf_catalog_base_url: default_hf_catalog_base_url(),
+            hf_download_source: default_hf_download_source(),
+            hf_mirror_url: default_hf_mirror_url(),
+            hf_token: None,
+        }
+    }
 }
 
 /// 唤醒词检测（KWS）配置。
@@ -639,6 +709,7 @@ impl Default for AppConfig {
             live2d: None,
             llm: None,
             voice: None,
+            model_library: None,
             shortcuts: None,
             dsh: None,
         }
@@ -828,6 +899,7 @@ mod tests {
             live2d: None,
             llm: None,
             voice: None,
+            model_library: None,
             shortcuts: None,
             dsh: None,
         };
@@ -1117,6 +1189,7 @@ mod tests {
                 }),
                 llm: None,
                 voice: None,
+                model_library: None,
                 shortcuts: None,
                 dsh: None,
             };

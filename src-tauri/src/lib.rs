@@ -1373,12 +1373,10 @@ async fn download_tts_model(
     .map_err(|e| format!("下载任务异常: {e}"))?
 }
 
-
-/// 本地 LLM 引擎状态：懒创建的 worker 线程引擎。
+/// LLM 引擎状态：懒创建的 worker 线程引擎。
 struct LlmState {
     engine: Arc<Mutex<Option<Arc<LlmEngine>>>>,
 }
-
 
 impl LlmState {
     fn new() -> Self {
@@ -1387,7 +1385,6 @@ impl LlmState {
         }
     }
 }
-
 
 /// 共享 LLM 引擎是否正在生成（voice / GUI 任一在生成）。切换/卸载保护据此判断：
 /// 仅当 LLM 真正在工作时才阻止，空闲（待唤醒）时允许切换（voice 会从共享槽感知新引擎）。
@@ -1431,7 +1428,7 @@ fn llm_resolved_config() -> Result<zapmomo::llm::config::ResolvedLlmConfig, Stri
 /// `stop_on_status` 时 `Status` 也终止）。**`Finished` 不退出**——同一引擎每次生成
 /// （GUI 对话 / voice 会话）都会继续产生 Token/Finished，单个转发线程持续服务，
 /// 否则第二次生成的事件无人转发，前端会一直停在「生成中」。
-/// 只持事件流 `rx`，不持引擎 Arc——引擎被替换后（set_current_model / load）无引用即
+/// 只持事件流 `rx`，不持引擎 Arc——引擎被替换后（重新连接 / load）无引用即
 /// drop，旧 forward 线程随 `Disconnected` 退出，避免旧模型内存泄漏。
 fn forward_llm_events(
     app: AppHandle,
@@ -2402,9 +2399,9 @@ fn set_llm_connection(
     Ok(())
 }
 
-/// 批量持久化 LLM 采样/引擎参数（11 项），写入 `[llm]`。
+/// 批量持久化 LLM 采样参数，写入 `[llm]`。
 ///
-/// 载荷为 `{ params: { context_size, temperature, ... } }`（snake_case 直传）；
+/// 载荷为 `{ params: { temperature, top_p, ... } }`（snake_case 直传）；
 /// `None` 字段保持原有配置不变。值先整体校验、再写入，出错时不部分修改。
 #[tauri::command]
 fn set_llm_params(params: LlmParamsPatch) -> Result<(), String> {
@@ -2417,7 +2414,7 @@ fn set_llm_params(params: LlmParamsPatch) -> Result<(), String> {
 
 /// 持久化角色 system prompt，写入 `[llm].system_prompt`。
 ///
-/// 空串会覆盖内置默认（模型收到空 system prompt）；改动需重新加载模型/provider 才生效。
+/// 空串会覆盖内置默认（模型收到空 system prompt）；改动需重新连接 provider 才生效。
 #[tauri::command]
 fn set_llm_system_prompt(prompt: String) -> Result<(), String> {
     let mut settings = settings::load_settings()?.unwrap_or_default();

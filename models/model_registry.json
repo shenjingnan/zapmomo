@@ -699,317 +699,6 @@
       }
     },
     {
-      "id": "qwen3-0.6b-q4-k-m",
-      "name": "Qwen3-0.6B",
-      "display_name": "Qwen3 0.6B Instruct Q4_K_M",
-      "model_type": "llm",
-      "runtime": "llama.cpp",
-      "format": "GGUF",
-      "description": "轻量级本地模型，资源占用低，适合入门设备。",
-      "languages": [
-        "zh",
-        "en"
-      ],
-      "tags": [
-        "llm",
-        "qwen3",
-        "chat",
-        "lightweight",
-        "thinking"
-      ],
-      "parameter_count": "0.6B",
-      "quantization": "Q4_K_M",
-      "file_name": "Qwen3-0.6B-Q4_K_M.gguf",
-      "version": "instruct",
-      "size_bytes": 396705472,
-      "homepage": "https://huggingface.co/unsloth/Qwen3-0.6B-GGUF",
-      "required_assets": [
-        "llm-qwen3-0.6b-q4-k-m"
-      ],
-      "optional_assets": [],
-      "download": {
-        "manifest_role": "llm-qwen3-0.6b-q4-k-m",
-        "extra_roles": [],
-        "kind": "raw"
-      }
-    },
-    {
-      "id": "qwen3-1.7b-q4-k-m",
-      "name": "Qwen3-1.7B",
-      "display_name": "Qwen3 1.7B Instruct Q4_K_M",
-      "model_type": "llm",
-      "runtime": "llama.cpp",
-      "format": "GGUF",
-      "description": "平衡性能与资源占用的本地模型，支持思考模式。",
-      "languages": [
-        "zh",
-        "en"
-      ],
-      "tags": [
-        "llm",
-        "qwen3",
-        "chat",
-        "thinking"
-      ],
-      "parameter_count": "1.7B",
-      "quantization": "Q4_K_M",
-      "file_name": "Qwen3-1.7B-Q4_K_M.gguf",
-      "version": "instruct",
-      "size_bytes": 1107409472,
-      "homepage": "https://huggingface.co/unsloth/Qwen3-1.7B-GGUF",
-      "required_assets": [
-        "llm-qwen3-1.7b-q4-k-m"
-      ],
-      "optional_assets": [],
-      "download": {
-        "manifest_role": "llm-qwen3-1.7b-q4-k-m",
-        "extra_roles": [],
-        "kind": "raw"
-      }
-    },
-    {
-      "id": "qwen3-4b-instruct-2507-q4-k-m",
-      "name": "Qwen3-4B-Instruct-2507",
-      "display_name": "Qwen3 4B Instruct 2507 Q4_K_M",
-      "model_type": "llm",
-      "runtime": "llama.cpp",
-      "format": "GGUF",
-      "description": "项目默认推荐模型，Q4_K_M 量化，智能与速度均衡。",
-      "languages": [
-        "zh",
-        "en"
-      ],
-      "tags": [
-        "llm",
-        "qwen3",
-        "chat",
-        "thinking",
-        "high-accuracy"
-      ],
-      "parameter_count": "4B",
-      "quantization": "Q4_K_M",
-      "file_name": "Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
-      "version": "2507",
-      "size_bytes": 2497281120,
-      "homepage": "https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF",
-      "required_assets": [
-        "llm-qwen3-4b-instruct-2507-q4-k-m"
-      ],
-      "optional_assets": [],
-      "download": {
-        "manifest_role": "llm-qwen3-4b-instruct-2507-q4-k-m",
-        "extra_roles": [],
-        "kind": "raw"
-      }
-    },
-    {
-      "id": "qwen3-0.6b-q8-0",
-      "name": "Qwen3-0.6B",
-      "display_name": "Qwen3 0.6B Instruct Q8_0",
-      "model_type": "llm",
-      "runtime": "llama.cpp",
-      "format": "GGUF",
-      "description": "入门级高精度量化，比 Q4 更准，资源占用仍低。",
-      "languages": [
-        "zh",
-        "en"
-      ],
-      "tags": [
-        "llm",
-        "qwen3",
-        "chat",
-        "lightweight",
-        "high-accuracy"
-      ],
-      "parameter_count": "0.6B",
-      "quantization": "Q8_0",
-      "file_name": "Qwen3-0.6B-Q8_0.gguf",
-      "version": "instruct",
-      "size_bytes": 639447744,
-      "homepage": "https://huggingface.co/unsloth/Qwen3-0.6B-GGUF",
-      "required_assets": [
-        "llm-qwen3-0.6b-q8-0"
-      ],
-      "optional_assets": [],
-      "download": {
-        "manifest_role": "llm-qwen3-0.6b-q8-0",
-        "extra_roles": [],
-        "kind": "raw"
-      }
-    },
-    {
-      "id": "qwen3-1.7b-q5-k-m",
-      "name": "Qwen3-1.7B",
-      "display_name": "Qwen3 1.7B Instruct Q5_K_M",
-      "model_type": "llm",
-      "runtime": "llama.cpp",
-      "format": "GGUF",
-      "description": "均衡升级：比 Q4 更准，体积适中。",
-      "languages": [
-        "zh",
-        "en"
-      ],
-      "tags": [
-        "llm",
-        "qwen3",
-        "chat",
-        "thinking"
-      ],
-      "parameter_count": "1.7B",
-      "quantization": "Q5_K_M",
-      "file_name": "Qwen3-1.7B-Q5_K_M.gguf",
-      "version": "instruct",
-      "size_bytes": 1257880128,
-      "homepage": "https://huggingface.co/unsloth/Qwen3-1.7B-GGUF",
-      "required_assets": [
-        "llm-qwen3-1.7b-q5-k-m"
-      ],
-      "optional_assets": [],
-      "download": {
-        "manifest_role": "llm-qwen3-1.7b-q5-k-m",
-        "extra_roles": [],
-        "kind": "raw"
-      }
-    },
-    {
-      "id": "qwen3-1.7b-q8-0",
-      "name": "Qwen3-1.7B",
-      "display_name": "Qwen3 1.7B Instruct Q8_0",
-      "model_type": "llm",
-      "runtime": "llama.cpp",
-      "format": "GGUF",
-      "description": "1.7B 高精度量化，接近全精度效果。",
-      "languages": [
-        "zh",
-        "en"
-      ],
-      "tags": [
-        "llm",
-        "qwen3",
-        "chat",
-        "thinking",
-        "high-accuracy"
-      ],
-      "parameter_count": "1.7B",
-      "quantization": "Q8_0",
-      "file_name": "Qwen3-1.7B-Q8_0.gguf",
-      "version": "instruct",
-      "size_bytes": 1834426944,
-      "homepage": "https://huggingface.co/unsloth/Qwen3-1.7B-GGUF",
-      "required_assets": [
-        "llm-qwen3-1.7b-q8-0"
-      ],
-      "optional_assets": [],
-      "download": {
-        "manifest_role": "llm-qwen3-1.7b-q8-0",
-        "extra_roles": [],
-        "kind": "raw"
-      }
-    },
-    {
-      "id": "qwen3-4b-instruct-2507-q5-k-m",
-      "name": "Qwen3-4B-Instruct-2507",
-      "display_name": "Qwen3 4B Instruct 2507 Q5_K_M",
-      "model_type": "llm",
-      "runtime": "llama.cpp",
-      "format": "GGUF",
-      "description": "默认 4B 模型的高精度版，智能与速度更均衡。",
-      "languages": [
-        "zh",
-        "en"
-      ],
-      "tags": [
-        "llm",
-        "qwen3",
-        "chat",
-        "thinking",
-        "high-accuracy"
-      ],
-      "parameter_count": "4B",
-      "quantization": "Q5_K_M",
-      "file_name": "Qwen3-4B-Instruct-2507-Q5_K_M.gguf",
-      "version": "2507",
-      "size_bytes": 2889514080,
-      "homepage": "https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF",
-      "required_assets": [
-        "llm-qwen3-4b-instruct-2507-q5-k-m"
-      ],
-      "optional_assets": [],
-      "download": {
-        "manifest_role": "llm-qwen3-4b-instruct-2507-q5-k-m",
-        "extra_roles": [],
-        "kind": "raw"
-      }
-    },
-    {
-      "id": "qwen3-8b-q4-k-m",
-      "name": "Qwen3-8B",
-      "display_name": "Qwen3 8B Instruct Q4_K_M",
-      "model_type": "llm",
-      "runtime": "llama.cpp",
-      "format": "GGUF",
-      "description": "更大的本地模型，能力更强；需要较强硬件（约 5GB）。",
-      "languages": [
-        "zh",
-        "en"
-      ],
-      "tags": [
-        "llm",
-        "qwen3",
-        "chat",
-        "thinking",
-        "high-accuracy"
-      ],
-      "parameter_count": "8B",
-      "quantization": "Q4_K_M",
-      "file_name": "Qwen3-8B-Q4_K_M.gguf",
-      "version": "instruct",
-      "size_bytes": 5027784512,
-      "homepage": "https://huggingface.co/unsloth/Qwen3-8B-GGUF",
-      "required_assets": [
-        "llm-qwen3-8b-q4-k-m"
-      ],
-      "optional_assets": [],
-      "download": {
-        "manifest_role": "llm-qwen3-8b-q4-k-m",
-        "extra_roles": [],
-        "kind": "raw"
-      }
-    },
-    {
-      "id": "llama-3.2-1b-instruct-q4-k-m",
-      "name": "Llama-3.2-1B-Instruct",
-      "display_name": "Llama 3.2 1B Instruct Q4_K_M",
-      "model_type": "llm",
-      "runtime": "llama.cpp",
-      "format": "GGUF",
-      "description": "非 Qwen 系列英文小模型，轻量、适合英文对话。",
-      "languages": [
-        "en"
-      ],
-      "tags": [
-        "llm",
-        "llama",
-        "chat",
-        "lightweight"
-      ],
-      "parameter_count": "1B",
-      "quantization": "Q4_K_M",
-      "file_name": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
-      "version": "instruct",
-      "size_bytes": 807694368,
-      "homepage": "https://huggingface.co/unsloth/Llama-3.2-1B-Instruct-GGUF",
-      "required_assets": [
-        "llm-llama-3.2-1b-instruct-q4-k-m"
-      ],
-      "optional_assets": [],
-      "download": {
-        "manifest_role": "llm-llama-3.2-1b-instruct-q4-k-m",
-        "extra_roles": [],
-        "kind": "raw"
-      }
-    },
-    {
       "id": "tts-pocket-english-audiocpp",
       "name": "pocket-tts-english-audiocpp",
       "display_name": "PocketTTS English (audio.cpp)",
@@ -1018,18 +707,29 @@
       "runtime": "audiocpp",
       "format": "GGUF",
       "description": "PocketTTS-100M 英文语音合成，q8_0 量化，固定音色 alba；由 audio.cpp 引擎驱动。",
-      "languages": ["en"],
-      "tags": ["tts", "audiocpp", "english"],
+      "languages": [
+        "en"
+      ],
+      "tags": [
+        "tts",
+        "audiocpp",
+        "english"
+      ],
       "parameter_count": "100M",
       "quantization": "q8_0",
       "version": "q8_0",
       "size_bytes": 127856704,
       "homepage": "https://github.com/0xShug0/audio.cpp",
-      "required_assets": ["tts-audiocpp-pocket", "tts-audiocpp-pocket-embeddings"],
+      "required_assets": [
+        "tts-audiocpp-pocket",
+        "tts-audiocpp-pocket-embeddings"
+      ],
       "optional_assets": [],
       "download": {
         "manifest_role": "tts-audiocpp-pocket",
-        "extra_roles": ["tts-audiocpp-pocket-embeddings"],
+        "extra_roles": [
+          "tts-audiocpp-pocket-embeddings"
+        ],
         "kind": "raw"
       }
     },
@@ -1042,16 +742,28 @@
       "runtime": "audiocpp",
       "format": "GGUF",
       "description": "OmniVoice（Qwen3-0.6B 基座）零样本声音克隆 + 声音设计，600+ 语种，q8_0 量化，24kHz；由 audio.cpp 引擎驱动。体积约 1.26 GiB，推理依赖 Metal 加速（实测 CPU 不可用），建议 8GB 以上内存的 Apple Silicon 设备使用。",
-      "languages": ["zh", "en"],
-      "tags": ["tts", "audiocpp", "clone", "multilingual"],
+      "languages": [
+        "zh",
+        "en"
+      ],
+      "tags": [
+        "tts",
+        "audiocpp",
+        "clone",
+        "multilingual"
+      ],
       "parameter_count": "0.6B",
       "quantization": "q8_0",
       "version": "q8_0",
       "size_bytes": 1350288416,
       "homepage": "https://huggingface.co/k2-fsa/OmniVoice",
-      "required_assets": ["tts-audiocpp-omnivoice"],
+      "required_assets": [
+        "tts-audiocpp-omnivoice"
+      ],
       "optional_assets": [],
-      "platforms": ["darwin-aarch64"],
+      "platforms": [
+        "darwin-aarch64"
+      ],
       "download": {
         "manifest_role": "tts-audiocpp-omnivoice",
         "extra_roles": [],
@@ -1067,16 +779,30 @@
       "runtime": "audiocpp",
       "format": "GGUF",
       "description": "VoxCPM2（OpenBMB MiniCPM-4 2B 基座）零样本声音克隆 + 声音设计，30 语种免语言标签，q8_0 量化，48kHz 录音室级输出（AudioVAE V2 内置超分）；由 audio.cpp 引擎驱动，支持音频帧级流式（实测首块 0.36s）。体积约 2.75 GiB，推理依赖 Metal 加速，运行内存峰值约 7.6GB，建议 16GB 以上内存（32GB 更稳）的 Apple Silicon 设备使用。",
-      "languages": ["zh", "en"],
-      "tags": ["tts", "audiocpp", "clone", "multilingual", "48khz", "streaming"],
+      "languages": [
+        "zh",
+        "en"
+      ],
+      "tags": [
+        "tts",
+        "audiocpp",
+        "clone",
+        "multilingual",
+        "48khz",
+        "streaming"
+      ],
       "parameter_count": "2B",
       "quantization": "q8_0",
       "version": "q8_0",
       "size_bytes": 2955000480,
       "homepage": "https://huggingface.co/OpenBMB/VoxCPM2",
-      "required_assets": ["tts-audiocpp-voxcpm2"],
+      "required_assets": [
+        "tts-audiocpp-voxcpm2"
+      ],
       "optional_assets": [],
-      "platforms": ["darwin-aarch64"],
+      "platforms": [
+        "darwin-aarch64"
+      ],
       "download": {
         "manifest_role": "tts-audiocpp-voxcpm2",
         "extra_roles": [],

@@ -298,10 +298,8 @@ export type SaveTtsVoiceRequest = {
   referenceText: string;
 };
 
-/** 解析后的 LLM 采样/引擎参数（对应后端 GenParams，snake_case 直传）。 */
+/** 解析后的 LLM 采样参数（对应后端 GenParams，snake_case 直传）。 */
 export interface LlmParams {
-  context_size: number;
-  batch_size: number;
   max_tokens: number;
   temperature: number;
   top_p: number;
@@ -309,36 +307,27 @@ export interface LlmParams {
   min_p: number;
   repeat_penalty: number;
   seed: number;
-  threads: number;
-  gpu_layers: number;
-  enable_thinking: boolean;
 }
 
-/** `set_llm_params` 载荷：11 项采样/引擎参数（enable_thinking 走独立命令，不入批）。 */
-export type LlmParamsPatch = Omit<LlmParams, "enable_thinking">;
+/** `set_llm_params` 载荷：采样参数（snake_case 直传，缺省项不修改）。 */
+export type LlmParamsPatch = Partial<LlmParams>;
 
 /** `get_llm_config` 返回 */
 export interface LlmConfigInfo {
   enabled: boolean;
   provider: string;
-  model_path: string;
-  models_present: boolean;
   ready: boolean;
-  /** RuntimeActual：当前真正加载的模型路径（None = 未加载） */
-  loaded_model_path: string | null;
-  enable_thinking: boolean;
-  auto_load: boolean;
   settings_path: string;
   /** 当前生效的角色 system prompt */
   system_prompt: string;
-  /** 当前生效的采样/引擎参数（已 resolve） */
+  /** 当前生效的采样参数（已 resolve） */
   params: LlmParams;
-}
-
-/** `download_llm_model` 返回（`applied=false` = 用户已配置有效模型，未覆盖） */
-export interface LlmDownloadResult {
-  model_path: string;
-  applied: boolean;
+  /** OpenAI 兼容接口地址 */
+  base_url: string | null;
+  /** 掩码后的 API Key（仅展示用） */
+  api_key_masked: string | null;
+  /** 模型名（如 glm-4.7-flash） */
+  model: string | null;
 }
 
 /** `llm-token` 事件载荷（对应后端 TokenDelta） */

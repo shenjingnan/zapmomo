@@ -78,9 +78,7 @@ impl LlmEngine {
         let generating_clone = generating.clone();
         let handle = std::thread::Builder::new()
             .name("llm-worker".to_string())
-            .spawn(move || {
-                worker_loop(config, cmd_rx, subs_clone, generating_clone, ready_clone)
-            })
+            .spawn(move || worker_loop(config, cmd_rx, subs_clone, generating_clone, ready_clone))
             .map_err(|e| LlmError::BackendUnavailable(e.to_string()))?;
 
         Ok(Self {
