@@ -858,8 +858,10 @@ mod tests {
                 .iter()
                 .all(|i| i.model_type.as_deref() == Some("llm")
                     || i.model_id == "asr-qwen3-0.6b"
-                    || i.model_id == "tts-omnivoice-q8-audiocpp"),
-            "搜索 qwen 只注入 LLM 与 Qwen3-ASR（及描述含 Qwen3 基座的 OmniVoice，仅 Metal 平台）"
+                    || i.model_id == "tts-omnivoice-q8-audiocpp"
+                    || i.model_id == "tts-qwen3-06b-base-q8-audiocpp"
+                    || i.model_id == "tts-qwen3-17b-base-q8-audiocpp"),
+            "搜索 qwen 只注入 LLM 与 Qwen3-ASR（及描述/名称含 Qwen3 的 OmniVoice、Qwen3-TTS，仅 Metal 平台）"
         );
     }
 }

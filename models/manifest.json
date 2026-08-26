@@ -391,6 +391,28 @@
       "sha256": "c8e01ab4416011e12a28f24ede298a1aa5ce64b43f8e8aaad53b1e2fe7c96432",
       "size_bytes": 2955000480,
       "license": "Apache-2.0"
+    },
+    {
+      "name": "qwen3-tts-06b-base-audiocpp",
+      "role": "tts-audiocpp-qwen3-06b",
+      "version": "q8_0",
+      "kind": "raw",
+      "archive": "qwen3-tts-12hz-0.6b-base-q8_0.gguf",
+      "source": "https://huggingface.co/audio-cpp/audio.cpp-gguf/resolve/main/Qwen3-TTS-12Hz-0.6B-Base-GGUF/qwen3-tts-12hz-0.6b-base-q8_0.gguf",
+      "sha256": "771420bd20ff5f35407b4fa9cf9c5461e153800d3d772ef51c9febc0a520855d",
+      "size_bytes": 1991211136,
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "qwen3-tts-17b-base-audiocpp",
+      "role": "tts-audiocpp-qwen3-17b",
+      "version": "q8_0_v2",
+      "kind": "raw",
+      "archive": "qwen3-tts-12hz-1.7b-base-q8_0_v2.gguf",
+      "source": "https://huggingface.co/audio-cpp/audio.cpp-gguf/resolve/main/Qwen3-TTS-12Hz-1.7B-Base-GGUF/qwen3-tts-12hz-1.7b-base-q8_0_v2.gguf",
+      "sha256": "b55e06c7890d43c208d15aed8b4ed3f18215f295e47d5960e061b15bff338ab0",
+      "size_bytes": 2695175104,
+      "license": "Apache-2.0"
     }
   ]
 }

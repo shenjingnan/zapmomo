@@ -1082,6 +1082,56 @@
         "extra_roles": [],
         "kind": "raw"
       }
+    },
+    {
+      "id": "tts-qwen3-06b-base-q8-audiocpp",
+      "name": "qwen3-tts-06b-base-audiocpp",
+      "display_name": "Qwen3-TTS 0.6B 音色克隆 (audio.cpp)",
+      "model_type": "tts",
+      "tts_kind": "qwen3_tts_06",
+      "runtime": "audiocpp",
+      "format": "GGUF",
+      "description": "Qwen3-TTS 0.6B Base（12Hz）零样本音色克隆，10 语种，q8_0 量化，24kHz；由 audio.cpp 引擎驱动。体积约 1.86 GiB，推理依赖 Metal 加速，建议 8GB 以上内存的 Apple Silicon 设备使用。需配合音色库克隆音色（Base 版无内置音色）。",
+      "languages": ["zh", "en", "ja", "ko", "de", "fr", "ru", "pt", "es", "it"],
+      "tags": ["tts", "audiocpp", "clone", "multilingual"],
+      "parameter_count": "0.6B",
+      "quantization": "q8_0",
+      "version": "q8_0",
+      "size_bytes": 1991211136,
+      "homepage": "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+      "required_assets": ["tts-audiocpp-qwen3-06b"],
+      "optional_assets": [],
+      "platforms": ["darwin-aarch64"],
+      "download": {
+        "manifest_role": "tts-audiocpp-qwen3-06b",
+        "extra_roles": [],
+        "kind": "raw"
+      }
+    },
+    {
+      "id": "tts-qwen3-17b-base-q8-audiocpp",
+      "name": "qwen3-tts-17b-base-audiocpp",
+      "display_name": "Qwen3-TTS 1.7B 音色克隆 (audio.cpp)",
+      "model_type": "tts",
+      "tts_kind": "qwen3_tts_17",
+      "runtime": "audiocpp",
+      "format": "GGUF",
+      "description": "Qwen3-TTS 1.7B Base（12Hz）零样本音色克隆，10 语种，q8_0 量化（_v2 打包），24kHz；由 audio.cpp 引擎驱动。质量优先变体，体积约 2.51 GiB，推理依赖 Metal 加速，建议 16GB 以上内存的 Apple Silicon 设备使用。需配合音色库克隆音色（Base 版无内置音色）。",
+      "languages": ["zh", "en", "ja", "ko", "de", "fr", "ru", "pt", "es", "it"],
+      "tags": ["tts", "audiocpp", "clone", "multilingual"],
+      "parameter_count": "1.7B",
+      "quantization": "q8_0",
+      "version": "q8_0_v2",
+      "size_bytes": 2695175104,
+      "homepage": "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+      "required_assets": ["tts-audiocpp-qwen3-17b"],
+      "optional_assets": [],
+      "platforms": ["darwin-aarch64"],
+      "download": {
+        "manifest_role": "tts-audiocpp-qwen3-17b",
+        "extra_roles": [],
+        "kind": "raw"
+      }
     }
   ]
 }

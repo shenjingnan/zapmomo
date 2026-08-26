@@ -103,8 +103,11 @@ pub enum TtsModelKind {
     /// Qwen3-TTS 0.6B Base：audio.cpp 后端专用（10 语种音色克隆，24kHz）。
     /// 同款「audiocpp-only kind」语义（见 `Omnivoice` 注释）。
     /// Base 版必须提供克隆参考音频（上游无 auto voice）。
+    /// 显式 serde rename：派生 snake_case 会得到 `qwen3_tts06`，与 as_str/parse_str 不一致
+    #[serde(rename = "qwen3_tts_06")]
     Qwen3Tts06,
     /// Qwen3-TTS 1.7B Base：audio.cpp 后端专用（质量优先变体）。
+    #[serde(rename = "qwen3_tts_17")]
     Qwen3Tts17,
     Supertonic,
 }

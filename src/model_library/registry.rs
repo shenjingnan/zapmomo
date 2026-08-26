@@ -218,6 +218,9 @@ pub fn required_files_for_role(role: &str) -> &'static [&'static str] {
         "tts-audiocpp-pocket-embeddings" => &[crate::audiocpp::families::POCKET_EMBEDDINGS_FILE],
         "tts-audiocpp-omnivoice" => &[crate::audiocpp::families::OMNIVOICE.gguf_file],
         "tts-audiocpp-voxcpm2" => &[crate::audiocpp::families::VOXCPM2.gguf_file],
+        // Qwen3-TTS 两尺寸（音色克隆）：钉死各自 gguf 主文件名
+        "tts-audiocpp-qwen3-06b" => &[crate::audiocpp::families::QWEN3_TTS_06B.gguf_file],
+        "tts-audiocpp-qwen3-17b" => &[crate::audiocpp::families::QWEN3_TTS_17B.gguf_file],
         // Kokoro 两量化变体：registry 层按 role 钉死主模型文件名（staging 校验抓错误归档），
         // 引擎层用 kokoro_model_file_in 双名探测容忍两种包
         "tts-kokoro" => &crate::tts::config::KOKORO_FP32_REQUIRED_FILES,
@@ -246,8 +249,8 @@ mod tests {
         let models = all_models();
         assert_eq!(
             models.len(),
-            32,
-            "应为 7 个首批（含 2 KWS）+ 5 个 ASR + 6 个补充 LLM + 2 个新 TTS + 3 个新 ASR + 2 个流式 Paraformer + 1 个新 KWS（gigaspeech）+ 2 个 Kokoro TTS + 1 个 Qwen3-ASR + 1 个 audiocpp PocketTTS + 1 个 audiocpp OmniVoice + 1 个 audiocpp VoxCPM2"
+            34,
+            "应为 7 个首批（含 2 KWS）+ 5 个 ASR + 6 个补充 LLM + 2 个新 TTS + 3 个新 ASR + 2 个流式 Paraformer + 1 个新 KWS（gigaspeech）+ 2 个 Kokoro TTS + 1 个 Qwen3-ASR + 1 个 audiocpp PocketTTS + 1 个 audiocpp OmniVoice + 1 个 audiocpp VoxCPM2 + 2 个 Qwen3-TTS"
         );
         assert!(
             models
@@ -366,6 +369,15 @@ mod tests {
         assert!(!q3.contains(&"tokenizer"), "目录不能作完整性条目");
         // 回归：既有 streaming zipformer role 仍为 4 件套（不被新精确 arm 吞掉）
         assert_eq!(required_files_for_role("asr-zh-14m").len(), 4);
+        // Qwen3-TTS 两尺寸：钉死各自 gguf 主文件名（families 常量单源）
+        assert_eq!(
+            required_files_for_role("tts-audiocpp-qwen3-06b"),
+            &[crate::audiocpp::families::QWEN3_TTS_06B.gguf_file]
+        );
+        assert_eq!(
+            required_files_for_role("tts-audiocpp-qwen3-17b"),
+            &[crate::audiocpp::families::QWEN3_TTS_17B.gguf_file]
+        );
         assert!(required_files_for_role("unknown").is_empty());
     }
 
@@ -398,6 +410,14 @@ mod tests {
         assert_eq!(
             registry_tts_kind("tts-omnivoice-q8-audiocpp"),
             Some(TtsModelKind::Omnivoice)
+        );
+        assert_eq!(
+            registry_tts_kind("tts-qwen3-06b-base-q8-audiocpp"),
+            Some(TtsModelKind::Qwen3Tts06)
+        );
+        assert_eq!(
+            registry_tts_kind("tts-qwen3-17b-base-q8-audiocpp"),
+            Some(TtsModelKind::Qwen3Tts17)
         );
         // 非 TTS 或无 tts_kind → None
         assert_eq!(registry_tts_kind("qwen3-1.7b-q4-k-m"), None);
