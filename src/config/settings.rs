@@ -249,6 +249,9 @@ pub struct AppConfig {
     /// dsh 桥配置（接收 deepseek-harness 插件推送的任务事件）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dsh: Option<DshSettings>,
+    /// 文字输入条窗口配置
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chatbox: Option<ChatboxSettings>,
 }
 
 /// 用户「添加本地模型」注册的模型（external）。
@@ -715,6 +718,19 @@ fn default_log_level() -> String {
     "info".to_string()
 }
 
+/// 文字输入条窗口配置。
+///
+/// 字段可缺省：未配置时回退内置默认（隐藏 + 桌宠正上方/屏幕底部居中）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ChatboxSettings {
+    /// 输入条是否显示（缺省视为 false）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible: Option<bool>,
+    /// 输入条窗口位置（逻辑像素；缺省表示未记录 → 定位到桌宠正上方）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_position: Option<CompanionWindowPosition>,
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -733,6 +749,7 @@ impl Default for AppConfig {
             model_library: None,
             shortcuts: None,
             dsh: None,
+            chatbox: None,
         }
     }
 }
@@ -923,6 +940,7 @@ mod tests {
             model_library: None,
             shortcuts: None,
             dsh: None,
+            chatbox: None,
         };
         let toml_str = toml::to_string(&config).unwrap();
         let deserialized: AppConfig = toml::from_str(&toml_str).unwrap();
@@ -1213,6 +1231,7 @@ mod tests {
                 model_library: None,
                 shortcuts: None,
                 dsh: None,
+                chatbox: None,
             };
             save_settings(&config).unwrap();
             let loaded = load_settings().unwrap().unwrap();
