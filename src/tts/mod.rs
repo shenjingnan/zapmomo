@@ -128,7 +128,10 @@ pub(crate) fn build_offline_model_config(cfg: &ResolvedTtsConfig) -> OfflineTtsM
         }
         // audiocpp-only 族：无 sherpa 配置分支（引擎构造在 AudiocppTts，
         // preflight 已按族清单拦截非法组合）
-        TtsModelKind::Omnivoice | TtsModelKind::Voxcpm2 => {}
+        TtsModelKind::Omnivoice
+        | TtsModelKind::Voxcpm2
+        | TtsModelKind::Qwen3Tts06
+        | TtsModelKind::Qwen3Tts17 => {}
     }
     config
 }
