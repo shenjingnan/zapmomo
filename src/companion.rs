@@ -1,4 +1,10 @@
-//! 伙伴库（Companion Library）：管理用户导入的 Live2D 模型集合与「当前使用」项。
+//! 伙伴库（Companion Library）：管理用户导入的伙伴集合与「当前使用」项。
+//!
+//! 伙伴形态（`CompanionModel.format` 判别）：
+//! - `"cubism3"`：Live2D 模型目录（`.model3.json` 清单）
+//! - `"gif"`：GIF 动图文件
+//! - `"character"`：角色包目录（`character.md` 人设 + `character.png` 立绘 +
+//!   可选 `voice/reference.wav` + `voice/reference.txt` 音色克隆参考）
 //!
 //! 数据模型：
 //! - 清单：`~/.zapmomo/companions/library.json`（`CompanionLibrary`，schema_version = 1）
@@ -195,6 +201,21 @@ pub fn is_gif(model: &CompanionModel) -> bool {
     model.format == GIF_FORMAT
 }
 
+/// 角色包伙伴的 format 标识（判别式见 `is_character`）。
+pub const CHARACTER_FORMAT: &str = "character";
+
+/// format 判别：角色包伙伴（character.md + character.png + 可选 voice/）。
+pub fn is_character(model: &CompanionModel) -> bool {
+    model.format == CHARACTER_FORMAT
+}
+
+// 角色包约定文件名（托管目录内按约定探测，不入库）。
+const CHARACTER_MD: &str = "character.md";
+const CHARACTER_PNG: &str = "character.png";
+const VOICE_DIR: &str = "voice";
+const REFERENCE_WAV: &str = "reference.wav";
+const REFERENCE_TXT: &str = "reference.txt";
+
 /// 校验托管 GIF 伙伴：文件存在且带合法 GIF 文件头（GIF87a/GIF89a）。
 ///
 /// 只读前 6 字节，不加载大尺寸 GIF 的全文。
@@ -210,18 +231,93 @@ pub fn validate_gif_file(file: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// 校验 PNG 立绘：文件存在且带合法 PNG 签名（`\x89PNG\r\n\x1a\n`）。
+///
+/// 只读前 8 字节，不加载图片全文。
+pub fn validate_png_file(file: &Path) -> Result<(), String> {
+    use std::io::Read;
+    let mut f =
+        std::fs::File::open(file).map_err(|_| "角色包缺少可读的 character.png 立绘".to_string())?;
+    let mut magic = [0u8; 8];
+    f.read_exact(&mut magic)
+        .map_err(|e| format!("读取 character.png 文件头失败: {e}"))?;
+    if &magic != b"\x89PNG\r\n\x1a\n" {
+        return Err("character.png 不是合法的 PNG 文件（签名不匹配）".to_string());
+    }
+    Ok(())
+}
+
+/// 校验 wav 文件头（RIFF/WAVE，前 12 字节）。
+fn validate_wav_header(file: &Path) -> Result<(), String> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(file).map_err(|e| format!("参考音频不存在或无法读取: {e}"))?;
+    let mut magic = [0u8; 12];
+    f.read_exact(&mut magic)
+        .map_err(|e| format!("读取参考音频文件头失败: {e}"))?;
+    if &magic[..4] != b"RIFF" || &magic[8..] != b"WAVE" {
+        return Err("reference.wav 不是合法的 wav 文件（缺少 RIFF/WAVE 文件头）".to_string());
+    }
+    Ok(())
+}
+
+/// 校验角色包目录结构（导入时深校验 + set_active/sanitize 轻量校验共用）。
+///
+/// 规则：`character.md` 存在且非空；`character.png` 为合法 PNG；`voice/` 可选，
+/// 存在时 `reference.wav` 与 `reference.txt` 必须成对（缺其一报错）。均为读文件头/
+/// 小文件级操作，与 GIF 魔数校验同量级。
+pub fn validate_character_pack(dir: &Path) -> Result<(), String> {
+    let md = dir.join(CHARACTER_MD);
+    let content = std::fs::read_to_string(&md)
+        .map_err(|e| format!("角色包缺少可读的 character.md 人设文件: {e}"))?;
+    if content.trim().is_empty() {
+        return Err("角色包 character.md 内容为空".to_string());
+    }
+    validate_png_file(&dir.join(CHARACTER_PNG))?;
+
+    let voice_dir = dir.join(VOICE_DIR);
+    if voice_dir.exists() {
+        let wav = voice_dir.join(REFERENCE_WAV);
+        let txt = voice_dir.join(REFERENCE_TXT);
+        match (wav.is_file(), txt.is_file()) {
+            (true, true) => {}
+            (false, true) => {
+                return Err(
+                    "角色包 voice/ 缺少 reference.wav（需与 reference.txt 成对）".to_string(),
+                );
+            }
+            (true, false) => {
+                return Err(
+                    "角色包 voice/ 缺少 reference.txt（reference.wav 的逐字转写）".to_string(),
+                );
+            }
+            (false, false) => {
+                return Err("角色包 voice/ 目录缺少 reference.wav 与 reference.txt".to_string());
+            }
+        }
+        validate_wav_header(&wav)?;
+        let text =
+            std::fs::read_to_string(&txt).map_err(|e| format!("读取 reference.txt 失败: {e}"))?;
+        if text.trim().is_empty() {
+            return Err("角色包 reference.txt 内容为空（需要参考音频的逐字转写）".to_string());
+        }
+    }
+    Ok(())
+}
+
 /// 从库中解析当前 active 伙伴（库应已 sanitize）。
 pub fn active_model(lib: &CompanionLibrary) -> Option<&CompanionModel> {
     let active_id = lib.active_model_id.as_deref()?;
     lib.models.iter().find(|m| m.id.as_str() == active_id)
 }
 
-/// 按 format 分派轻量资源校验（GIF → 文件头；Live2D → 目录清单）。
+/// 按 format 分派轻量资源校验（GIF → 文件头；角色包 → 目录结构；Live2D → 目录清单）。
 ///
 /// 只查元数据/存在性，供 sanitize / set_active 等有效性判定使用。
 fn validate_managed(model: &CompanionModel) -> Result<(), String> {
     if is_gif(model) {
         validate_gif_file(Path::new(&model.model_file))
+    } else if is_character(model) {
+        validate_character_pack(Path::new(&model.model_dir))
     } else {
         live2d_cfg::validate_managed_model(Path::new(&model.model_dir))
     }
@@ -409,6 +505,21 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// 拒绝导入应用已托管的伙伴路径（防自我复制递归）。
+///
+/// 根目录也做 canonicalize：避免 macOS 上 /var → /private/var 这类符号链接
+/// 使 canonicalize 后的源路径与未规范化根路径比较失配。
+/// 自定义 data_dir 后旧默认根下的存量载荷仍属托管范围，所有根都查。
+fn reject_managed_source(source_abs: &Path) -> Result<(), String> {
+    for root in companion_store_roots() {
+        let root_canon = root.canonicalize().unwrap_or_else(|_| root.clone());
+        if source_abs.starts_with(&root_canon) {
+            return Err("不能导入 ZapMomo 已托管的伙伴路径".to_string());
+        }
+    }
+    Ok(())
+}
+
 /// 导入准备（**不持锁**，可复制大目录）：
 /// 校验源 → 去重预检 → 复制到唯一 tmp → 托管副本校验 → 计算相对清单路径。
 fn prepare_import(source: &Path) -> Result<Prepared, String> {
@@ -418,16 +529,7 @@ fn prepare_import(source: &Path) -> Result<Prepared, String> {
     if !source_abs.is_dir() {
         return Err(format!("源路径不是目录: {}", source_abs.display()));
     }
-    // 拒绝导入应用已托管的伙伴目录（防自我复制递归）。
-    // 根目录也做 canonicalize：避免 macOS 上 /var → /private/var 这类符号链接
-    // 使 canonicalize 后的源路径与未规范化根路径比较失配。
-    // 自定义 data_dir 后旧默认根下的存量载荷仍属托管范围，两个根都查。
-    for root in companion_store_roots() {
-        let root_canon = root.canonicalize().unwrap_or_else(|_| root.clone());
-        if source_abs.starts_with(&root_canon) {
-            return Err("不能导入 ZapMomo 已托管的伙伴目录".to_string());
-        }
-    }
+    reject_managed_source(&source_abs)?;
 
     let id = derive_id(&source_abs);
     let name = source_abs
@@ -574,13 +676,8 @@ pub fn import_gif_from_file(source: &Path) -> Result<(CompanionModel, bool), Str
     if !is_gif_ext {
         return Err("仅支持导入 .gif 文件".to_string());
     }
-    // 拒绝导入应用已托管的伙伴文件（与目录导入同防线，见 prepare_import 注释）。
-    for root in companion_store_roots() {
-        let root_canon = root.canonicalize().unwrap_or_else(|_| root.clone());
-        if source_abs.starts_with(&root_canon) {
-            return Err("不能导入 ZapMomo 已托管的伙伴文件".to_string());
-        }
-    }
+    // 拒绝导入应用已托管的伙伴文件（与目录导入同防线，见 reject_managed_source）。
+    reject_managed_source(&source_abs)?;
 
     let id = derive_id(&source_abs);
     let name = source_abs
@@ -626,13 +723,275 @@ pub fn import_gif_from_file(source: &Path) -> Result<(CompanionModel, bool), Str
     })
 }
 
-/// 统一导入入口：目录 → Live2D 模型目录导入；`.gif` 文件 → GIF 动图导入。
+/// 统一导入入口：目录含 `character.md` → 角色包导入；其余目录 → Live2D 模型目录导入；
+/// 文件 → GIF 动图导入。
 pub fn import_source(source: &Path) -> Result<(CompanionModel, bool), String> {
     if source.is_file() {
         import_gif_from_file(source)
+    } else if source.join(CHARACTER_MD).is_file() {
+        import_character_from_dir(source)
     } else {
         import_from_dir(source)
     }
+}
+
+// ===========================================================================
+// 角色包（character.md + character.png + 可选 voice/）
+// ===========================================================================
+
+/// 从 character.md 提取角色名：第一个 `# ` 开头的 H1 行。
+///
+/// 缺失/为空时回退 `fallback`（导入目录 basename）；超 `MAX_NAME_CHARS` 截断
+/// （chars 计数，与 `rename` 校验一致）。文件不可读时同样回退（内容校验由
+/// `validate_character_pack` 在托管副本上兜底）。
+fn extract_character_name(character_md: &Path, fallback: &str) -> String {
+    let fallback = if fallback.is_empty() {
+        "未命名角色"
+    } else {
+        fallback
+    };
+    let Ok(content) = std::fs::read_to_string(character_md) else {
+        return fallback.to_string();
+    };
+    let name = content
+        .lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix("# ").map(str::trim))
+        .filter(|s| !s.is_empty());
+    let Some(name) = name else {
+        return fallback.to_string();
+    };
+    let truncated: String = name.chars().take(MAX_NAME_CHARS).collect();
+    if truncated.is_empty() {
+        fallback.to_string()
+    } else {
+        truncated
+    }
+}
+
+/// 把多声道 wav 混音为 16-bit PCM 单声道（就地改写，tmp + rename 原子替换）。
+///
+/// 单声道文件不动（返回 false）。采样率原样保留：采样率归一由合成时
+/// `tts::normalize_reference` 负责；声道是它的盲区——sherpa `Wave::read` 只接受
+/// 单声道，多声道直接读取失败，因此必须在导入侧解决。
+fn convert_reference_to_mono(wav: &Path) -> Result<bool, String> {
+    let mut reader = hound::WavReader::open(wav)
+        .map_err(|e| format!("无法解码参考音频（{}）: {e}", wav.display()))?;
+    let spec = reader.spec();
+    if spec.channels == 1 {
+        return Ok(false);
+    }
+    let channels = spec.channels as usize;
+
+    // 统一读成 f32：Int 按位宽归一，Float 直接读。
+    let samples: Vec<f32> = match spec.sample_format {
+        hound::SampleFormat::Int => {
+            let scale = (1u64 << (spec.bits_per_sample.saturating_sub(1))) as f32;
+            reader
+                .samples::<i32>()
+                .map(|s| s.map(|v| v as f32 / scale))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| format!("读取参考音频采样失败: {e}"))?
+        }
+        hound::SampleFormat::Float => reader
+            .samples::<f32>()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("读取参考音频采样失败: {e}"))?,
+    };
+
+    // 按帧平均混音为多声道 → 单声道。
+    let frames: Vec<f32> = samples
+        .chunks(channels)
+        .filter(|frame| !frame.is_empty())
+        .map(|frame| frame.iter().sum::<f32>() / frame.len() as f32)
+        .collect();
+
+    let tmp = wav.with_extension("mono.tmp.wav");
+    let write_result = (|| -> Result<(), String> {
+        let out_spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: spec.sample_rate,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(&tmp, out_spec)
+            .map_err(|e| format!("创建单声道参考音频失败: {e}"))?;
+        for s in &frames {
+            let v = (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+            writer
+                .write_sample(v)
+                .map_err(|e| format!("写入单声道参考音频失败: {e}"))?;
+        }
+        writer
+            .finalize()
+            .map_err(|e| format!("完成单声道参考音频失败: {e}"))?;
+        Ok(())
+    })();
+    if let Err(e) = write_result {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+
+    match std::fs::rename(&tmp, wav) {
+        Ok(()) => Ok(true),
+        Err(_) => {
+            // Windows：rename 无法覆盖已存在目标，先移除再重试。
+            std::fs::remove_file(wav).map_err(|e| format!("移除原参考音频失败: {e}"))?;
+            std::fs::rename(&tmp, wav).map_err(|e| format!("替换参考音频失败: {e}"))?;
+            Ok(true)
+        }
+    }
+}
+
+/// 导入角色包目录：复制到托管目录（含立体声→单声道改写）并登记进伙伴库。
+///
+/// 复用 `commit_import` 原子流程（同源去重 / 失败清理 / 首次导入自动 active）。
+pub fn import_character_from_dir(source: &Path) -> Result<(CompanionModel, bool), String> {
+    let source_abs = source
+        .canonicalize()
+        .map_err(|e| format!("无法访问源目录: {e}"))?;
+    if !source_abs.is_dir() {
+        return Err(format!("源路径不是目录: {}", source_abs.display()));
+    }
+    reject_managed_source(&source_abs)?;
+
+    let id = derive_id(&source_abs);
+    let fallback_name = source_abs
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| id.clone());
+    let name = extract_character_name(&source_abs.join(CHARACTER_MD), &fallback_name);
+
+    // 去重预检（短锁，避免已导入时白白复制目录）。
+    {
+        let _g = lock();
+        let lib = load_library_inner()?;
+        if let Some(existing) = lib.models.iter().find(|m| m.id == id).cloned() {
+            return Ok((existing, true));
+        }
+    }
+
+    let store_dir = settings::get_companions_store_dir();
+    let tmp_dir = store_dir.join(new_tmp_dir_name(&id));
+    let final_dir = store_dir.join(&id);
+    copy_dir_recursive(&source_abs, &tmp_dir)?;
+
+    // 托管副本校验：md/png/voice 结构必须合法，失败时清理 tmp（commit 内 RAII 只覆盖后续路径）。
+    if let Err(e) = validate_character_pack(&tmp_dir) {
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        return Err(e);
+    }
+
+    // 参考音频多声道 → 单声道（就地改写托管副本，源目录不动；
+    // 对齐 register_missing_motion_files「只改托管副本」先例）。
+    let managed_wav = tmp_dir.join(VOICE_DIR).join(REFERENCE_WAV);
+    if managed_wav.is_file()
+        && let Err(e) = convert_reference_to_mono(&managed_wav)
+    {
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        return Err(e);
+    }
+
+    commit_import(PreparedImport {
+        id,
+        name,
+        source_path: source_abs.display().to_string(),
+        tmp_dir,
+        final_dir,
+        model_file_rel: PathBuf::from(CHARACTER_PNG),
+        format: CHARACTER_FORMAT.to_string(),
+        imported_at: now_rfc3339(),
+    })
+}
+
+// ===========================================================================
+// 角色包运行时探测（人设 / 音色；约定文件名，不入库）
+// ===========================================================================
+
+/// 角色包音色克隆参考（参考音频 + 逐字转写）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct CharacterVoice {
+    /// 托管目录内 `voice/reference.wav` 绝对路径。
+    pub wav: PathBuf,
+    /// `voice/reference.txt` 内容（逐字转写）。
+    pub text: String,
+}
+
+/// 当前 active 的角色包伙伴（无 active 或非角色包 → None）。
+fn active_character_model() -> Option<CompanionModel> {
+    let lib = load_library_fast()
+        .map_err(|e| {
+            tracing::warn!("读取伙伴库失败（跳过角色包探测）: {e}");
+            e
+        })
+        .ok()?;
+    let model = active_model(&lib)?;
+    is_character(model).then(|| model.clone())
+}
+
+/// active 角色包的人设文本（character.md 全文）。
+///
+/// 读取失败或内容为空按「无」降级（warn 日志），不让伙伴文件问题炸掉语音链路。
+pub fn active_persona() -> Option<String> {
+    let model = active_character_model()?;
+    let path = Path::new(&model.model_dir).join(CHARACTER_MD);
+    match std::fs::read_to_string(&path) {
+        Ok(content) if !content.trim().is_empty() => Some(content),
+        Ok(_) => {
+            tracing::warn!("角色包 character.md 为空（{}）", path.display());
+            None
+        }
+        Err(e) => {
+            tracing::warn!("读取角色包人设失败（{}）: {e}", path.display());
+            None
+        }
+    }
+}
+
+/// active 角色包的音色克隆参考（voice/reference.wav + reference.txt 成对存在）。
+///
+/// 文件缺失/转写为空按「无」降级（warn 日志）。
+pub fn active_character_voice() -> Option<CharacterVoice> {
+    let model = active_character_model()?;
+    character_voice_in(Path::new(&model.model_dir))
+}
+
+/// 探测托管目录内的角色音色（voice/reference.wav + reference.txt 成对且非空）。
+fn character_voice_in(model_dir: &Path) -> Option<CharacterVoice> {
+    let voice_dir = model_dir.join(VOICE_DIR);
+    let wav = voice_dir.join(REFERENCE_WAV);
+    if !wav.is_file() {
+        return None;
+    }
+    match std::fs::read_to_string(voice_dir.join(REFERENCE_TXT)) {
+        Ok(text) if !text.trim().is_empty() => Some(CharacterVoice {
+            wav,
+            text: text.trim().to_string(),
+        }),
+        Ok(_) => {
+            tracing::warn!("角色包 reference.txt 为空（{}）", voice_dir.display());
+            None
+        }
+        Err(e) => {
+            tracing::warn!("读取角色包 reference.txt 失败: {e}");
+            None
+        }
+    }
+}
+
+/// 角色包是否带人设（供列表视图 Badge；毫秒级小 IO）。
+pub fn has_persona(model: &CompanionModel) -> bool {
+    if !is_character(model) {
+        return false;
+    }
+    std::fs::read_to_string(Path::new(&model.model_dir).join(CHARACTER_MD))
+        .map(|c| !c.trim().is_empty())
+        .unwrap_or(false)
+}
+
+/// 角色包是否带音色克隆参考（供列表视图 Badge；毫秒级小 IO）。
+pub fn has_character_voice(model: &CompanionModel) -> bool {
+    is_character(model) && character_voice_in(Path::new(&model.model_dir)).is_some()
 }
 
 // ===========================================================================
@@ -1866,6 +2225,301 @@ mod tests {
             std::fs::write(Path::new(&gif.model_file), b"xxxxxx").unwrap();
             let err = set_active(&gif.id).unwrap_err();
             assert!(err.contains("不可用"), "{err}");
+        });
+    }
+
+    // ---- 角色包伙伴 ----
+
+    /// 构造最小合法 PNG（签名 + 填充字节）。
+    fn make_valid_png(path: &Path) {
+        std::fs::write(path, b"\x89PNG\r\n\x1a\n fake-png-bytes").unwrap();
+    }
+
+    /// 构造最小合法角色包目录（character.md + character.png）。
+    fn make_character_pack(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join(CHARACTER_MD), "# 芙宁娜\n\n你是芙宁娜。\n").unwrap();
+        make_valid_png(&dir.join(CHARACTER_PNG));
+    }
+
+    /// 用 hound 写一个指定声道数/采样率的 16-bit PCM wav（帧数 = frames）。
+    fn make_wav(path: &Path, channels: u16, sample_rate: u32, frames: usize) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let spec = hound::WavSpec {
+            channels,
+            sample_rate,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(path, spec).unwrap();
+        for i in 0..frames {
+            for _ in 0..channels {
+                writer.write_sample((i % 100) as i16).unwrap();
+            }
+        }
+        writer.finalize().unwrap();
+    }
+
+    /// 给角色包补上 voice/（48k 立体声 reference.wav + reference.txt）。
+    fn add_voice_pack(dir: &Path, frames: usize) {
+        make_wav(&dir.join("voice/reference.wav"), 2, 48000, frames);
+        std::fs::write(dir.join("voice/reference.txt"), "哼~没错，就是我。").unwrap();
+    }
+
+    #[test]
+    fn test_validate_character_pack_ok() {
+        run_with_temp_home(|home| {
+            let dir = home.join("furina");
+            make_character_pack(&dir);
+            assert!(validate_character_pack(&dir).is_ok());
+            // 带成对 voice/ 也合法
+            add_voice_pack(&dir, 100);
+            assert!(validate_character_pack(&dir).is_ok());
+        });
+    }
+
+    #[test]
+    fn test_validate_character_pack_errors() {
+        run_with_temp_home(|home| {
+            // 缺 character.md
+            let dir = home.join("a");
+            std::fs::create_dir_all(&dir).unwrap();
+            make_valid_png(&dir.join(CHARACTER_PNG));
+            let err = validate_character_pack(&dir).unwrap_err();
+            assert!(err.contains("character.md"), "{err}");
+
+            // character.md 空白
+            let dir = home.join("b");
+            make_character_pack(&dir);
+            std::fs::write(dir.join(CHARACTER_MD), "  \n\n").unwrap();
+            let err = validate_character_pack(&dir).unwrap_err();
+            assert!(err.contains("为空"), "{err}");
+
+            // character.png 缺失 / 坏签名
+            let dir = home.join("c");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(CHARACTER_MD), "# X\n").unwrap();
+            let err = validate_character_pack(&dir).unwrap_err();
+            assert!(err.contains("character.png"), "{err}");
+            std::fs::write(dir.join(CHARACTER_PNG), b"not-a-png").unwrap();
+            let err = validate_character_pack(&dir).unwrap_err();
+            assert!(err.contains("PNG"), "{err}");
+
+            // voice/ 缺 wav / 缺 txt / txt 空白 / wav 非 RIFF
+            let dir = home.join("d");
+            make_character_pack(&dir);
+            std::fs::create_dir_all(dir.join(VOICE_DIR)).unwrap();
+            std::fs::write(dir.join("voice/reference.txt"), "文本").unwrap();
+            let err = validate_character_pack(&dir).unwrap_err();
+            assert!(err.contains("reference.wav"), "{err}");
+
+            let dir = home.join("e");
+            make_character_pack(&dir);
+            make_wav(&dir.join("voice/reference.wav"), 1, 48000, 10);
+            let err = validate_character_pack(&dir).unwrap_err();
+            assert!(err.contains("reference.txt"), "{err}");
+
+            let dir = home.join("f");
+            make_character_pack(&dir);
+            make_wav(&dir.join("voice/reference.wav"), 1, 48000, 10);
+            std::fs::write(dir.join("voice/reference.txt"), "   ").unwrap();
+            let err = validate_character_pack(&dir).unwrap_err();
+            assert!(err.contains("为空"), "{err}");
+
+            let dir = home.join("g");
+            make_character_pack(&dir);
+            std::fs::create_dir_all(dir.join(VOICE_DIR)).unwrap();
+            std::fs::write(dir.join("voice/reference.wav"), b"not-a-wav-file").unwrap();
+            std::fs::write(dir.join("voice/reference.txt"), "文本").unwrap();
+            let err = validate_character_pack(&dir).unwrap_err();
+            assert!(err.contains("wav"), "{err}");
+        });
+    }
+
+    #[test]
+    fn test_import_character_pack_registers_and_activates() {
+        run_with_temp_home(|home| {
+            let src = home.join("furina");
+            make_character_pack(&src);
+            add_voice_pack(&src, 240);
+
+            let (model, already) = import_character_from_dir(&src).unwrap();
+            assert!(!already);
+            assert_eq!(model.format, CHARACTER_FORMAT);
+            assert_eq!(model.name, "芙宁娜", "角色名应取 character.md 的 H1");
+            assert!(model.model_file.ends_with("character.png"));
+            assert!(Path::new(&model.model_file).is_file());
+            assert!(model.model_file.starts_with(&model.model_dir));
+            // 首次导入自动 active；源目录删除后托管副本仍有效。
+            assert_eq!(
+                load_library_fast().unwrap().active_model_id.as_deref(),
+                Some(model.id.as_str())
+            );
+            std::fs::remove_dir_all(&src).unwrap();
+            assert!(quick_valid(&model));
+        });
+    }
+
+    #[test]
+    fn test_import_character_name_fallback_and_truncation() {
+        run_with_temp_home(|home| {
+            // 无 H1 → 回退目录 basename
+            let src = home.join("无名目录");
+            std::fs::create_dir_all(&src).unwrap();
+            std::fs::write(src.join(CHARACTER_MD), "没有人设标题。\n").unwrap();
+            make_valid_png(&src.join(CHARACTER_PNG));
+            let (model, _) = import_character_from_dir(&src).unwrap();
+            assert_eq!(model.name, "无名目录");
+
+            // H1 超长 → 截断到 MAX_NAME_CHARS
+            let src = home.join("长名");
+            std::fs::create_dir_all(&src).unwrap();
+            let long_name = "很".repeat(MAX_NAME_CHARS + 10);
+            std::fs::write(src.join(CHARACTER_MD), format!("# {long_name}\n")).unwrap();
+            make_valid_png(&src.join(CHARACTER_PNG));
+            let (model, _) = import_character_from_dir(&src).unwrap();
+            assert_eq!(model.name.chars().count(), MAX_NAME_CHARS);
+        });
+    }
+
+    #[test]
+    fn test_import_source_dispatch_character_priority() {
+        run_with_temp_home(|home| {
+            // 目录同时含 model3.json 与 character.md → 角色包优先
+            let dir = home.join("both");
+            make_character_pack(&dir);
+            std::fs::write(dir.join("m.model3.json"), "{}").unwrap();
+            let (m, _) = import_source(&dir).unwrap();
+            assert_eq!(m.format, CHARACTER_FORMAT);
+
+            // 目录含 character.md 但缺 character.png → 角色包专属错误，不回退 Live2D 分支
+            let dir = home.join("broken");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(CHARACTER_MD), "# X\n").unwrap();
+            let err = import_source(&dir).unwrap_err();
+            assert!(err.contains("character.png"), "{err}");
+            assert!(!err.contains("Live2D"), "{err}");
+        });
+    }
+
+    #[test]
+    fn test_import_character_rejects_bad_voice_pair() {
+        run_with_temp_home(|home| {
+            let src = home.join("furina");
+            make_character_pack(&src);
+            std::fs::create_dir_all(src.join(VOICE_DIR)).unwrap();
+            // 只有 wav 没有 txt → 成对错误
+            make_wav(&src.join("voice/reference.wav"), 1, 48000, 10);
+            let err = import_character_from_dir(&src).unwrap_err();
+            assert!(err.contains("reference.txt"), "{err}");
+            // 失败不残留 tmp、不落库
+            assert!(load_library_fast().unwrap().models.is_empty());
+            let store = crate::config::settings::get_companions_store_dir();
+            let stray = std::fs::read_dir(&store).map(|mut it| {
+                it.any(|e| {
+                    e.unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(TMP_PREFIX)
+                })
+            });
+            assert_eq!(stray.ok(), Some(false), "不应残留 tmp 目录");
+        });
+    }
+
+    #[test]
+    fn test_convert_reference_to_mono() {
+        let dir = tempfile::tempdir().unwrap();
+        // 立体声 48k → 单声道，采样率保留，帧数不变
+        let wav = dir.path().join("stereo.wav");
+        make_wav(&wav, 2, 48000, 480);
+        assert!(convert_reference_to_mono(&wav).unwrap());
+        let reader = hound::WavReader::open(&wav).unwrap();
+        let spec = reader.spec();
+        assert_eq!(spec.channels, 1);
+        assert_eq!(spec.sample_rate, 48000);
+        assert_eq!(reader.duration(), 480);
+
+        // 单声道 → 不改写（返回 false，内容不变）
+        let mono = dir.path().join("mono.wav");
+        make_wav(&mono, 1, 24000, 100);
+        let before = std::fs::read(&mono).unwrap();
+        assert!(!convert_reference_to_mono(&mono).unwrap());
+        assert_eq!(std::fs::read(&mono).unwrap(), before);
+    }
+
+    #[test]
+    fn test_import_character_converts_voice_to_mono() {
+        run_with_temp_home(|home| {
+            let src = home.join("furina");
+            make_character_pack(&src);
+            add_voice_pack(&src, 960);
+
+            let (model, _) = import_character_from_dir(&src).unwrap();
+            // 托管副本被改写为单声道 48k；源目录保持立体声不变。
+            let managed = Path::new(&model.model_dir).join("voice/reference.wav");
+            let spec = hound::WavReader::open(&managed).unwrap().spec();
+            assert_eq!(spec.channels, 1, "托管参考音频应为单声道");
+            assert_eq!(spec.sample_rate, 48000);
+            let src_spec = hound::WavReader::open(src.join("voice/reference.wav"))
+                .unwrap()
+                .spec();
+            assert_eq!(src_spec.channels, 2, "源目录不应被改写");
+        });
+    }
+
+    #[test]
+    fn test_sanitize_and_set_active_support_character() {
+        run_with_temp_home(|home| {
+            let g = home.join("舞.gif");
+            make_valid_gif(&g);
+            let (gif, _) = import_gif_from_file(&g).unwrap();
+            let c = home.join("furina");
+            make_character_pack(&c);
+            let (ch, _) = import_character_from_dir(&c).unwrap();
+
+            // set_active(character) 成功（校验走角色包结构）。
+            set_active(&ch.id).unwrap();
+            // 删掉 GIF 托管目录，sanitize 不应清掉角色包 active。
+            std::fs::remove_dir_all(&gif.model_dir).unwrap();
+            let lib = load_library_fast().unwrap();
+            assert_eq!(lib.active_model_id.as_deref(), Some(ch.id.as_str()));
+
+            // 篡改 character.png 魔数 → set_active 报「不可用」。
+            std::fs::write(Path::new(&ch.model_file), b"xxxxxxxx").unwrap();
+            let err = set_active(&ch.id).unwrap_err();
+            assert!(err.contains("不可用"), "{err}");
+        });
+    }
+
+    #[test]
+    fn test_active_persona_and_voice_detection() {
+        run_with_temp_home(|home| {
+            // 无 active → None
+            assert!(active_persona().is_none());
+            assert!(active_character_voice().is_none());
+
+            let c = home.join("furina");
+            make_character_pack(&c);
+            add_voice_pack(&c, 100);
+            let (ch, _) = import_character_from_dir(&c).unwrap();
+            let persona = active_persona().unwrap();
+            assert!(persona.contains("芙宁娜"), "{persona}");
+            let voice = active_character_voice().unwrap();
+            assert!(voice.wav.ends_with("voice/reference.wav"));
+            assert_eq!(voice.text, "哼~没错，就是我。");
+            assert!(has_persona(&ch));
+            assert!(has_character_voice(&ch));
+
+            // 切到普通 GIF 伙伴 → 探测为 None
+            let g = home.join("舞.gif");
+            make_valid_gif(&g);
+            let (gif, _) = import_gif_from_file(&g).unwrap();
+            set_active(&gif.id).unwrap();
+            assert!(active_persona().is_none());
+            assert!(active_character_voice().is_none());
+            assert!(!has_persona(&gif));
+            assert!(!has_character_voice(&gif));
         });
     }
 

@@ -258,6 +258,37 @@ describe("CompanionRoot（GIF 伙伴分发）", () => {
     expect(screen.queryByTestId("gif-stage")).not.toBeInTheDocument();
   });
 
+  it("config format=character 时渲染 GifStage（静态立绘）而非 Live2dStage", async () => {
+    configState.modelFile = "/zap/companions/x/character.png";
+    configState.format = "character";
+    render(<CompanionRoot />);
+    await waitForConfigApplied();
+
+    expect(screen.getByTestId("gif-stage")).toBeInTheDocument();
+    expect(screen.queryByTestId("live2d-stage")).not.toBeInTheDocument();
+    const img = screen.getByRole("img");
+    expect(img).toHaveAttribute("src", expect.stringContaining("character.png"));
+  });
+
+  it("live2d-model-changed 事件切到角色包（format=character）走 GifStage", async () => {
+    configState.modelFile = "/zap/companions/x/x.model3.json";
+    configState.format = "cubism3";
+    render(<CompanionRoot />);
+    await waitForConfigApplied();
+    expect(screen.getByTestId("live2d-stage")).toBeInTheDocument();
+
+    act(() =>
+      listenHandlers["live2d-model-changed"]({
+        model_dir: "/zap/companions/c",
+        model_file: "/zap/companions/c/character.png",
+        format: "character",
+        props: null,
+      }),
+    );
+    expect(screen.getByTestId("gif-stage")).toBeInTheDocument();
+    expect(screen.queryByTestId("live2d-stage")).not.toBeInTheDocument();
+  });
+
   it("live2d-model-changed 事件可在 Live2D 与 GIF 之间切换", async () => {
     configState.modelFile = "/zap/companions/x/x.model3.json";
     configState.format = "cubism3";

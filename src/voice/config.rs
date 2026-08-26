@@ -77,6 +77,8 @@ pub struct ResolvedSessionConfig {
     pub asr_max_trailing_silence: f32,
     /// 欢迎语后等用户说话的超时（秒）
     pub welcome_wait_timeout: f32,
+    /// active 角色包的音色克隆参考（`apply_companion_overrides` 注入；None = 无角色音色）
+    pub character_voice: Option<crate::companion::CharacterVoice>,
 }
 
 /// 合并 settings 与 CLI 覆盖得到最终会话配置。
@@ -160,7 +162,25 @@ pub fn resolve(
             .welcome_wait_timeout
             .or_else(|| voice.and_then(|v| v.welcome_wait_timeout))
             .unwrap_or(DEFAULT_WELCOME_WAIT_TIMEOUT),
+        character_voice: None,
     })
+}
+
+/// 应用 active 角色包覆盖（人设 + 音色），在 `resolve` 之后调用。
+///
+/// - 人设：active 伙伴是角色包且 character.md 非空 → **完全覆盖** `cfg.llm.system_prompt`
+///   （不写盘，切回普通伙伴后下次会话自然回退全局 `[llm].system_prompt`）；
+/// - 音色：仅当前 TTS 模型支持参考音频克隆（ZipVoice/OmniVoice）时注入
+///   `cfg.character_voice`（非克隆模型走全局音色，优雅降级）。
+pub fn apply_companion_overrides(cfg: &mut ResolvedSessionConfig) {
+    if let Some(persona) = crate::companion::active_persona() {
+        cfg.llm.system_prompt = persona;
+    }
+    if cfg.tts.uses_reference_audio()
+        && let Some(voice) = crate::companion::active_character_voice()
+    {
+        cfg.character_voice = Some(voice);
+    }
 }
 
 #[cfg(test)]
@@ -343,6 +363,67 @@ mod tests {
             let toml_str = toml::to_string(&app).unwrap();
             let loaded: AppConfig = toml::from_str(&toml_str).unwrap();
             assert_eq!(loaded.voice, app.voice);
+        });
+    }
+
+    /// 导入一个带人设/音色的角色包并设为 active（首次导入自动 active）。
+    fn import_active_character(home: &std::path::Path) {
+        let dir = home.join("furina");
+        std::fs::create_dir_all(dir.join("voice")).unwrap();
+        std::fs::write(dir.join("character.md"), "# 芙宁娜\n\n你是芙宁娜。\n").unwrap();
+        std::fs::write(dir.join("character.png"), b"\x89PNG\r\n\x1a\n png").unwrap();
+        // 单声道 wav（合法 RIFF 头即可，不触发导入时的混音改写）
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 48000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut w = hound::WavWriter::create(dir.join("voice/reference.wav"), spec).unwrap();
+        w.write_sample(0i16).unwrap();
+        w.finalize().unwrap();
+        std::fs::write(dir.join("voice/reference.txt"), "哼~没错，就是我。").unwrap();
+        crate::companion::import_character_from_dir(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_apply_companion_overrides_covers_persona_and_voice() {
+        run_with_temp_home(|home| {
+            import_active_character(home);
+            let mut cfg = resolve(None, &CliOverrides::default()).unwrap();
+            let global_prompt = cfg.llm.system_prompt.clone();
+            apply_companion_overrides(&mut cfg);
+            assert!(cfg.llm.system_prompt.contains("芙宁娜"));
+            assert_ne!(cfg.llm.system_prompt, global_prompt);
+            // 默认 TTS 配置（ZipVoice）支持参考音频 → 注入角色音色
+            let voice = cfg.character_voice.clone().unwrap();
+            assert!(voice.wav.ends_with("voice/reference.wav"));
+            assert_eq!(voice.text, "哼~没错，就是我。");
+        });
+    }
+
+    #[test]
+    fn test_apply_companion_overrides_noop_without_character() {
+        run_with_temp_home(|_| {
+            let mut cfg = resolve(None, &CliOverrides::default()).unwrap();
+            let prompt = cfg.llm.system_prompt.clone();
+            apply_companion_overrides(&mut cfg);
+            // 无 active 角色包 → 全局配置原样
+            assert_eq!(cfg.llm.system_prompt, prompt);
+            assert!(cfg.character_voice.is_none());
+        });
+    }
+
+    #[test]
+    fn test_apply_companion_overrides_skips_voice_for_non_clone_model() {
+        run_with_temp_home(|home| {
+            import_active_character(home);
+            let mut cfg = resolve(None, &CliOverrides::default()).unwrap();
+            // 非克隆模型（Kokoro）→ 人设仍覆盖，音色不注入
+            cfg.tts.model_type = crate::tts::config::TtsModelKind::Kokoro;
+            apply_companion_overrides(&mut cfg);
+            assert!(cfg.llm.system_prompt.contains("芙宁娜"));
+            assert!(cfg.character_voice.is_none());
         });
     }
 }

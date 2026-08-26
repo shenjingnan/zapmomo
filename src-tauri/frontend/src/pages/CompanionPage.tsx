@@ -30,6 +30,7 @@ import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useCompanionLibrary } from "@/hooks/useCompanionLibrary";
+import { isStaticImageFormat } from "@/lib/companionFormat";
 import { api, toAssetUrl } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 import type { CompanionDragMode, CompanionModelInfo, CompanionWindowLayer } from "@/types/tauri";
@@ -153,6 +154,21 @@ function CompanionListItem({
             )}
           </span>
           {!model.valid && <span className="block text-xs text-destructive">模型不可用</span>}
+          {/* 角色包能力标记：人设（character.md）/ 音色（voice/ 克隆参考） */}
+          {(model.has_persona || model.has_voice) && (
+            <span className="mt-0.5 flex gap-1">
+              {model.has_persona && (
+                <Badge variant="outline" className="px-1 py-0 text-[10px] text-muted-foreground">
+                  人设
+                </Badge>
+              )}
+              {model.has_voice && (
+                <Badge variant="outline" className="px-1 py-0 text-[10px] text-muted-foreground">
+                  音色
+                </Badge>
+              )}
+            </span>
+          )}
         </span>
       </button>
 
@@ -458,7 +474,7 @@ export function CompanionPage() {
   );
 
   const handleImportDir = useCallback(async () => {
-    const dir = await open({ directory: true, title: "选择 Live2D 模型目录" });
+    const dir = await open({ directory: true, title: "选择 Live2D 模型或角色包目录" });
     if (typeof dir === "string") await importAndSelect(dir);
   }, [importAndSelect]);
 
@@ -495,9 +511,9 @@ export function CompanionPage() {
     [selected, saveCover],
   );
 
-  const isGif = selected?.format === "gif";
+  const isGif = isStaticImageFormat(selected?.format);
   const previewUrl = selected ? toAssetUrl(selected.model_file) : null;
-  // GIF 伙伴不走 PIXI 预览（无 canvas/动作目录），单独 img 分支。
+  // 静态图像伙伴（GIF/角色包立绘）不走 PIXI 预览（无 canvas/动作目录），单独 img 分支。
   const showStage =
     !!selected?.valid && !isGif && previewSize.width > 0 && previewSize.height > 0;
 
@@ -522,7 +538,7 @@ export function CompanionPage() {
             <div className="flex shrink-0 items-center gap-2">
               <Button size="sm" onClick={handleImportDir} disabled={loading}>
                 <Upload className="h-4 w-4" />
-                导入模型
+                导入模型 / 角色包
               </Button>
               <Button size="sm" variant="outline" onClick={handleImportGif} disabled={loading}>
                 <ImageIcon className="h-4 w-4" />
@@ -545,7 +561,7 @@ export function CompanionPage() {
                 <Sparkles className="h-6 w-6 text-muted-foreground/50" />
                 <p className="text-sm font-medium text-text-primary">还没有伙伴</p>
                 <p className="text-xs text-muted-foreground">
-                  导入一个 Live2D 模型，让它成为你的桌面伙伴。
+                  导入一个 Live2D 模型或角色包，让它成为你的桌面伙伴。
                 </p>
               </div>
             ) : (
@@ -693,7 +709,7 @@ export function CompanionPage() {
             )}
 
             <div ref={previewRef} className="relative min-h-0 flex-1 overflow-hidden">
-              {selected?.valid && selected.format === "gif" && (
+              {selected?.valid && isStaticImageFormat(selected.format) && (
                 <img
                   src={previewUrl ?? undefined}
                   alt={selected.name}

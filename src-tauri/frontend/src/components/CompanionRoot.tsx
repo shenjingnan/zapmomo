@@ -13,6 +13,7 @@ import { usePerformance } from "@/components/performance/usePerformance";
 import { VoiceStatusDot } from "@/components/voice/VoiceStatusDot";
 import { useLive2dConfig } from "@/hooks/useLive2dConfig";
 import { useVoiceSession } from "@/hooks/useVoiceSession";
+import { isStaticImageFormat } from "@/lib/companionFormat";
 import { pickMotionGroup } from "@/lib/dshMotion";
 import {
   api,
@@ -49,8 +50,8 @@ const WHEEL_SCALE_STEP = 1.1;
 const BUBBLE_STRIP = 72;
 
 /**
- * 常驻角色窗口：展示当前伙伴（Live2D 模型或 GIF 动图，按 format 分发渲染）。
- * Live2D 仅呼吸/眨眼等自动动画，不跟随鼠标；GIF 由 WebView 原生循环播放。
+ * 常驻角色窗口：展示当前伙伴（Live2D 模型 / GIF 动图 / 角色包静态立绘，按 format 分发渲染）。
+ * Live2D 仅呼吸/眨眼等自动动画，不跟随鼠标；静态图像由 WebView 原生 <img> 展示。
  *
  * - 启动时读 `get_live2d_config` 恢复持久化的模型、缩放比例与透明度；
  * - 订阅 `live2d-model-changed` / `companion-scale-changed` / `companion-opacity-changed`，
@@ -65,7 +66,7 @@ export function CompanionRoot() {
   const { config } = useLive2dConfig();
   // 桌宠窗口无 RuntimeContext：hook 自包含，与设置窗口订阅同一批后端 voice 事件。
   const voice = useVoiceSession();
-  // 展示目标（GIF 伙伴渲染 GifStage，Live2D 伙伴渲染 Live2dStage；url null = 清屏）。
+  // 展示目标（静态图像伙伴（GIF/角色包立绘）渲染 GifStage，Live2D 伙伴渲染 Live2dStage；url null = 清屏）。
   const [stage, setStage] = useState<{ url: string | null; isGif: boolean }>({
     url: null,
     isGif: false,
@@ -159,7 +160,7 @@ export function CompanionRoot() {
   // 启动时恢复持久化的模型（顺带重放行 asset 协议 scope）与 BongoCat 道具资源。
   useEffect(() => {
     if (config?.models_present && config.model_file) {
-      setStage({ url: toAssetUrl(config.model_file), isGif: config.format === "gif" });
+      setStage({ url: toAssetUrl(config.model_file), isGif: isStaticImageFormat(config.format) });
     }
     setProps(config?.props ?? null);
   }, [config]);
@@ -182,7 +183,7 @@ export function CompanionRoot() {
       // 空 model_file = 清屏（active 伙伴被移除等场景）。
       setStage(
         info.model_file && info.format
-          ? { url: toAssetUrl(info.model_file), isGif: info.format === "gif" }
+          ? { url: toAssetUrl(info.model_file), isGif: isStaticImageFormat(info.format) }
           : { url: null, isGif: false },
       );
       setProps(info.props ?? null);

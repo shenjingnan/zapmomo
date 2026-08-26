@@ -69,6 +69,8 @@ function model(id: string, name: string, valid = true): CompanionModelInfo {
     imported_at: "2026-01-01T00:00:00Z",
     valid,
     cover_image: null,
+    has_persona: false,
+    has_voice: false,
   };
 }
 
@@ -283,7 +285,7 @@ describe("CompanionPage 伙伴模型管理器", () => {
     expect(await screen.findByText("还没有伙伴")).toBeInTheDocument();
     expect(screen.getAllByText("暂无伙伴").length).toBeGreaterThanOrEqual(1);
     // 顶部有主导入入口（左侧底部按钮已移除）
-    expect(screen.getByRole("button", { name: "导入模型" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "导入模型 / 角色包" })).toBeInTheDocument();
   });
 
   it("列出伙伴；默认选中 active；点击其他伙伴仅切换预览不切换 active", async () => {
@@ -328,7 +330,7 @@ describe("CompanionPage 伙伴模型管理器", () => {
     const user = userEvent.setup();
     renderPage();
 
-    await user.click(await screen.findByRole("button", { name: "导入模型" }));
+    await user.click(await screen.findByRole("button", { name: "导入模型 / 角色包" }));
 
     await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith("import_companion", {
@@ -371,7 +373,7 @@ describe("CompanionPage 伙伴模型管理器", () => {
     const user = userEvent.setup();
     renderPage();
 
-    await user.click(await screen.findByRole("button", { name: "导入模型" }));
+    await user.click(await screen.findByRole("button", { name: "导入模型 / 角色包" }));
 
     // selected = 新模型（星语），active 仍是大月下 → 预览显示「设为当前使用」。
     expect(await screen.findByRole("button", { name: "设为当前使用" })).toBeEnabled();
@@ -385,10 +387,10 @@ describe("CompanionPage 伙伴模型管理器", () => {
     const user = userEvent.setup();
     renderPage();
 
-    await user.click(await screen.findByRole("button", { name: "导入模型" }));
+    await user.click(await screen.findByRole("button", { name: "导入模型 / 角色包" }));
     await screen.findByText("✓ 已导入「星语」");
 
-    await user.click(screen.getByRole("button", { name: "导入模型" }));
+    await user.click(screen.getByRole("button", { name: "导入模型 / 角色包" }));
     expect(await screen.findByText("该伙伴已经导入")).toBeInTheDocument();
     expect(library.models).toHaveLength(1);
   });
@@ -412,7 +414,7 @@ describe("CompanionPage 伙伴模型管理器", () => {
     const user = userEvent.setup();
     renderPage();
 
-    await user.click(await screen.findByRole("button", { name: "导入模型" }));
+    await user.click(await screen.findByRole("button", { name: "导入模型 / 角色包" }));
     await waitFor(() => {
       expect(openMock).toHaveBeenCalled();
     });
@@ -682,5 +684,35 @@ describe("CompanionPage 伙伴模型管理器", () => {
     renderPage();
 
     expect(await screen.findByRole("switch", { name: "修饰键拖动" })).toBeInTheDocument();
+  });
+
+  it("角色包伙伴：静态立绘走 img 预览（无动作面板），列表显示人设/音色徽标", async () => {
+    const furina: CompanionModelInfo = {
+      ...model("companion-furina", "芙宁娜"),
+      format: "character",
+      model_file: "/zap/.zapmomo/companions/companion-furina/character.png",
+      has_persona: true,
+      has_voice: true,
+    };
+    library = { models: [furina], active_model_id: furina.id };
+    renderPage();
+
+    // 预览为 img（静态立绘）而非 Live2D 舞台。
+    expect(await screen.findByAltText("芙宁娜")).toBeInTheDocument();
+    expect(screen.queryByTestId("live2d-stage")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("motion-catalog")).not.toBeInTheDocument();
+    // 列表项显示人设/音色徽标。
+    const item = screen.getByTestId(`companion-item-${furina.id}`);
+    expect(item).toHaveTextContent("人设");
+    expect(item).toHaveTextContent("音色");
+  });
+
+  it("普通 Live2D 伙伴不显示人设/音色徽标", async () => {
+    library = { models: [MODEL_A], active_model_id: MODEL_A.id };
+    renderPage();
+
+    const item = await screen.findByTestId(`companion-item-${MODEL_A.id}`);
+    expect(item).not.toHaveTextContent("人设");
+    expect(item).not.toHaveTextContent("音色");
   });
 });

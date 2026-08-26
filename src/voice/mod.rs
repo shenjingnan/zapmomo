@@ -25,10 +25,11 @@ pub use records::{ConversationRecord, RecordRole};
 pub use session::{ReplyAccumulator, TtsSwap, TtsSwapSlot, VoiceSession};
 pub use synthesizer::{SynthHandle, SynthResult};
 
-/// CLI 入口：解析配置 → 构造会话 → 运行（Ctrl-C 优雅退出）。
+/// CLI 入口：解析配置 → 应用角色包覆盖 → 构造会话 → 运行（Ctrl-C 优雅退出）。
 pub async fn run_cli(overrides: CliOverrides) -> Result<(), String> {
     let settings = crate::config::settings::load_settings()?;
-    let cfg = config::resolve(settings.as_ref(), &overrides)?;
+    let mut cfg = config::resolve(settings.as_ref(), &overrides)?;
+    config::apply_companion_overrides(&mut cfg);
     let mut session = VoiceSession::new(cfg)?;
     let running = session.running.clone();
     ctrlc::set_handler(move || {

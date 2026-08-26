@@ -37,7 +37,7 @@ An open-source, real-time desktop **AI companion** with voice, memory, and a cus
 - **Text-to-Speech (TTS)** — sherpa-onnx ZipVoice zero-shot voice cloning (bilingual), with built-in voices and custom reference audio
 - **Local LLM** — llama.cpp local inference (any GGUF, streaming chat + agent tool calls), or an OpenAI-compatible remote API
 - **Voice Session** — wake word → ASR → LLM sentence-level streaming reply → TTS playback, with wake-word barge-in and hands-free follow-up
-- **Live2D Virtual Character** — persistent character window (Cubism 2/3/4/5) with position memory and percentage scaling; drag without stealing focus
+- **Live2D Virtual Character** — persistent character window (Cubism 2/3/4/5) with position memory and percentage scaling; drag without stealing focus; GIF companions and character packs (static portrait + persona + voice cloning) are also supported
 - **Desktop App** — Tauri 2 GUI (multi-page control panel: Overview / Chat / Companion / Models / Settings, plus a persistent character window), with installers for Windows / macOS / Linux
 - **deepseek-harness Integration** — the desktop companion reacts to [deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) (dsh) task state in real time, announcing task started / finished / failed / interrupted with a speech bubble + voice ([usage guide](docs/content/docs/desktop-app/dsh-bridge.mdx))
 - **CLI** — `kws` / `asr` / `tts` / `llm` / `voice` subcommands covering every capability, with bash / zsh / fish / powershell / elvish autocompletion
@@ -406,6 +406,8 @@ A persistent character window: renders a Live2D character (breathing / blinking 
 - **Size-adaptive** — the window size adapts to the model's real bounding-box aspect ratio
 - **Formats** — supports Cubism 2 / 3 / 4 / 5 (`.model3.json` / `model.json`)
 - **Model source** — users provide their own Live2D model directories (not manifest-downloaded), default `~/.zapmomo/models/live2d`; the Cubism Core runtime is versioned with the repo
+- **GIF companions** — import a `.gif` file directly from the Companion page
+- **Character packs** — import a character-pack directory (`character.md` persona + `character.png` static portrait, plus optional `voice/reference.wav` + `voice/reference.txt` for voice cloning). When active, the persona overrides the global system prompt, and clone-capable TTS models (ZipVoice / OmniVoice) use the character's voice; switching back to another companion restores the global configuration
 
 Add a `[live2d]` section to `~/.zapmomo/settings.toml` to override defaults (all optional):
 

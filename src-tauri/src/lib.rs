@@ -1289,8 +1289,15 @@ fn synthesize_tts(
     })?;
 
     // 合成音色参数统一解析（克隆 > sid > audiocpp 具名，见 zapmomo::tts::voice）。
-    // 在后台线程外解析，尽早报错。
-    let custom_wav = reference_wav.map(std::path::PathBuf::from);
+    // 用户显式参数（音色/自定义参考音频）优先；都为空时回落 active 角色包的克隆音色
+    // （设置页试听全局音色不应被角色包劫持）。在后台线程外解析，尽早报错。
+    let character = (voice.is_none() && reference_wav.is_none())
+        .then(zapmomo::companion::active_character_voice)
+        .flatten();
+    let custom_wav = reference_wav
+        .map(std::path::PathBuf::from)
+        .or_else(|| character.as_ref().map(|v| v.wav.clone()));
+    let reference_text = reference_text.or_else(|| character.map(|v| v.text));
     let voice_params = zapmomo::tts::voice::resolve_voice_params(
         &cfg,
         voice.as_deref(),
@@ -1835,7 +1842,11 @@ fn start_voice_session_impl(app: AppHandle, state: &VoiceSessionState) -> Result
         return Err("语音会话已在运行中".to_string());
     }
     let settings = zapmomo::config::settings::load_settings()?;
-    let cfg = zapmomo::voice::config::resolve(settings.as_ref(), &VoiceCliOverrides::default())?;
+    let mut cfg =
+        zapmomo::voice::config::resolve(settings.as_ref(), &VoiceCliOverrides::default())?;
+    // active 角色包覆盖：人设（character.md）完全替代全局 system prompt；
+    // 克隆模型（ZipVoice/OmniVoice）下注入角色音色。
+    zapmomo::voice::config::apply_companion_overrides(&mut cfg);
     // 语音互动需 KWS 与 ASR 同时启用（持久化开关）：未启用则拒绝（自动/手动一致拦截）。
     let kws_enabled =
         zapmomo::kws::config::resolve(settings.as_ref().and_then(|s| s.kws.as_ref()), None)
@@ -2926,6 +2937,10 @@ struct CompanionView {
     valid: bool,
     /// 探测到的封面图绝对路径（best-effort；无封面图为 null，前端用占位图标）。
     cover_image: Option<String>,
+    /// 角色包是否带人设（character.md 非空；非角色包恒 false）。
+    has_persona: bool,
+    /// 角色包是否带音色克隆参考（voice/reference.wav + reference.txt 成对）。
+    has_voice: bool,
 }
 
 #[derive(Serialize)]
@@ -2957,6 +2972,8 @@ fn build_view(lib: &zapmomo::companion::CompanionLibrary) -> CompanionLibraryVie
                 valid: zapmomo::companion::quick_valid(m),
                 cover_image: zapmomo::live2d::config::find_cover_image(Path::new(&m.model_dir))
                     .map(|p| p.display().to_string()),
+                has_persona: zapmomo::companion::has_persona(m),
+                has_voice: zapmomo::companion::has_character_voice(m),
             })
             .collect(),
         active_model_id: lib.active_model_id.clone(),
@@ -3013,6 +3030,17 @@ fn reconcile_active(
             };
             let _ = app.emit("live2d-model-changed", &info);
         }
+    }
+
+    // active 实际变更 → 人设/音色快照需重建：运行中的语音会话 stop+start
+    // （set_microphone 同款模式；重启同时清 history，人设语义干净）。
+    // 失败仅告警：人设/音色是增强，不应让「切换伙伴」本身失败。
+    let voice = app.state::<VoiceSessionState>();
+    if voice.is_running()
+        && let Err(e) = stop_voice_session_inner(voice.inner())
+            .and_then(|()| start_voice_session_impl(app.clone(), voice.inner()))
+    {
+        tracing::warn!("切换伙伴后重启语音会话失败（人设/音色将在下次启动会话时生效）: {e}");
     }
     Ok(())
 }
