@@ -182,13 +182,13 @@ impl VoiceSession {
         };
         let llm_rx = llm.subscribe();
         let tts = TtsEngine::new(cfg.tts.clone())?;
-        // 合成音色参数统一解析（zipvoice/omnivoice 克隆 > kokoro 等 sid > audiocpp 具名）
+        // 合成音色参数统一解析（角色包克隆音色 > zipvoice/omnivoice 克隆 > kokoro 等 sid > audiocpp 具名）
         let voice = crate::tts::voice::resolve_voice_params(
             &cfg.tts,
             cfg.voice_id.as_deref(),
             None,
-            None,
-            None,
+            cfg.character_voice.as_ref().map(|v| v.wav.as_path()),
+            cfg.character_voice.as_ref().map(|v| v.text.as_str()),
         )?;
         let synth = SynthHandle::new(tts, voice, cfg.speed);
         let mic = MicLoop::new(
@@ -340,8 +340,8 @@ impl VoiceSession {
             &swap.cfg,
             self.cfg.voice_id.as_deref(),
             None,
-            None,
-            None,
+            self.cfg.character_voice.as_ref().map(|v| v.wav.as_path()),
+            self.cfg.character_voice.as_ref().map(|v| v.text.as_str()),
         )
         .unwrap_or_else(|e| {
             tracing::warn!("TTS 热切换音色解析失败（兜底 sid 0）：{e}");

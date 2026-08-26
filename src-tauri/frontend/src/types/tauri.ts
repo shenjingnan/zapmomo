@@ -151,7 +151,7 @@ export interface PerformanceKeyInfo {
 export interface Live2dConfigInfo {
   model_dir: string | null;
   model_file: string | null;
-  /** 模型格式："cubism3"（Live2D）或 "gif"（GIF 伙伴） */
+  /** 模型格式："cubism3"（Live2D）/ "gif"（GIF 伙伴）/ "character"（角色包） */
   format: string | null;
   models_present: boolean;
   window_scale: number | null;
@@ -171,7 +171,7 @@ export interface Live2dConfigInfo {
 export interface Live2dModelInfo {
   model_dir: string | null;
   model_file: string | null;
-  /** "cubism3"（Live2D）或 "gif"（GIF 伙伴） */
+  /** "cubism3"（Live2D）/ "gif"（GIF 伙伴）/ "character"（角色包） */
   format: string | null;
   /** BongoCat 道具资源（非 BongoCat 模型为 null） */
   props: PerformancePropsInfo | null;
@@ -206,15 +206,19 @@ export interface CompanionModelInfo {
   source_path: string | null;
   /** 应用托管目录 `~/.zapmomo/companions/{id}` */
   model_dir: string;
-  /** 托管目录内的 .model3.json（Live2D）或 .gif（GIF 伙伴）绝对路径 */
+  /** 托管目录内的 .model3.json（Live2D）/ .gif（GIF 伙伴）/ character.png（角色包）绝对路径 */
   model_file: string;
-  /** "cubism3"（Live2D）或 "gif"（GIF 伙伴） */
+  /** "cubism3"（Live2D）/ "gif"（GIF 伙伴）/ "character"（角色包） */
   format: string;
   imported_at: string;
   /** 快速有效判定：托管目录与清单文件是否都还在磁盘上 */
   valid: boolean;
   /** 探测到的封面图绝对路径（无封面图为 null，列表用占位图标） */
   cover_image: string | null;
+  /** 角色包是否带人设（character.md 非空；非角色包恒 false） */
+  has_persona: boolean;
+  /** 角色包是否带音色克隆参考（voice/reference.wav + reference.txt 成对） */
+  has_voice: boolean;
 }
 
 /** `list_companions` / `set_active_companion` 返回的伙伴库视图 */

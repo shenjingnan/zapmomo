@@ -43,6 +43,8 @@ function model(id: string, name: string, valid = true): CompanionModelInfo {
     imported_at: "2026-01-01T00:00:00Z",
     valid,
     cover_image: null,
+    has_persona: false,
+    has_voice: false,
   };
 }
 
