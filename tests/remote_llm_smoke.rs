@@ -11,9 +11,7 @@ use std::sync::atomic::AtomicBool;
 use zapmomo::llm::config::ResolvedLlmConfig;
 use zapmomo::llm::http::OpenAiChatProvider;
 use zapmomo::llm::provider::LlmProvider;
-use zapmomo::llm::types::{
-    ChatMessage, ChatRole, FinishReason, GenParams, InputItem, OutputItem,
-};
+use zapmomo::llm::types::{ChatMessage, ChatRole, FinishReason, GenParams, InputItem, OutputItem};
 
 #[test]
 #[ignore = "真实 API 冒烟：需 ZHIPU_API_KEY 环境变量"]

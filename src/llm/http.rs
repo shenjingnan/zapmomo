@@ -310,6 +310,7 @@ mod tests {
         let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
         let port = match server.server_addr() {
             tiny_http::ListenAddr::IP(addr) => addr.port(),
+            #[cfg(unix)]
             tiny_http::ListenAddr::Unix(_) => unreachable!("显式绑定 127.0.0.1"),
         };
         let (tx, rx) = mpsc::channel();
