@@ -272,7 +272,7 @@ describe("LibraryPage", () => {
     );
   });
 
-  it("分类 Tab 存在且切换不崩溃", async () => {
+  it("分类 Tab 存在且切换不崩溃（LLM 已改远程连接，分类入口不再提供）", async () => {
     render(
       <MemoryRouter initialEntries={["/models/library"]}>
         <App />
@@ -281,10 +281,15 @@ describe("LibraryPage", () => {
     await waitFor(() => expect(screen.getByText("Qwen3-4B-GGUF")).toBeInTheDocument(), {
       timeout: 3000,
     });
-    const llmTab = screen.getByRole("button", { name: "LLM" });
-    expect(llmTab).toBeInTheDocument();
-    await userEvent.click(llmTab);
-    expect(screen.getByText("Qwen3-4B-GGUF")).toBeInTheDocument();
+    // LLM 分类 tab 已移除（本地 LLM 能力下线）
+    expect(screen.queryByRole("button", { name: "LLM" })).not.toBeInTheDocument();
+    // 切到 ASR：fixture 均为 llm 类型，被服务端过滤为空，列表展示空态不崩溃
+    const asrTab = screen.getByRole("button", { name: "ASR" });
+    expect(asrTab).toBeInTheDocument();
+    await userEvent.click(asrTab);
+    await waitFor(() => {
+      expect(screen.queryByText("Qwen3-4B-GGUF")).not.toBeInTheDocument();
+    });
   });
 
   it("空结果显示空状态", async () => {

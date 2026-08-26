@@ -1,5 +1,5 @@
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { FileUp, FolderOpen } from "lucide-react";
+import { FolderOpen } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
@@ -146,8 +146,6 @@ export function ModelDetailDialog({ open, onClose, model }: ModelDetailDialogPro
 interface AddLocalModelDialogProps {
   open: boolean;
   onClose: () => void;
-  /** Registry 卡片「导入 GGUF」时携带；顶部「添加本地模型」为 null */
-  registryId: string | null;
   onAddLocal: (
     path: string,
     modelType?: ModelType | null,
@@ -155,26 +153,19 @@ interface AddLocalModelDialogProps {
   ) => Promise<void>;
 }
 
+// LLM 已改为远程连接（无本地 GGUF），本地模型只支持 KWS/ASR/TTS 目录。
 const TYPE_CHOICES: { value: string; label: string }[] = [
   { value: "auto", label: "自动识别" },
   { value: "kws", label: "KWS（唤醒词）" },
   { value: "asr", label: "ASR（语音识别）" },
-  { value: "llm", label: "LLM（AI 大脑）" },
   { value: "tts", label: "TTS（语音合成）" },
 ];
 
 /**
- * 添加本地模型对话框。
- * - Registry 卡片「导入 GGUF」：只选具体 `.gguf` 文件，显式绑定 registry_id。
- * - 顶部「添加本地模型」：可选 `.gguf` 文件（→ LLM）或模型目录（自动识别 / 手动选类型）。
+ * 添加本地模型对话框：选择模型目录（自动识别 / 手动选类型）。
  * 只注册路径，不复制大文件。
  */
-export function AddLocalModelDialog({
-  open,
-  onClose,
-  registryId,
-  onAddLocal,
-}: AddLocalModelDialogProps) {
+export function AddLocalModelDialog({ open, onClose, onAddLocal }: AddLocalModelDialogProps) {
   const [typeChoice, setTypeChoice] = useState("auto");
   const [busy, setBusy] = useState(false);
 
@@ -185,25 +176,13 @@ export function AddLocalModelDialog({
     }
   }, [open]);
 
-  const isLlmImport = registryId !== null;
-
   const doAdd = async (path: string, modelType?: ModelType | null) => {
     setBusy(true);
     try {
-      await onAddLocal(path, modelType, registryId);
+      await onAddLocal(path, modelType, null);
       onClose();
     } finally {
       setBusy(false);
-    }
-  };
-
-  const pickGguf = async () => {
-    const file = await openDialog({
-      multiple: false,
-      filters: [{ name: "GGUF", extensions: ["gguf"] }],
-    });
-    if (typeof file === "string") {
-      await doAdd(file, "llm");
     }
   };
 
@@ -215,61 +194,39 @@ export function AddLocalModelDialog({
   };
 
   return (
-    <LibraryDialog
-      open={open}
-      onClose={onClose}
-      title={isLlmImport ? "导入 GGUF" : "添加本地模型"}
-      width="md"
-    >
-      <p className="text-sm text-text-secondary">
-        {isLlmImport
-          ? "选择具体的 .gguf 模型文件，注册到当前 Registry 模型（不复制文件）。"
-          : "选择模型文件或模型目录。只注册路径，不复制大文件。"}
-      </p>
+    <LibraryDialog open={open} onClose={onClose} title="添加本地模型" width="md">
+      <p className="text-sm text-text-secondary">选择模型目录。只注册路径，不复制大文件。</p>
 
       <div className="space-y-2">
         <Button
           variant="outline"
           className="w-full justify-start"
-          onClick={pickGguf}
+          onClick={pickDirectory}
           disabled={busy}
         >
-          <FileUp className="h-4 w-4" />
-          选择 GGUF 文件
+          <FolderOpen className="h-4 w-4" />
+          选择模型目录
         </Button>
-        {!isLlmImport && (
-          <Button
-            variant="outline"
-            className="w-full justify-start"
-            onClick={pickDirectory}
-            disabled={busy}
-          >
-            <FolderOpen className="h-4 w-4" />
-            选择模型目录
-          </Button>
-        )}
       </div>
 
-      {!isLlmImport && (
-        <div className="space-y-1.5">
-          <p className="text-xs text-text-secondary">目录类型</p>
-          <Select value={typeChoice} onValueChange={setTypeChoice}>
-            <SelectTrigger className="w-full">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {TYPE_CHOICES.map((c) => (
-                <SelectItem key={c.value} value={c.value}>
-                  {c.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <p className="text-[11px] text-text-muted">
-            选「自动识别」时，ZapMomo 仅当目录能唯一匹配一种模型类型才添加。
-          </p>
-        </div>
-      )}
+      <div className="space-y-1.5">
+        <p className="text-xs text-text-secondary">目录类型</p>
+        <Select value={typeChoice} onValueChange={setTypeChoice}>
+          <SelectTrigger className="w-full">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {TYPE_CHOICES.map((c) => (
+              <SelectItem key={c.value} value={c.value}>
+                {c.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <p className="text-[11px] text-text-muted">
+          选「自动识别」时，ZapMomo 仅当目录能唯一匹配一种模型类型才添加。
+        </p>
+      </div>
     </LibraryDialog>
   );
 }

@@ -1,8 +1,7 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { LibraryModel } from "@/types/modelLibrary";
 import App from "./App";
 
 const { invokeMock, listeners } = vi.hoisted(() => ({
@@ -54,12 +53,10 @@ let mic = "";
 let devices: string[];
 /** 模拟 KWS 监听运行状态（置 true 以验证监听中仍可切换设备）。 */
 let kwsListening = false;
-/** 可变 LLM 配置：单个用例可置 ready/models_present 以开启能力链路开关。 */
+/** 可变 LLM 配置：单个用例可置 ready/base_url+model 以开启能力链路开关。 */
 let llmConfig: typeof LLM_CONFIG;
 /** 模拟后端拒绝卸载 LLM（如语音会话占用），null = 卸载成功。 */
 let llmUnloadReject: string | null = null;
-/** 模型库快照（list_model_library），摘要 LLM 快速切换菜单的数据源。 */
-let libraryModels: LibraryModel[];
 
 const ASR_CONFIG = {
   model_dir: "/home/user/.zapmomo/models/sherpa-onnx-streaming-zipformer",
@@ -88,17 +85,14 @@ let ttsConfig: typeof TTS_CONFIG;
 
 const LLM_CONFIG = {
   enabled: false,
-  provider: "local",
-  model_path: "/home/user/.zapmomo/models/qwen3-4b.gguf",
-  models_present: false,
+  provider: "openai-compatible",
   ready: false,
-  enable_thinking: false,
-  auto_load: false,
   settings_path: "/home/user/.zapmomo/settings.toml",
   system_prompt: "你是 ZapMomo 的 AI 大脑。",
+  base_url: null as string | null,
+  api_key_masked: null as string | null,
+  model: null as string | null,
   params: {
-    context_size: 8192,
-    batch_size: 512,
     max_tokens: 512,
     temperature: 0.7,
     top_p: 0.8,
@@ -106,41 +100,12 @@ const LLM_CONFIG = {
     min_p: 0.05,
     repeat_penalty: 1.05,
     seed: 0,
-    threads: 8,
-    gpu_layers: 0,
-    enable_thinking: false,
   },
 };
 
-/** 已安装 LLM 的模型库条目 fixture（摘要快速切换菜单数据源）。 */
-function installedLlmFixture(o: { id: string; current?: boolean }): LibraryModel {
-  return {
-    id: o.id,
-    name: o.id,
-    displayName: o.id,
-    modelType: "llm",
-    runtime: "llama.cpp",
-    format: "gguf",
-    description: "",
-    languages: ["zh"],
-    tags: [],
-    parameterCount: null,
-    quantization: "Q4_K_M",
-    version: "1",
-    sizeBytes: null,
-    homepage: null,
-    downloadable: true,
-    source: "registry",
-    ownership: "managed",
-    installState: "installed",
-    current: o.current ?? false,
-    runtimeStatus: "inactive",
-    localPath: `/home/user/.zapmomo/models/${o.id}.gguf`,
-    installedAt: null,
-    installId: `install-${o.id}`,
-    repoId: null,
-    compatibility: "verified",
-  };
+/** 把 LLM 配置标记为「已填写远程连接三要素」（等价旧 models_present=true）。 */
+function llmConfigured(cfg: typeof LLM_CONFIG): typeof LLM_CONFIG {
+  return { ...cfg, base_url: "https://open.bigmodel.cn/api/paas/v4", model: "glm-4.7-flash" };
 }
 
 /** 渲染 App 并定位到指定路由（默认 KWS 详情页）。 */
@@ -160,7 +125,6 @@ beforeEach(() => {
   asrConfig = { ...ASR_CONFIG };
   ttsConfig = { ...TTS_CONFIG };
   llmUnloadReject = null;
-  libraryModels = [];
   mic = "";
   devices = ["内置麦克风", "USB 麦克风"];
   kwsListening = false;
@@ -216,28 +180,7 @@ beforeEach(() => {
         case "is_llm_ready":
           return Promise.resolve(false);
         case "list_model_library":
-          return Promise.resolve(libraryModels);
-        case "set_current_model": {
-          // 兼容 installId 与记录 id 直传（LlmPresetDialog 的 setCurrent 传 installed.id）。
-          const target = libraryModels.find(
-            (m) => m.id === args?.id || (m.installId ?? m.id) === args?.id,
-          );
-          if (target) {
-            llmConfig = { ...llmConfig, model_path: target.localPath ?? llmConfig.model_path };
-          }
-          libraryModels = libraryModels.map((m) => ({
-            ...m,
-            current: target != null && m.id === target.id,
-          }));
-          return Promise.resolve({
-            modelType: "llm",
-            modelId: args?.id ?? "",
-            path: target?.localPath ?? "",
-            runtimeAction: "reloaded",
-            effectiveImmediately: true,
-            message: "已设为当前模型",
-          });
-        }
+          return Promise.resolve([]);
         case "start_listen":
         case "stop_listen":
         case "download_kws_model":
@@ -298,7 +241,7 @@ describe("App（KWS 控制面板）", () => {
   });
 
   it("LLM 卸载失败：右上角通知展示真实原因（如语音会话占用）", async () => {
-    llmConfig = { ...llmConfig, ready: true, models_present: true };
+    llmConfig = { ...llmConfigured(llmConfig), ready: true };
     llmUnloadReject = "语音会话正在使用 LLM。请先在「对话记录」页停止会话后再卸载。";
     const user = userEvent.setup();
     renderApp("/models");
@@ -325,7 +268,7 @@ describe("App（KWS 控制面板）", () => {
     kwsConfig = { ...kwsConfig, models_present: true };
     asrConfig = { ...asrConfig, models_present: true };
     ttsConfig = { ...ttsConfig, models_present: true };
-    llmConfig = { ...llmConfig, models_present: true };
+    llmConfig = llmConfigured(llmConfig);
     renderApp("/models");
     // 等待配置加载完成（「未配置模型」span 消失）后再断言无引导卡。
     await waitFor(() => {
@@ -334,35 +277,16 @@ describe("App（KWS 控制面板）", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
-  it("LLM 已配置：切换按钮打开选择模型弹窗，「设为当前」完成切换并回显", async () => {
-    llmConfig = { ...llmConfig, models_present: true };
-    // fixture id 必须是 LLM_PRESETS 的 registry id，弹窗按 id/repoId 匹配安装态。
-    libraryModels = [
-      installedLlmFixture({ id: "qwen3-4b-instruct-2507-q4-k-m", current: true }),
-      installedLlmFixture({ id: "qwen3-8b-q4-k-m" }),
-    ];
-    const user = userEvent.setup();
+  it("LLM 已配置：摘要行展示远程模型名，状态为未连接", async () => {
+    llmConfig = llmConfigured(llmConfig);
     renderApp("/models");
 
-    // 模型名区域 = 文本 + 切换按钮（等 llm config 异步加载完成）
-    await screen.findByText("qwen3-4b.gguf");
-    await user.click(screen.getByRole("button", { name: "选择模型" }));
-
-    // 打开与 LLM 配置页同款「选择模型」弹窗：当前预设标记，另一预设可「设为当前」
-    expect(await screen.findByRole("heading", { name: "选择模型" })).toBeInTheDocument();
-    expect(screen.getByText("当前模型")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "设为当前" }));
-
-    // invoke set_current_model（弹窗传记录 id），行内模型名回显新 basename
-    await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("set_current_model", {
-        id: "qwen3-8b-q4-k-m",
-      });
-    });
-    await waitFor(() => {
-      expect(screen.getByText("qwen3-8b-q4-k-m.gguf")).toBeInTheDocument();
-    });
-    expect(await screen.findByText("已设为当前模型")).toBeInTheDocument();
+    // LLM 行模型名区域回显远程模型名（等 llm config 异步加载完成）
+    expect(await screen.findByText("glm-4.7-flash")).toBeInTheDocument();
+    // 未连接时行内开关可用（点击即连接）
+    const llmRow = screen.getByRole("link", { name: "配置AI 大脑（LLM）" });
+    expect(within(llmRow).getByText("未连接", { selector: "span" })).toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: "AI 大脑（LLM）开关" })).toBeEnabled();
   });
 
   it("渲染 KWS 配置项", async () => {

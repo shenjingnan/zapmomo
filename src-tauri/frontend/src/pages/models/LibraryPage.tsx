@@ -98,12 +98,7 @@ export function LibraryPage() {
         <ModelDetailDrawer detail={detail} lib={lib} downloads={downloads} onClose={detail.close} />
       </div>
 
-      <AddLocalModelDialog
-        open={addOpen}
-        onClose={() => setAddOpen(false)}
-        registryId={null}
-        onAddLocal={lib.addLocal}
-      />
+      <AddLocalModelDialog open={addOpen} onClose={() => setAddOpen(false)} onAddLocal={lib.addLocal} />
     </div>
   );
 }

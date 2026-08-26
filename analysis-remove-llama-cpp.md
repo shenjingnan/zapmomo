@@ -126,6 +126,8 @@
 
 1. **模型库下载基础设施共享**：`model_library` 的下载/安装逻辑高度依赖 `kws::model` 的 `ModelAsset`/`install_asset_to_cancellable` 等函数。这些函数也用于 KWS/ASR/TTS 的模型下载。移除 LLM 模型下载不影响其他能力。
 
+   > **⚠️ 实施时修正（2026-08-26）**：上述论断在实施中被证伪——`list_model_library`/`set_current_model` 等模型库命令**同时支撑着 KWS/ASR/TTS 页面的多模型切换对话框**（`useKwsModelSwitch`/`useAsrModelSwitch`/`useTtsModelSwitch` 均调用它们）。因此最终方案调整为：**保留** `model_library` 模块与模型库命令层（仅剥离 LLM/GGUF 部分），三个语音能力页面的模型切换功能完整保留；仅 LLM 部分改为纯远程连接。详见 `docs/plans/2026-08-26-remove-llama-cpp.md`。
+
 2. **Settings 结构**：`AppConfig.model_library` 字段存有 `ModelLibrarySettings`（含 `local_models`、`hf_catalog_base_url` 等）。移除后 `AppConfig` 结构体需更新。
 
 3. **Tauri State**：`LlmState` 和 `ModelLibraryState` 在 Tauri 层管理，移除后需更新。

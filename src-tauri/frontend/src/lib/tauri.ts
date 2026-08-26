@@ -43,7 +43,6 @@ import type {
   Live2dConfigInfo,
   Live2dModelInfo,
   LlmConfigInfo,
-  LlmDownloadResult,
   LlmFinishReason,
   LlmParamsPatch,
   LlmStatus,
@@ -140,10 +139,9 @@ export const api = {
   chatLlm: (args: { text: string }) => invoke<void>("chat_llm", args),
   stopLlm: () => invoke<void>("stop_llm"),
   isLlmReady: () => invoke<boolean>("is_llm_ready"),
-  setLlmModelPath: (args: { path: string }) => invoke<void>("set_llm_model_path", args),
-  downloadLlmModel: (args: { id: string }) => invoke<LlmDownloadResult>("download_llm_model", args),
-  setLlmThinking: (args: { enabled: boolean }) => invoke<void>("set_llm_thinking", args),
-  setLlmAutoLoad: (args: { enabled: boolean }) => invoke<void>("set_llm_auto_load", args),
+  /** 保存远程 LLM 连接配置（base_url/api_key/model）；apiKey 为空串时清空，不传则保持不变 */
+  setLlmConnection: (args: { baseUrl: string; apiKey?: string | null; model: string }) =>
+    invoke<void>("set_llm_connection", args),
   setLlmParams: (args: { params: LlmParamsPatch }) => invoke<void>("set_llm_params", args),
   setLlmSystemPrompt: (args: { prompt: string }) => invoke<void>("set_llm_system_prompt", args),
   // ---- 语音会话（KWS→ASR→LLM→TTS 全链路）----
@@ -302,12 +300,6 @@ export function onTtsProgress(handler: (p: TtsProgress) => void): Promise<Unlist
 
 export function onTtsStopped(handler: (payload: ListenStopped) => void): Promise<UnlistenFn> {
   return listen<ListenStopped>("tts-stopped", (e) => handler(e.payload));
-}
-
-export function onLlmDownloadProgress(
-  handler: (payload: DownloadProgress) => void,
-): Promise<UnlistenFn> {
-  return listen<DownloadProgress>("llm-model-download-progress", (e) => handler(e.payload));
 }
 
 export function onLive2dModelChanged(

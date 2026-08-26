@@ -8,26 +8,18 @@ import { Slider } from "@/components/ui/slider";
 import { cn } from "@/lib/utils";
 import { useRuntime } from "@/providers/RuntimeContext";
 import type { LlmParams, LlmParamsPatch } from "@/types/tauri";
-import { isHttpProvider } from "./llmMeta";
 
 type ParamKey = keyof LlmParamsPatch;
 
 const PARAM_KEYS: ParamKey[] = [
-  "context_size",
   "temperature",
   "top_p",
   "max_tokens",
-  "threads",
-  "gpu_layers",
   "top_k",
   "min_p",
   "repeat_penalty",
   "seed",
-  "batch_size",
 ];
-
-/** 需重新加载模型才能生效的字段（load 时固化的引擎参数）。 */
-const NEEDS_RELOAD: ParamKey[] = ["context_size", "batch_size", "threads", "gpu_layers"];
 
 interface ParamMeta {
   label: string;
@@ -41,24 +33,6 @@ interface ParamMeta {
 
 /** 参数元数据：前端预校验边界与后端 `LlmParamsPatch::apply_to` 一致（后端是权威）。 */
 const PARAM_META: Record<ParamKey, ParamMeta> = {
-  context_size: {
-    label: "上下文大小",
-    kind: "number",
-    min: 256,
-    max: 1_048_576,
-    step: 128,
-    suffix: "token",
-    hint: "决定模型能记住的对话长度，越大占用内存越多。修改后自动重载生效。",
-  },
-  batch_size: {
-    label: "批大小",
-    kind: "number",
-    min: 1,
-    max: 8192,
-    step: 1,
-    suffix: "token",
-    hint: "单次推理的 token 批大小，影响速度、不影响回答质量。修改后自动重载生效。",
-  },
   max_tokens: {
     label: "最大生成 Tokens",
     kind: "number",
@@ -116,24 +90,6 @@ const PARAM_META: Record<ParamKey, ParamMeta> = {
     step: 1,
     hint: "固定后每次生成结果可复现，0 = 每次随机。",
   },
-  threads: {
-    label: "线程数",
-    kind: "number",
-    min: 0,
-    max: 512,
-    step: 1,
-    suffix: "核",
-    hint: "用于推理的 CPU 线程数，0 = 自动（物理核数-2）。修改后自动重载生效。",
-  },
-  gpu_layers: {
-    label: "GPU 层数",
-    kind: "number",
-    min: -1,
-    max: 1024,
-    step: 1,
-    suffix: "层",
-    hint: "卸载到 GPU 加速的层数，-1 = 全部，0 = 纯 CPU。修改后自动重载生效。",
-  },
 };
 
 function toDraft(params: LlmParams | undefined): Record<ParamKey, string> {
@@ -143,13 +99,13 @@ function toDraft(params: LlmParams | undefined): Record<ParamKey, string> {
 }
 
 function parseDraft(draft: Record<ParamKey, string>): LlmParamsPatch | null {
-  const patch = {} as LlmParamsPatch;
+  const patch: LlmParamsPatch = {};
   for (const k of PARAM_KEYS) {
     const raw = draft[k].trim();
     if (raw === "") return null;
     const v = Number(raw);
     if (!Number.isFinite(v)) return null;
-    (patch as Record<ParamKey, number>)[k] = v;
+    patch[k] = v;
   }
   return patch;
 }
@@ -161,9 +117,7 @@ function isPristine(
   if (!draft || !params) return true;
   const patch = parseDraft(draft);
   if (!patch) return false; // 非法值视为已修改，允许点保存触发校验
-  return PARAM_KEYS.every(
-    (k) => Math.abs((patch as Record<ParamKey, number>)[k] - params[k]) < 1e-6,
-  );
+  return PARAM_KEYS.every((k) => Math.abs((patch[k] as number) - params[k]) < 1e-6);
 }
 
 interface ParamRowProps {
@@ -217,7 +171,7 @@ function ParamRow({ key_, value, onChange }: ParamRowProps) {
 }
 
 /**
- * 高级参数：采样与运行参数（11 项），批量「保存」写 backend。
+ * 高级参数：采样参数（7 项），批量「保存」写 backend。
  * 草稿用字符串 map（Live2dCard 模式），点保存才 parse + 校验；温度/Top-P 用滑块 + 数字输入。
  */
 export function LlmAdvancedParams() {
@@ -228,7 +182,6 @@ export function LlmAdvancedParams() {
   const [saveError, setSaveError] = useState<string | null>(null);
 
   const params = llm.config?.params;
-  const http = isHttpProvider(llm.config?.provider);
 
   // hydrate：config 就绪时填充草稿；dirty 时保留用户编辑，否则随 config 同步
   useEffect(() => {
@@ -265,15 +218,6 @@ export function LlmAdvancedParams() {
     setSaveError(null);
     try {
       await llm.setParams(patch);
-      // 若改动了「需重载」字段且模型已加载 → 主动重载使改动立即生效
-      if (llm.ready && params) {
-        const changed = PARAM_KEYS.filter(
-          (k) => Math.abs((patch as Record<ParamKey, number>)[k] - params[k]) > 1e-6,
-        );
-        if (changed.some((k) => NEEDS_RELOAD.includes(k))) {
-          await llm.load();
-        }
-      }
     } catch (e) {
       setSaveError(String(e));
     } finally {
@@ -322,9 +266,7 @@ export function LlmAdvancedParams() {
 
           <div className="flex flex-wrap items-center justify-between gap-2 px-3.5 py-2.5">
             <p className="text-xs text-text-muted">
-              {http
-                ? "部分参数（上下文大小/线程/GPU 层等）仅对本地 llama.cpp 生效。"
-                : "温度、Top-P 等采样参数下次对话生效；上下文/线程/GPU 修改保存后会自动重新加载模型生效。"}
+              采样参数随请求发送，下次对话即生效；是否生效取决于服务端对 OpenAI 兼容参数的支持。
             </p>
             <Button
               size="sm"

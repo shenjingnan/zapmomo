@@ -1,16 +1,12 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "@/App";
-import type { LibraryModel } from "@/types/modelLibrary";
 
-const { invokeMock, listeners, dialogOpenMock, llmDownloadImpl } = vi.hoisted(() => ({
+const { invokeMock, listeners } = vi.hoisted(() => ({
   invokeMock: vi.fn(),
   listeners: new Map<string, (e: { payload: unknown }) => void>(),
-  dialogOpenMock: vi.fn(),
-  /** `download_llm_model` 的可注入实现（各用例控制挂起/成功/失败/applied） */
-  llmDownloadImpl: vi.fn(),
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -30,10 +26,6 @@ vi.mock("@tauri-apps/api/window", () => ({
     toggleMaximize: vi.fn(),
     close: vi.fn(),
   })),
-}));
-
-vi.mock("@tauri-apps/plugin-dialog", () => ({
-  open: dialogOpenMock,
 }));
 
 const KWS_CONFIG = {
@@ -68,10 +60,8 @@ const TTS_CONFIG = {
   settings_path: "/home/user/.zapmomo/settings.toml",
 };
 
-/** GenParams::default + threads 取已 resolve 值（8 表示物理核数-2）。 */
+/** 采样参数（远程语义：仅 7 项随请求发送的参数）。 */
 const DEFAULT_PARAMS = {
-  context_size: 8192,
-  batch_size: 512,
   max_tokens: 512,
   temperature: 0.7,
   top_p: 0.8,
@@ -79,65 +69,29 @@ const DEFAULT_PARAMS = {
   min_p: 0.05,
   repeat_penalty: 1.05,
   seed: 0,
-  threads: 8,
-  gpu_layers: 0,
-  enable_thinking: false,
 };
 
 function makeLlmConfig() {
   return {
     enabled: false,
-    provider: "local",
-    model_path: "/home/user/.zapmomo/models/qwen3-4b.gguf",
-    models_present: false,
+    provider: "openai-compatible",
     ready: false,
-    enable_thinking: false,
-    auto_load: false,
     settings_path: "/home/user/.zapmomo/settings.toml",
-    system_prompt: "你是 ZapMomo 的 AI 大脑。",
+    system_prompt: "你是 ZapMomo 的 AI 伙伴。",
+    base_url: null as string | null,
+    api_key_masked: null as string | null,
+    model: null as string | null,
     params: { ...DEFAULT_PARAMS },
   };
 }
 
 let llmConfig: ReturnType<typeof makeLlmConfig>;
-/** `list_model_library` 返回的已注册模型（含 LLM 预设的安装/current 状态）。 */
-let libraryModels: LibraryModel[];
-/** set_current_model 可替换实现（beforeEach 重置；loading 用例覆盖为挂起 promise）。 */
-let switchImpl: (id: string) => Promise<unknown>;
 
-/** 已安装的 managed LLM 预设（LlmPresetDialog 按 id/repoId 匹配）。 */
-function installedPreset(
-  id: string,
-  name: string,
-  opts?: { current?: boolean; installState?: LibraryModel["installState"] },
-): LibraryModel {
-  return {
-    id,
-    name,
-    displayName: name,
-    modelType: "llm",
-    runtime: "llama.cpp",
-    format: "GGUF",
-    description: "",
-    languages: [],
-    tags: [],
-    parameterCount: "0.6B",
-    quantization: "Q4_K_M",
-    version: "instruct",
-    sizeBytes: 396_705_472,
-    homepage: null,
-    downloadable: true,
-    source: "registry",
-    ownership: "managed",
-    installState: opts?.installState ?? "installed",
-    current: opts?.current ?? false,
-    runtimeStatus: "inactive",
-    localPath: `/home/user/.zapmomo/models/${name}`,
-    installedAt: "2026-08-20T00:00:00Z",
-    installId: id,
-    repoId: null,
-    compatibility: "verified",
-  };
+/** 把 mock 配置标记为「已填写远程连接三要素」。 */
+function configureConnection() {
+  llmConfig.base_url = "https://open.bigmodel.cn/api/paas/v4";
+  llmConfig.api_key_masked = "sk-***1234";
+  llmConfig.model = "glm-4.7-flash";
 }
 
 function renderLlmPage() {
@@ -148,7 +102,7 @@ function renderLlmPage() {
   );
 }
 
-/** 触发 `llm-status` 事件，把模型置为已加载（模拟后台加载完成 / 启动自动加载）。 */
+/** 触发 `llm-status` 事件，把模型置为已连接（模拟后台连接完成 / 启动自动连接）。 */
 function fireReady() {
   llmConfig.ready = true; // 同步 mock 状态，使后续 refreshConfig 也读到已就绪（贴近真实后端）
   act(() => {
@@ -159,41 +113,17 @@ function fireReady() {
 beforeEach(() => {
   invokeMock.mockReset();
   listeners.clear();
-  dialogOpenMock.mockReset();
-  llmDownloadImpl.mockReset();
-  llmDownloadImpl.mockResolvedValue({
-    model_path: "/home/user/.zapmomo/models/Qwen3-0.6B/Qwen3-0.6B-Q4_K_M.gguf",
-    applied: true,
-  });
-  // set_current_model 默认实现（loading 用例可覆盖为挂起 promise）。
-  switchImpl = (id: string) => {
-    libraryModels = libraryModels.map((m) => ({ ...m, current: m.id === id }));
-    const target = libraryModels.find((m) => m.id === id);
-    if (target) {
-      llmConfig.model_path = target.localPath ?? "";
-      llmConfig.models_present = true;
-    }
-    return Promise.resolve({
-      model_type: "llm",
-      model_id: id,
-      path: target?.localPath ?? "",
-      runtime_action: "none",
-      effective_immediately: false,
-      message: "已设为当前模型",
-    });
-  };
   llmConfig = makeLlmConfig();
-  libraryModels = [];
 
   invokeMock.mockImplementation(
     (
       cmd: string,
       args?: {
-        enabled?: boolean;
-        path?: string;
+        baseUrl?: string;
+        apiKey?: string | null;
+        model?: string;
         params?: Record<string, number>;
         prompt?: string;
-        id?: string;
       },
     ) => {
       switch (cmd) {
@@ -213,44 +143,23 @@ beforeEach(() => {
           return Promise.resolve([]);
         case "get_llm_config":
           // 返回新对象引用，保证 refreshConfig 触发重渲染（mock 中 setter 就地改 llmConfig）
-          return Promise.resolve({ ...llmConfig });
+          return Promise.resolve({ ...llmConfig, params: { ...llmConfig.params } });
         case "is_asr_listening":
           return Promise.resolve(false);
         case "is_llm_ready":
           return Promise.resolve(false);
         case "is_voice_session_running":
           return Promise.resolve(false);
-        case "set_llm_auto_load":
-          llmConfig.auto_load = args?.enabled ?? false;
-          return Promise.resolve(undefined);
-        case "set_llm_thinking":
-          llmConfig.enable_thinking = args?.enabled ?? false;
-          return Promise.resolve(undefined);
-        case "set_llm_model_path":
-          llmConfig.model_path = args?.path ?? "";
-          llmConfig.models_present = true;
-          return Promise.resolve(undefined);
-        case "download_llm_model":
-          // 模拟后端：applied=true 时写入配置（下载区据此消失、开关解锁）
-          return llmDownloadImpl(args).then((r: { model_path: string; applied: boolean }) => {
-            if (r.applied) {
-              llmConfig.model_path = r.model_path;
-              llmConfig.models_present = true;
-            }
-            return r;
-          });
         case "list_model_library":
-          return Promise.resolve(libraryModels);
-        case "set_current_model":
-          return switchImpl(args?.id as string);
-        case "delete_model": {
-          const id = args?.id as string;
-          libraryModels = libraryModels.filter((m) => m.id !== id);
+          return Promise.resolve([]);
+        case "set_llm_connection":
+          llmConfig.base_url = args?.baseUrl ?? null;
+          llmConfig.model = args?.model ?? null;
+          // apiKey 留空（null）= 不修改已保存的 Key
+          if (args?.apiKey) llmConfig.api_key_masked = "sk-***masked";
           return Promise.resolve(undefined);
-        }
         case "set_llm_params":
-          // 替换为新对象引用（贴近真实后端：保存后 resolve 出新 params），
-          // 使组件里保存前的旧 params 与刷新后的新值可区分（用于判断「哪些字段改了」）
+          // 替换为新对象引用（贴近真实后端：保存后 resolve 出新 params）
           llmConfig.params = { ...llmConfig.params, ...args?.params };
           return Promise.resolve(undefined);
         case "set_llm_system_prompt":
@@ -265,617 +174,320 @@ beforeEach(() => {
 });
 
 describe("LlmPage（AI 大脑配置）", () => {
-  it("渲染页面标题与状态摘要", async () => {
+  it("渲染页面标题与远程连接表单", async () => {
     renderLlmPage();
     expect(await screen.findByText("AI 大脑（LLM）配置")).toBeInTheDocument();
     expect(screen.getByText("模型与能力")).toBeInTheDocument();
-    expect(screen.getAllByText("当前模型").length).toBeGreaterThan(0);
+    expect(screen.getByLabelText("API 地址")).toBeInTheDocument();
+    expect(screen.getByLabelText("API Key")).toBeInTheDocument();
+    expect(screen.getByLabelText("模型名")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "保存连接配置" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "测试模型" })).toBeInTheDocument();
   });
 
-  it("未配置模型：显示未选择模型/未配置模型，运行开关 disabled，选择模型可用，测试/卸载禁用", async () => {
+  it("未配置：状态显示未配置，连接开关与测试模型禁用", async () => {
     renderLlmPage();
-    expect((await screen.findAllByText("未选择模型")).length).toBeGreaterThan(0);
-    expect(await screen.findByText("未配置模型")).toBeInTheDocument();
+    expect(await screen.findByText("未配置")).toBeInTheDocument();
 
-    const runSwitch = screen.getByRole("switch", { name: "模型加载开关" });
+    const runSwitch = screen.getByRole("switch", { name: "连接开关" });
     expect(runSwitch).toBeDisabled();
     expect(runSwitch).toHaveAttribute("aria-checked", "false");
-    expect(screen.getByRole("button", { name: "选择模型" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "测试模型" })).toBeDisabled();
   });
 
-  it("已配置未加载：显示未加载与模型名，运行开关 OFF 可用，测试禁用", async () => {
-    llmConfig.models_present = true;
+  it("已有配置回填：API 地址/模型名填入输入框，API Key 以掩码 placeholder 展示", async () => {
+    configureConnection();
     renderLlmPage();
-    expect(await screen.findByText("未加载")).toBeInTheDocument();
-    expect((await screen.findAllByText("qwen3-4b")).length).toBeGreaterThan(0);
 
-    const runSwitch = screen.getByRole("switch", { name: "模型加载开关" });
-    expect(runSwitch).toBeEnabled();
-    expect(runSwitch).toHaveAttribute("aria-checked", "false");
-    expect(screen.getByRole("button", { name: "测试模型" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "选择模型" })).toBeEnabled();
+    expect(
+      await screen.findByDisplayValue("https://open.bigmodel.cn/api/paas/v4"),
+    ).toBeInTheDocument();
+    expect(screen.getByDisplayValue("glm-4.7-flash")).toBeInTheDocument();
+    // Key 不回显明文：输入框为空，placeholder 展示掩码
+    const keyInput = screen.getByLabelText("API Key");
+    expect(keyInput).toHaveValue("");
+    expect(keyInput).toHaveAttribute("placeholder", "已保存（sk-***1234）");
+    // 已配置但未连接：开关可用（点击即连接）
+    expect(screen.getByRole("switch", { name: "连接开关" })).toBeEnabled();
   });
 
-  it("点击顶部运行开关调用 load_llm_model 并进入加载中（各控件禁用防重复）", async () => {
-    llmConfig.models_present = true;
-    renderLlmPage();
-    await screen.findByText("未加载");
+  it("未填 API 地址保存：不调用 invoke 且显示内联错误", async () => {
     const user = userEvent.setup();
+    renderLlmPage();
+    await screen.findByText("AI 大脑（LLM）配置");
 
-    await user.click(screen.getByRole("switch", { name: "模型加载开关" }));
+    await user.type(screen.getByLabelText("模型名"), "glm-4.7-flash");
+    await user.click(screen.getByRole("button", { name: "保存连接配置" }));
+
+    expect(await screen.findByText(/请填写 API 地址/)).toBeInTheDocument();
+    expect(invokeMock).not.toHaveBeenCalledWith("set_llm_connection", expect.anything());
+  });
+
+  it("未填模型名保存：不调用 invoke 且显示内联错误", async () => {
+    const user = userEvent.setup();
+    renderLlmPage();
+    await screen.findByText("AI 大脑（LLM）配置");
+
+    await user.type(screen.getByLabelText("API 地址"), "https://open.bigmodel.cn/api/paas/v4");
+    await user.click(screen.getByRole("button", { name: "保存连接配置" }));
+
+    expect(await screen.findByText(/请填写模型名/)).toBeInTheDocument();
+    expect(invokeMock).not.toHaveBeenCalledWith("set_llm_connection", expect.anything());
+  });
+
+  it("填写三要素保存：调用 set_llm_connection，成功后清空 API Key 输入框", async () => {
+    const user = userEvent.setup();
+    renderLlmPage();
+    await screen.findByText("AI 大脑（LLM）配置");
+
+    await user.type(screen.getByLabelText("API 地址"), "https://open.bigmodel.cn/api/paas/v4");
+    await user.type(screen.getByLabelText("API Key"), "sk-real-key");
+    await user.type(screen.getByLabelText("模型名"), "glm-4.7-flash");
+    await user.click(screen.getByRole("button", { name: "保存连接配置" }));
 
     await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("load_llm_model");
-    });
-    expect(await screen.findByText("加载中")).toBeInTheDocument();
-    expect(screen.getByRole("switch", { name: "模型加载开关" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "选择模型" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "测试模型" })).toBeDisabled();
-  });
-
-  it("加载完成（llm-status ready）显示已加载，运行开关 ON，测试与选择模型可用", async () => {
-    llmConfig.models_present = true;
-    renderLlmPage();
-    await screen.findByText("未加载");
-
-    fireReady();
-
-    expect(await screen.findByText("已加载")).toBeInTheDocument();
-    const runSwitch = screen.getByRole("switch", { name: "模型加载开关" });
-    expect(runSwitch).toHaveAttribute("aria-checked", "true");
-    expect(runSwitch).toBeEnabled();
-    expect(screen.getByRole("button", { name: "测试模型" })).toBeEnabled();
-    // 已加载时可选择模型：pick 会静默触发 reload 无缝切换
-    expect(screen.getByRole("button", { name: "选择模型" })).toBeEnabled();
-  });
-
-  it("已加载时选择模型：弹窗内导入 GGUF 后 set_llm_model_path 自动 reload 无缝切换", async () => {
-    llmConfig.models_present = true;
-    dialogOpenMock.mockResolvedValue("/home/user/.zapmomo/models/qwen3-1.7b.gguf");
-    renderLlmPage();
-    await screen.findByText("未加载");
-    fireReady();
-    await screen.findByText("已加载");
-    const user = userEvent.setup();
-
-    await user.click(screen.getByRole("button", { name: "选择模型" }));
-    await user.click(await screen.findByRole("button", { name: "导入 GGUF 文件" }));
-
-    await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("set_llm_model_path", {
-        path: "/home/user/.zapmomo/models/qwen3-1.7b.gguf",
+      expect(invokeMock).toHaveBeenCalledWith("set_llm_connection", {
+        baseUrl: "https://open.bigmodel.cn/api/paas/v4",
+        apiKey: "sk-real-key",
+        model: "glm-4.7-flash",
       });
     });
-    // 已加载时 pick 会静默触发 load_llm_model 无缝切换
+    // 保存成功后 Key 输入框清空（不持久展示明文）
+    await waitFor(() => {
+      expect(screen.getByLabelText("API Key")).toHaveValue("");
+    });
+  });
+
+  it("API Key 留空保存：apiKey 传 null（不修改已保存的 Key）", async () => {
+    configureConnection();
+    const user = userEvent.setup();
+    renderLlmPage();
+    // 等回填完成后再改模型名（否则 hydrate 覆盖编辑）
+    await screen.findByDisplayValue("glm-4.7-flash");
+
+    const modelInput = screen.getByLabelText("模型名");
+    await user.clear(modelInput);
+    await user.type(modelInput, "glm-4.7-air");
+    await user.click(screen.getByRole("button", { name: "保存连接配置" }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("set_llm_connection", {
+        baseUrl: "https://open.bigmodel.cn/api/paas/v4",
+        apiKey: null,
+        model: "glm-4.7-air",
+      });
+    });
+  });
+
+  it("保存连接配置失败：内联展示后端错误", async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "set_llm_connection") return Promise.reject("invalid api key");
+      if (cmd === "get_llm_config")
+        return Promise.resolve({ ...llmConfig, params: { ...llmConfig.params } });
+      return Promise.resolve(undefined);
+    });
+    const user = userEvent.setup();
+    renderLlmPage();
+    await screen.findByText("AI 大脑（LLM）配置");
+
+    await user.type(screen.getByLabelText("API 地址"), "https://open.bigmodel.cn/api/paas/v4");
+    await user.type(screen.getByLabelText("模型名"), "glm-4.7-flash");
+    await user.click(screen.getByRole("button", { name: "保存连接配置" }));
+
+    // 表单内联错误 + 标题行状态错误同时透出，断言至少一处展示
+    expect((await screen.findAllByText(/invalid api key/)).length).toBeGreaterThan(0);
+  });
+
+  it("点击连接开关调用 load_llm_model 并进入连接中，llm-status ready 后显示已连接", async () => {
+    configureConnection();
+    const user = userEvent.setup();
+    renderLlmPage();
+
+    const runSwitch = await screen.findByRole("switch", { name: "连接开关" });
+    await waitFor(() => expect(runSwitch).toBeEnabled());
+    await user.click(runSwitch);
+
     expect(invokeMock).toHaveBeenCalledWith("load_llm_model");
-    // 新模型名回显
-    expect((await screen.findAllByText("qwen3-1.7b")).length).toBeGreaterThan(0);
-  });
+    expect(await screen.findByText("连接中")).toBeInTheDocument();
+    // 连接中开关禁用，防止重复连接
+    expect(runSwitch).toBeDisabled();
 
-  it("点击顶部运行开关 OFF 调用 unload_llm_model 并回到未加载", async () => {
-    llmConfig.models_present = true;
-    renderLlmPage();
-    await screen.findByText("未加载");
     fireReady();
-    await screen.findByText("已加载");
-    const user = userEvent.setup();
-
-    await user.click(screen.getByRole("switch", { name: "模型加载开关" }));
-
-    await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("unload_llm_model");
-    });
-    expect(await screen.findByText("未加载")).toBeInTheDocument();
+    expect(await screen.findByText("已连接")).toBeInTheDocument();
+    expect(runSwitch).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByRole("button", { name: "测试模型" })).toBeEnabled();
   });
 
-  it("切换「启动时自动加载模型」调用 set_llm_auto_load 并持久化开关状态", async () => {
-    renderLlmPage();
-    const autoLoadSwitch = await screen.findByRole("switch", { name: "启动时自动加载模型" });
-    expect(autoLoadSwitch).toHaveAttribute("aria-checked", "false");
+  it("已连接时点击开关调用 unload_llm_model 并回到未连接", async () => {
+    configureConnection();
     const user = userEvent.setup();
-
-    await user.click(autoLoadSwitch);
-
-    await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("set_llm_auto_load", { enabled: true });
-    });
-    await waitFor(() => {
-      expect(screen.getByRole("switch", { name: "启动时自动加载模型" })).toHaveAttribute(
-        "aria-checked",
-        "true",
-      );
-    });
-  });
-
-  it("切换「思考模式」调用 set_llm_thinking 并持久化开关状态", async () => {
     renderLlmPage();
-    const thinkingSwitch = await screen.findByRole("switch", { name: "思考模式" });
-    expect(thinkingSwitch).toHaveAttribute("aria-checked", "false");
-    const user = userEvent.setup();
 
-    await user.click(thinkingSwitch);
+    const runSwitch = await screen.findByRole("switch", { name: "连接开关" });
+    await waitFor(() => expect(runSwitch).toBeEnabled());
+    fireReady();
+    expect(await screen.findByText("已连接")).toBeInTheDocument();
 
-    await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("set_llm_thinking", { enabled: true });
-    });
-    await waitFor(() => {
-      expect(screen.getByRole("switch", { name: "思考模式" })).toHaveAttribute(
-        "aria-checked",
-        "true",
-      );
-    });
+    await user.click(runSwitch);
+
+    expect(invokeMock).toHaveBeenCalledWith("unload_llm_model");
+    expect(await screen.findByText("未连接")).toBeInTheDocument();
+    expect(runSwitch).toHaveAttribute("aria-checked", "false");
   });
 
   it("测试对话框：发送文本、流式接收 token、生成结束后隐藏停止按钮", async () => {
-    llmConfig.models_present = true;
-    renderLlmPage();
-    await screen.findByText("未加载");
-    fireReady();
-    await screen.findByText("已加载");
+    configureConnection();
     const user = userEvent.setup();
+    renderLlmPage();
+
+    const runSwitch = await screen.findByRole("switch", { name: "连接开关" });
+    await waitFor(() => expect(runSwitch).toBeEnabled());
+    fireReady();
 
     await user.click(screen.getByRole("button", { name: "测试模型" }));
-    expect(screen.getByRole("dialog")).toBeInTheDocument();
-    expect(screen.getByText("测试 AI 大脑")).toBeInTheDocument();
+    const dialog = await screen.findByRole("dialog", { name: "测试模型" });
+    expect(dialog).toHaveTextContent("当前模型：glm-4.7-flash");
 
-    await user.type(screen.getByRole("textbox", { name: "测试消息" }), "你好");
+    await user.type(screen.getByLabelText("测试消息"), "你好");
     await user.click(screen.getByRole("button", { name: "发送" }));
 
-    await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("chat_llm", { text: "你好" });
-    });
-    expect(screen.getByRole("button", { name: "停止" })).toBeInTheDocument();
+    expect(invokeMock).toHaveBeenCalledWith("chat_llm", { text: "你好" });
+    expect(await screen.findByText("生成中…")).toBeInTheDocument();
 
     act(() => {
-      listeners.get("llm-token")?.({ payload: { text: "你好世界", is_final: false } });
+      listeners.get("llm-token")?.({ payload: { text: "你" } });
     });
-    expect(await screen.findByText("你好世界")).toBeInTheDocument();
+    act(() => {
+      listeners.get("llm-token")?.({ payload: { text: "好" } });
+    });
+    expect(await screen.findByText("你好")).toBeInTheDocument();
 
     act(() => {
-      listeners.get("llm-finished")?.({ payload: "eos" });
+      listeners.get("llm-finished")?.({ payload: {} });
     });
     await waitFor(() => {
-      expect(screen.queryByRole("button", { name: "停止" })).not.toBeInTheDocument();
+      expect(screen.queryByText("生成中…")).not.toBeInTheDocument();
     });
+    expect(screen.queryByRole("button", { name: "停止" })).not.toBeInTheDocument();
   });
 
   it("生成中点击「停止」调用 stop_llm", async () => {
-    llmConfig.models_present = true;
-    renderLlmPage();
-    await screen.findByText("未加载");
-    fireReady();
-    await screen.findByText("已加载");
+    configureConnection();
     const user = userEvent.setup();
+    renderLlmPage();
+
+    const runSwitch = await screen.findByRole("switch", { name: "连接开关" });
+    await waitFor(() => expect(runSwitch).toBeEnabled());
+    fireReady();
 
     await user.click(screen.getByRole("button", { name: "测试模型" }));
-    await user.type(screen.getByRole("textbox", { name: "测试消息" }), "hello");
+    await screen.findByRole("dialog", { name: "测试模型" });
+    await user.type(screen.getByLabelText("测试消息"), "你好");
     await user.click(screen.getByRole("button", { name: "发送" }));
-    await screen.findByRole("button", { name: "停止" });
 
-    await user.click(screen.getByRole("button", { name: "停止" }));
-
-    await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("stop_llm");
-    });
+    await user.click(await screen.findByRole("button", { name: "停止" }));
+    expect(invokeMock).toHaveBeenCalledWith("stop_llm");
   });
 
-  it("关闭测试对话框不卸载模型", async () => {
-    llmConfig.models_present = true;
-    renderLlmPage();
-    await screen.findByText("未加载");
-    fireReady();
-    await screen.findByText("已加载");
+  it("关闭测试对话框不断开连接", async () => {
+    configureConnection();
     const user = userEvent.setup();
+    renderLlmPage();
+
+    const runSwitch = await screen.findByRole("switch", { name: "连接开关" });
+    await waitFor(() => expect(runSwitch).toBeEnabled());
+    fireReady();
 
     await user.click(screen.getByRole("button", { name: "测试模型" }));
-    expect(screen.getByRole("dialog")).toBeInTheDocument();
-
-    await user.keyboard("{Escape}");
+    const dialog = await screen.findByRole("dialog", { name: "测试模型" });
+    // 「关闭」按钮限定在对话框内（标题栏窗口关闭按钮同名）
+    await user.click(within(dialog).getByRole("button", { name: "关闭" }));
 
     await waitFor(() => {
-      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      expect(screen.queryByRole("dialog", { name: "测试模型" })).not.toBeInTheDocument();
     });
-    expect(invokeMock).not.toHaveBeenCalledWith("unload_llm_model", expect.anything());
+    expect(invokeMock).not.toHaveBeenCalledWith("unload_llm_model");
+    // 关闭只关 UI：连接状态保持
+    expect(screen.getByText("已连接")).toBeInTheDocument();
   });
 
-  it("选择模型：弹窗内导入 GGUF 文件调 set_llm_model_path 并刷新为未加载", async () => {
-    dialogOpenMock.mockResolvedValue("/home/user/.zapmomo/models/qwen3-1.7b.gguf");
-    renderLlmPage();
-    await screen.findByText("未配置模型");
+  it("高级参数：展开后回显解析后的参数值", async () => {
     const user = userEvent.setup();
+    renderLlmPage();
+    await screen.findByText("AI 大脑（LLM）配置");
 
-    await user.click(screen.getByRole("button", { name: "选择模型" }));
-    await user.click(await screen.findByRole("button", { name: "导入 GGUF 文件" }));
+    await user.click(screen.getByRole("button", { name: /高级参数/ }));
 
     await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("set_llm_model_path", {
-        path: "/home/user/.zapmomo/models/qwen3-1.7b.gguf",
-      });
+      expect(screen.getByRole("textbox", { name: "温度" })).toHaveValue("0.7");
     });
-    expect((await screen.findAllByText("qwen3-1.7b")).length).toBeGreaterThan(0);
-    expect(await screen.findByText("未加载")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "最大生成 Tokens" })).toHaveValue("512");
+    expect(screen.getByRole("textbox", { name: "Top-P" })).toHaveValue("0.8");
+    expect(screen.getByRole("textbox", { name: "Top-K" })).toHaveValue("20");
+    expect(screen.getByRole("textbox", { name: "Min-P" })).toHaveValue("0.05");
+    expect(screen.getByRole("textbox", { name: "重复惩罚" })).toHaveValue("1.05");
+    expect(screen.getByRole("textbox", { name: "随机种子" })).toHaveValue("0");
   });
 
-  it("高级参数回显解析后的参数值", async () => {
-    renderLlmPage();
-    const tempInput = await screen.findByRole("textbox", { name: "温度" });
-    await waitFor(() => {
-      expect(tempInput).toHaveValue("0.7");
-    });
-    expect(screen.getByRole("textbox", { name: "上下文大小" })).toHaveValue("8192");
-    expect(screen.getByRole("textbox", { name: "GPU 层数" })).toHaveValue("0");
-  });
-
-  it("修改温度并保存：调用 set_llm_params 且回显新值", async () => {
-    renderLlmPage();
-    const tempInput = await screen.findByRole("textbox", { name: "温度" });
-    await waitFor(() => {
-      expect(tempInput).toHaveValue("0.7");
-    });
+  it("修改温度保存：调用 set_llm_params", async () => {
     const user = userEvent.setup();
+    renderLlmPage();
+    await screen.findByText("AI 大脑（LLM）配置");
 
-    await user.clear(tempInput);
-    await user.type(tempInput, "0.9");
+    await user.click(screen.getByRole("button", { name: /高级参数/ }));
+    const temp = await screen.findByRole("textbox", { name: "温度" });
+    await waitFor(() => expect(temp).toHaveValue("0.7"));
+    await user.clear(temp);
+    await user.type(temp, "0.9");
     await user.click(screen.getByRole("button", { name: "保存参数" }));
 
     await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith(
-        "set_llm_params",
-        expect.objectContaining({ params: expect.objectContaining({ temperature: 0.9 }) }),
-      );
-    });
-    await waitFor(() => {
-      expect(screen.getByRole("textbox", { name: "温度" })).toHaveValue("0.9");
+      expect(invokeMock).toHaveBeenCalledWith("set_llm_params", {
+        params: { ...DEFAULT_PARAMS, temperature: 0.9 },
+      });
     });
   });
 
   it("越界参数保存：不调用 invoke 且显示内联错误", async () => {
-    renderLlmPage();
-    const ctxInput = await screen.findByRole("textbox", { name: "上下文大小" });
-    await waitFor(() => {
-      expect(ctxInput).toHaveValue("8192");
-    });
     const user = userEvent.setup();
+    renderLlmPage();
+    await screen.findByText("AI 大脑（LLM）配置");
 
-    await user.clear(ctxInput);
-    await user.type(ctxInput, "100");
+    await user.click(screen.getByRole("button", { name: /高级参数/ }));
+    const maxTokens = await screen.findByRole("textbox", { name: "最大生成 Tokens" });
+    await waitFor(() => expect(maxTokens).toHaveValue("512"));
+    await user.clear(maxTokens);
+    await user.type(maxTokens, "1");
     await user.click(screen.getByRole("button", { name: "保存参数" }));
 
+    expect(await screen.findByText(/最大生成 Tokens 需在 16~262144 之间/)).toBeInTheDocument();
     expect(invokeMock).not.toHaveBeenCalledWith("set_llm_params", expect.anything());
-    expect(await screen.findByText(/上下文大小 需在 256~1048576/)).toBeInTheDocument();
   });
 
-  it("修改系统提示词并保存：调用 set_llm_system_prompt", async () => {
-    renderLlmPage();
-    const textarea = await screen.findByRole("textbox", { name: "系统提示词" });
-    await waitFor(() => {
-      expect(textarea).toHaveValue("你是 ZapMomo 的 AI 大脑。");
-    });
+  it("保存系统提示词调用 set_llm_system_prompt；已连接时自动重新连接生效", async () => {
+    configureConnection();
     const user = userEvent.setup();
+    renderLlmPage();
 
+    const runSwitch = await screen.findByRole("switch", { name: "连接开关" });
+    await waitFor(() => expect(runSwitch).toBeEnabled());
+    fireReady();
+    expect(await screen.findByText("已连接")).toBeInTheDocument();
+
+    const textarea = screen.getByLabelText("系统提示词");
+    await waitFor(() => expect(textarea).toHaveValue("你是 ZapMomo 的 AI 伙伴。"));
     await user.clear(textarea);
-    await user.type(textarea, "你是新的提示词。");
+    await user.type(textarea, "你是测试伙伴。");
     await user.click(screen.getByRole("button", { name: "保存提示词" }));
 
     await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith("set_llm_system_prompt", {
-        prompt: "你是新的提示词。",
+        prompt: "你是测试伙伴。",
       });
     });
-  });
-
-  it("已加载时保存上下文大小：自动 reload 使改动生效", async () => {
-    llmConfig.models_present = true;
-    renderLlmPage();
-    await screen.findByText("未加载");
-    fireReady();
-    await screen.findByText("已加载");
-    const user = userEvent.setup();
-
-    const ctxInput = await screen.findByRole("textbox", { name: "上下文大小" });
+    // 提示词在 provider 创建时固化：已连接且内容变化时自动 reload
     await waitFor(() => {
-      expect(ctxInput).toHaveValue("8192");
-    });
-    await user.clear(ctxInput);
-    await user.type(ctxInput, "4096");
-    await user.click(screen.getByRole("button", { name: "保存参数" }));
-
-    await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith(
-        "set_llm_params",
-        expect.objectContaining({ params: expect.objectContaining({ context_size: 4096 }) }),
-      );
-    });
-    expect(invokeMock).toHaveBeenCalledWith("load_llm_model");
-  });
-
-  it("已加载时只改温度保存：不触发 reload", async () => {
-    llmConfig.models_present = true;
-    renderLlmPage();
-    await screen.findByText("未加载");
-    fireReady();
-    await screen.findByText("已加载");
-    const user = userEvent.setup();
-
-    const tempInput = await screen.findByRole("textbox", { name: "温度" });
-    await waitFor(() => {
-      expect(tempInput).toHaveValue("0.7");
-    });
-    await user.clear(tempInput);
-    await user.type(tempInput, "0.9");
-    await user.click(screen.getByRole("button", { name: "保存参数" }));
-
-    await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith(
-        "set_llm_params",
-        expect.objectContaining({ params: expect.objectContaining({ temperature: 0.9 }) }),
-      );
-    });
-    expect(invokeMock).not.toHaveBeenCalledWith("load_llm_model");
-  });
-
-  it("已加载时保存系统提示词：自动 reload", async () => {
-    llmConfig.models_present = true;
-    renderLlmPage();
-    await screen.findByText("未加载");
-    fireReady();
-    await screen.findByText("已加载");
-    const user = userEvent.setup();
-
-    const textarea = await screen.findByRole("textbox", { name: "系统提示词" });
-    await waitFor(() => {
-      expect(textarea).toHaveValue("你是 ZapMomo 的 AI 大脑。");
-    });
-    await user.clear(textarea);
-    await user.type(textarea, "新提示词。");
-    await user.click(screen.getByRole("button", { name: "保存提示词" }));
-
-    await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("set_llm_system_prompt", {
-        prompt: "新提示词。",
-      });
-    });
-    expect(invokeMock).toHaveBeenCalledWith("load_llm_model");
-  });
-
-  it("参数与提示词未改动时保存按钮 disabled", async () => {
-    renderLlmPage();
-    const paramsSave = await screen.findByRole("button", { name: "保存参数" });
-    await waitFor(() => {
-      expect(paramsSave).toBeDisabled();
-    });
-    expect(screen.getByRole("button", { name: "保存提示词" })).toBeDisabled();
-  });
-
-  it("模型路径默认隐藏，点击图标展开/收起", async () => {
-    llmConfig.models_present = true;
-    renderLlmPage();
-    await screen.findByText("未加载");
-
-    const pathText = "/home/user/.zapmomo/models/qwen3-4b.gguf";
-    expect(screen.queryByText(pathText)).not.toBeInTheDocument();
-
-    const user = userEvent.setup();
-    await user.click(screen.getByRole("button", { name: "查看模型路径" }));
-    expect(screen.getByText(pathText)).toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "隐藏模型路径" }));
-    expect(screen.queryByText(pathText)).not.toBeInTheDocument();
-  });
-
-  describe("选择模型弹窗（内置预设模型）", () => {
-    /** 渲染 LLM 页并打开「选择模型」弹窗，返回 userEvent。 */
-    async function renderAndOpenPresets() {
-      renderLlmPage();
-      const user = userEvent.setup();
-      await user.click(await screen.findByRole("button", { name: "选择模型" }));
-      await screen.findByRole("dialog");
-      return user;
-    }
-
-    it("弹窗显示 5 个推荐预设与下载按钮、导入入口、模型库链接", async () => {
-      await renderAndOpenPresets();
-      expect(screen.getByText("Qwen3 0.6B")).toBeInTheDocument();
-      expect(screen.getByText("Qwen3 1.7B")).toBeInTheDocument();
-      expect(screen.getByText("Qwen3 4B")).toBeInTheDocument();
-      expect(screen.getByText("Qwen3 8B")).toBeInTheDocument();
-      expect(screen.getByText("Llama 3.2 1B")).toBeInTheDocument();
-      expect(screen.getByText(/378\.3 MB · 约 1GB 内存/)).toBeInTheDocument();
-      expect(screen.getByText(/2\.33 GB · 约 4GB 内存/)).toBeInTheDocument();
-      expect(screen.getByRole("button", { name: "下载Qwen3 0.6B" })).toBeEnabled();
-      expect(screen.getByRole("button", { name: "导入 GGUF 文件" })).toBeInTheDocument();
-      expect(screen.getByRole("link", { name: /更多模型/ })).toBeInTheDocument();
-    });
-
-    it("点击预设调用 download_llm_model，下载中其他预设禁用", async () => {
-      llmDownloadImpl.mockReturnValue(new Promise(() => {})); // 挂起模拟下载中
-      const user = await renderAndOpenPresets();
-      await user.click(screen.getByRole("button", { name: "下载Qwen3 0.6B" }));
-
-      await waitFor(() => {
-        expect(invokeMock).toHaveBeenCalledWith("download_llm_model", {
-          id: "qwen3-0.6b-q4-k-m",
-        });
-      });
-      expect(screen.getByRole("button", { name: "下载Qwen3 0.6B" })).toBeDisabled();
-      expect(screen.getByRole("button", { name: "下载Qwen3 4B" })).toBeDisabled();
-      expect(screen.getByText("下载中…")).toBeInTheDocument();
-    });
-
-    it("下载进度事件：显示百分比消息", async () => {
-      llmDownloadImpl.mockReturnValue(new Promise(() => {}));
-      const user = await renderAndOpenPresets();
-      await user.click(screen.getByRole("button", { name: "下载Qwen3 0.6B" }));
-      await waitFor(() => {
-        expect(invokeMock).toHaveBeenCalledWith("download_llm_model", expect.anything());
-      });
-
-      act(() => {
-        listeners.get("llm-model-download-progress")?.({
-          payload: { stage: "downloading", percent: 42, message: "下载中 42.0%" },
-        });
-      });
-      expect(await screen.findByText("下载中 42.0%")).toBeInTheDocument();
-    });
-
-    it("下载完成（applied）：自动配置并加载", async () => {
-      const user = await renderAndOpenPresets();
-      await user.click(screen.getByRole("button", { name: "下载Qwen3 0.6B" }));
-
-      await waitFor(() => {
-        expect(invokeMock).toHaveBeenCalledWith("download_llm_model", {
-          id: "qwen3-0.6b-q4-k-m",
-        });
-      });
-      expect(await screen.findByText("加载中")).toBeInTheDocument();
       expect(invokeMock).toHaveBeenCalledWith("load_llm_model");
-    });
-
-    it("voice 会话运行中下载完成：不自动加载", async () => {
-      renderLlmPage();
-      // 先等 mount 时的 isVoiceSessionRunning 回读落定，否则其异步 setRunning 会覆盖事件状态
-      await Promise.resolve();
-      act(() => {
-        listeners.get("voice-session-state")?.({ payload: { running: true, state: "armed" } });
-      });
-      const user = userEvent.setup();
-      await user.click(await screen.findByRole("button", { name: "选择模型" }));
-      await user.click(await screen.findByRole("button", { name: "下载Qwen3 0.6B" }));
-
-      // 等 refreshConfig 完成（get_llm_config 第 2 次调用），load 判断已同步执行
-      await waitFor(() => {
-        expect(invokeMock.mock.calls.filter(([c]) => c === "get_llm_config").length).toBe(2);
-      });
-      expect(invokeMock).not.toHaveBeenCalledWith("load_llm_model");
-    });
-
-    it("下载失败：显示错误并恢复按钮", async () => {
-      llmDownloadImpl.mockRejectedValue("下载失败：网络错误");
-      const user = await renderAndOpenPresets();
-      await user.click(screen.getByRole("button", { name: "下载Qwen3 0.6B" }));
-
-      expect(await screen.findByText(/下载失败：网络错误/)).toBeInTheDocument();
-      expect(screen.getByRole("button", { name: "下载Qwen3 0.6B" })).toBeEnabled();
-    });
-
-    it("远程 provider（openai）选择模型按钮禁用，弹窗不渲染", async () => {
-      llmConfig.provider = "openai";
-      renderLlmPage();
-      expect(await screen.findByText("AI 大脑（LLM）配置")).toBeInTheDocument();
-      expect(screen.getByRole("button", { name: "选择模型" })).toBeDisabled();
-      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    });
-
-    it("已配置模型时选择模型按钮可用，弹窗可打开（用于切换）", async () => {
-      llmConfig.models_present = true;
-      await renderAndOpenPresets();
-      expect(screen.getByRole("dialog")).toBeInTheDocument();
-    });
-
-    it("applied=false（下载期间用户已自行配置）：不覆盖配置、不自动加载", async () => {
-      llmDownloadImpl.mockResolvedValue({
-        model_path: "/home/user/.zapmomo/models/Qwen3-0.6B/Qwen3-0.6B-Q4_K_M.gguf",
-        applied: false,
-      });
-      const user = await renderAndOpenPresets();
-      await user.click(screen.getByRole("button", { name: "下载Qwen3 0.6B" }));
-
-      await waitFor(() => {
-        expect(invokeMock).toHaveBeenCalledWith("download_llm_model", expect.anything());
-      });
-      // 等 refreshConfig 完成（get_llm_config 第 2 次调用），load 判断已同步执行
-      await waitFor(() => {
-        expect(invokeMock.mock.calls.filter(([c]) => c === "get_llm_config").length).toBe(2);
-      });
-      expect(screen.getByRole("button", { name: "下载Qwen3 0.6B" })).toBeInTheDocument();
-      expect(invokeMock).not.toHaveBeenCalledWith("load_llm_model");
-    });
-
-    it("已安装非当前预设：显示设为当前与卸载；设为当前调 set_current_model", async () => {
-      libraryModels = [installedPreset("qwen3-0.6b-q4-k-m", "Qwen3 0.6B")];
-      const user = await renderAndOpenPresets();
-      await waitFor(() => {
-        expect(screen.queryByRole("button", { name: "下载Qwen3 0.6B" })).not.toBeInTheDocument();
-      });
-      expect(screen.getByRole("button", { name: "设为当前" })).toBeInTheDocument();
-      expect(screen.getByRole("button", { name: "卸载" })).toBeInTheDocument();
-      await user.click(screen.getByRole("button", { name: "设为当前" }));
-      await waitFor(() => {
-        expect(invokeMock).toHaveBeenCalledWith("set_current_model", {
-          id: "qwen3-0.6b-q4-k-m",
-        });
-      });
-    });
-
-    it("设为当前等待后端事务期间：按钮转圈禁用（热切换数秒需 loading 反馈）", async () => {
-      libraryModels = [installedPreset("qwen3-0.6b-q4-k-m", "Qwen3 0.6B")];
-      // set_current_model 挂起（模拟后端卸旧载新数秒），直到手动 resolve。
-      const gate = { release: null as null | (() => void) };
-      switchImpl = () =>
-        new Promise((resolve) => {
-          gate.release = () =>
-            resolve({
-              modelType: "llm",
-              modelId: "qwen3-0.6b-q4-k-m",
-              path: "/models/qwen3-0.6b.gguf",
-              runtimeAction: "reloaded",
-              effectiveImmediately: true,
-              message: "已设为当前模型",
-            });
-        });
-      const user = await renderAndOpenPresets();
-      await waitFor(() => {
-        expect(screen.getByRole("button", { name: "设为当前" })).toBeInTheDocument();
-      });
-
-      await user.click(screen.getByRole("button", { name: "设为当前" }));
-      const busy = await screen.findByRole("button", { name: "切换中…" });
-      expect(busy).toBeDisabled();
-      expect(screen.getByRole("button", { name: "卸载" })).toBeDisabled();
-
-      gate.release?.();
-      await waitFor(() => {
-        expect(screen.getByRole("button", { name: "设为当前" })).toBeEnabled();
-      });
-    });
-
-    it("未安装（not_installed 记录）预设显示下载，而非设为当前/卸载", async () => {
-      // 回归：list_model_library 对未安装 registry 模型也返回记录，仅按 id 匹配会误判为已安装
-      libraryModels = [
-        installedPreset("qwen3-0.6b-q4-k-m", "Qwen3 0.6B", { installState: "not_installed" }),
-      ];
-      await renderAndOpenPresets();
-      await waitFor(() => {
-        expect(screen.getByRole("button", { name: "下载Qwen3 0.6B" })).toBeInTheDocument();
-      });
-      expect(screen.queryByRole("button", { name: "设为当前" })).not.toBeInTheDocument();
-      expect(screen.queryByRole("button", { name: "卸载" })).not.toBeInTheDocument();
-    });
-
-    it("当前预设显示当前模型标记，无设为当前/卸载", async () => {
-      libraryModels = [installedPreset("qwen3-0.6b-q4-k-m", "Qwen3 0.6B", { current: true })];
-      await renderAndOpenPresets();
-      // 「当前模型」同时出现在弹窗预设行标记与 LlmCoreConfig 的字段标签，取列表形式断言
-      await waitFor(() => {
-        expect(screen.getAllByText("当前模型").length).toBeGreaterThan(0);
-      });
-      expect(screen.queryByRole("button", { name: "设为当前" })).not.toBeInTheDocument();
-      expect(screen.queryByRole("button", { name: "卸载" })).not.toBeInTheDocument();
-    });
-
-    it("卸载预设：确认框 → 确认 → delete_model", async () => {
-      libraryModels = [installedPreset("qwen3-0.6b-q4-k-m", "Qwen3 0.6B")];
-      const user = await renderAndOpenPresets();
-      await waitFor(() => {
-        expect(screen.queryByRole("button", { name: "下载Qwen3 0.6B" })).not.toBeInTheDocument();
-      });
-      await user.click(screen.getByRole("button", { name: "卸载" }));
-      expect(await screen.findByText(/确定要卸载/)).toBeInTheDocument();
-      await user.click(screen.getByRole("button", { name: "确认卸载" }));
-      await waitFor(() => {
-        expect(invokeMock).toHaveBeenCalledWith("delete_model", { id: "qwen3-0.6b-q4-k-m" });
-      });
     });
   });
 });

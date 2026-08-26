@@ -1,5 +1,6 @@
 import { AudioLines, AudioWaveform, Brain, type LucideIcon, Mic, Volume2 } from "lucide-react";
 import { deriveListenerStatus, type ListenerKind } from "@/components/models/capabilityStatus";
+import { isLlmConfigured } from "@/components/llm/llmMeta";
 import type { LlmState } from "@/hooks/useLlm";
 import type { TtsState } from "@/hooks/useTts";
 import type { VoiceSessionState } from "@/hooks/useVoiceSession";
@@ -79,13 +80,13 @@ function asrStatus(asr: RuntimeState["asr"]): { label: string; tone: OverviewTon
   return { label: listenerLabel(st.kind, "识别中"), tone: st.tone };
 }
 
-/** LLM 状态：错误 > 生成中 > 加载中 > 运行中 > 未加载 > 未配置（词汇沿用 llmMeta）。 */
+/** LLM 状态：错误 > 生成中 > 连接中 > 已连接 > 未连接 > 未配置（远程连接语义，词汇沿用 llmMeta）。 */
 function llmStatus(llm: LlmState): { label: string; tone: OverviewTone } {
   if (llm.error) return { label: "异常", tone: "error" };
   if (llm.generating) return { label: "生成中", tone: "loading" };
-  if (llm.loading) return { label: "加载中", tone: "loading" };
-  if (llm.ready) return { label: "运行中", tone: "good" };
-  if (llm.config?.models_present) return { label: "未加载", tone: "idle" };
+  if (llm.loading) return { label: "连接中", tone: "loading" };
+  if (llm.ready) return { label: "已连接", tone: "good" };
+  if (isLlmConfigured(llm.config)) return { label: "未连接", tone: "idle" };
   return { label: "未配置", tone: "idle" };
 }
 

@@ -1,5 +1,12 @@
 # 移除 llama.cpp 本地模型能力 — 详细实施方案
 
+> **⚠️ 实施时范围修正（2026-08-26）：** 原方案计划整体删除 `src/model_library/` 与全部模型库命令。实施中发现 `list_model_library`/`set_current_model`/`delete_model` 等命令**同时支撑着 KWS/ASR/TTS 页面的多模型切换对话框**（`useKwsModelSwitch` 等 hooks 均依赖模型库后端），并非仅服务 LLM。经与用户确认，最终范围为：
+>
+> - **保留** `src/model_library/` 模块（剥离 LLM/GGUF 条目）与模型库命令层，KWS/ASR/TTS 三个页面的模型切换对话框完整保留；
+> - LLM 部分仍按原方案改为纯远程连接（用户自填 API URL + Key + 模型名），本地 LLM 模型下载/切换/预设弹窗全部移除。
+>
+> 下文中「移除模型库」相关任务（阶段 2、Task 3.4、Task 4.1 等）按上述修正后的范围执行。
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** 移除 llama.cpp 本地推理能力和模型库管理系统，只保留 OpenAI 兼容远程 API 能力，让用户自行配置 API URL 和 Key。
