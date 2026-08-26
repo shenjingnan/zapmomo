@@ -11,7 +11,6 @@ pub mod kws;
 pub mod live2d;
 pub mod llm;
 pub mod logging;
-pub mod model_library;
 pub mod performance;
 pub mod tts;
 pub mod voice;

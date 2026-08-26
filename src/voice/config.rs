@@ -41,7 +41,6 @@ pub struct CliOverrides {
     pub kws_model_dir: Option<PathBuf>,
     pub asr_model_dir: Option<PathBuf>,
     pub tts_model_dir: Option<PathBuf>,
-    pub llm_model_path: Option<PathBuf>,
 }
 
 /// 解析后的完整会话配置（字段全部为具体类型）。
@@ -99,10 +98,7 @@ pub fn resolve(
         settings.and_then(|s| s.tts.as_ref()),
         cli.tts_model_dir.as_deref(),
     )?;
-    let llm = crate::llm::config::resolve(
-        settings.and_then(|s| s.llm.as_ref()),
-        cli.llm_model_path.as_deref(),
-    )?;
+    let llm = crate::llm::config::resolve(settings.and_then(|s| s.llm.as_ref()))?;
 
     Ok(ResolvedSessionConfig {
         // CLI --device > settings.microphone（全局）> 系统默认

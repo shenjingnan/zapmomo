@@ -1,14 +1,14 @@
-/// 本地 LLM 模块。
+/// LLM 模块（OpenAI 兼容远程 API）。
 ///
 /// 分层：
 /// - `LlmEngine`（门面）：生命周期 + worker 线程 + 命令/事件 channel，供 CLI/Tauri 使用。
-/// - `LlmProvider`（trait）：后端抽象，本地 llama.cpp 只是其中一种实现。
-/// - `local`：`LocalLlamaProvider`，唯一接触 llama.cpp 的地方。
+/// - `LlmProvider`（trait）：后端抽象。
+/// - `http`：`OpenAiChatProvider`，OpenAI 兼容 Chat Completions API（智谱 GLM /
+///   DeepSeek / OpenRouter / llama-server 等）。
 pub mod agent;
 pub mod config;
 pub mod error;
 pub mod http;
-pub mod local;
 pub mod provider;
 pub mod tools;
 pub mod types;
@@ -48,22 +48,11 @@ enum LlmCommand {
     Shutdown,
 }
 
-/// 带模型 identity 的加载错误（用于 `RuntimeStatus::LoadFailed` 精确匹配，避免 stale）。
-#[derive(Debug, Clone)]
-pub struct LlmLoadError {
-    pub model_path: std::path::PathBuf,
-    pub message: String,
-}
-
 /// LLM 引擎门面。
 ///
-/// 内部 spawn 一个专用 worker OS 线程持有 `Box<dyn LlmProvider>`（llama.cpp 的
-/// `LlamaContext` 非线程安全，必须在单线程内使用），命令经 `cmd_tx` 投递，
-/// 结果经 `evt_rx` 流式返回。这与项目现有 `std::thread::spawn + mpsc + Arc<AtomicBool>`
-/// 的模式（`src/kws/mod.rs`）一致。
-///
-/// RuntimeActual：`loaded_path` 只在 worker `Load` 成功后置位（带模型 identity），
-/// 卸载/失败清空；`last_load_error` 记录「哪个模型」加载失败。
+/// 内部 spawn 一个专用 worker OS 线程持有 `Box<dyn LlmProvider>`，命令经 `cmd_tx`
+/// 投递，结果经 `evt_rx` 流式返回。这与项目现有 `std::thread::spawn + mpsc +
+/// Arc<AtomicBool>` 的模式（`src/kws/mod.rs`）一致。
 pub struct LlmEngine {
     cmd_tx: Sender<LlmCommand>,
     /// 事件广播：每个订阅者一个 mpsc channel（`mpsc::Sender` 是 `Sync`，`LlmEngine` 保持
@@ -74,8 +63,6 @@ pub struct LlmEngine {
     handle: Mutex<Option<JoinHandle<()>>>,
     ready: Arc<AtomicBool>,
     cancel: Arc<AtomicBool>,
-    loaded_path: Arc<Mutex<Option<std::path::PathBuf>>>,
-    last_load_error: Arc<Mutex<Option<LlmLoadError>>>,
 }
 
 impl LlmEngine {
@@ -85,26 +72,14 @@ impl LlmEngine {
         let generating = Arc::new(AtomicBool::new(false));
         let ready = Arc::new(AtomicBool::new(false));
         let cancel = Arc::new(AtomicBool::new(false));
-        let loaded_path = Arc::new(Mutex::new(None));
-        let last_load_error = Arc::new(Mutex::new(None));
 
         let ready_clone = ready.clone();
-        let loaded_clone = loaded_path.clone();
-        let error_clone = last_load_error.clone();
         let subs_clone = subscribers.clone();
         let generating_clone = generating.clone();
         let handle = std::thread::Builder::new()
             .name("llm-worker".to_string())
             .spawn(move || {
-                worker_loop(
-                    config,
-                    cmd_rx,
-                    subs_clone,
-                    generating_clone,
-                    ready_clone,
-                    loaded_clone,
-                    error_clone,
-                )
+                worker_loop(config, cmd_rx, subs_clone, generating_clone, ready_clone)
             })
             .map_err(|e| LlmError::BackendUnavailable(e.to_string()))?;
 
@@ -115,8 +90,6 @@ impl LlmEngine {
             handle: Mutex::new(Some(handle)),
             ready,
             cancel,
-            loaded_path,
-            last_load_error,
         })
     }
 
@@ -141,16 +114,6 @@ impl LlmEngine {
     /// 空闲（待唤醒）时切换是安全的——voice 会从共享引擎槽感知新引擎。
     pub fn is_generating(&self) -> bool {
         self.generating.load(Ordering::Relaxed)
-    }
-
-    /// 当前实际加载的模型路径（`None` = 未加载）。
-    pub fn loaded_model_path(&self) -> Option<std::path::PathBuf> {
-        self.loaded_path.lock().ok().and_then(|g| g.clone())
-    }
-
-    /// 最近一次加载失败（带模型 identity），成功后清空。
-    pub fn last_load_error(&self) -> Option<LlmLoadError> {
-        self.last_load_error.lock().ok().and_then(|g| g.clone())
     }
 
     /// 阻塞等待加载完成（模型库切换事务用）。
@@ -241,13 +204,13 @@ impl Drop for LlmEngine {
 
 /// 根据配置创建 provider。
 ///
-/// 本地 llama.cpp（"local"）与 OpenAI 兼容 Chat Completions（"openai" / "llamacpp-server"）
-/// 共用同一 `LlmProvider` 抽象。
+/// 只支持 OpenAI 兼容 Chat Completions（"openai" / "llamacpp-server"）。
+/// 本地 llama.cpp 推理已移除：需要本地模型请自行部署 Ollama / llama-server，
+/// 经 OpenAI 兼容 API 接入。
 pub fn create_provider(
     config: ResolvedLlmConfig,
 ) -> Result<Box<dyn provider::LlmProvider>, LlmError> {
     match config.provider.as_str() {
-        "local" => Ok(Box::new(local::LocalLlamaProvider::new(config)?)),
         "openai" | "llamacpp-server" => Ok(Box::new(http::OpenAiChatProvider::new(&config)?)),
         other => Err(LlmError::UnsupportedProvider(other.to_string())),
     }
@@ -266,10 +229,7 @@ fn worker_loop(
     subs: Arc<Mutex<Vec<Sender<LlmEvent>>>>,
     generating: Arc<AtomicBool>,
     ready: Arc<AtomicBool>,
-    loaded_path: Arc<Mutex<Option<std::path::PathBuf>>>,
-    last_load_error: Arc<Mutex<Option<LlmLoadError>>>,
 ) {
-    let model_path = config.model_path.clone();
     let mut provider = match create_provider(config) {
         Ok(p) => p,
         Err(e) => {
@@ -284,26 +244,15 @@ fn worker_loop(
             LlmCommand::Load => match provider.load() {
                 Ok(()) => {
                     ready.store(true, Ordering::Relaxed);
-                    *loaded_path.lock().unwrap_or_else(|e| e.into_inner()) =
-                        Some(model_path.clone());
-                    *last_load_error.lock().unwrap_or_else(|e| e.into_inner()) = None;
                     broadcast_to(&subs, &LlmEvent::Status { ready: true });
                 }
                 Err(e) => {
-                    *loaded_path.lock().unwrap_or_else(|e| e.into_inner()) = None;
-                    *last_load_error.lock().unwrap_or_else(|e| e.into_inner()) =
-                        Some(LlmLoadError {
-                            model_path: model_path.clone(),
-                            message: e.to_string(),
-                        });
                     broadcast_to(&subs, &LlmEvent::Error(e.to_string()));
                 }
             },
             LlmCommand::Unload => {
                 provider.unload();
                 ready.store(false, Ordering::Relaxed);
-                *loaded_path.lock().unwrap_or_else(|e| e.into_inner()) = None;
-                *last_load_error.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 broadcast_to(&subs, &LlmEvent::Status { ready: false });
             }
             LlmCommand::Generate {
@@ -333,7 +282,6 @@ fn worker_loop(
 
     provider.unload();
     ready.store(false, Ordering::Relaxed);
-    *loaded_path.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 #[cfg(test)]
@@ -361,10 +309,23 @@ mod tests {
         assert_eq!(subs.lock().unwrap().len(), 1);
     }
 
+    /// 引擎测试用配置：OpenAI 兼容 provider 指向不可达地址（构造不发请求，仅建 client）。
+    fn engine_test_config() -> crate::llm::config::ResolvedLlmConfig {
+        crate::llm::config::ResolvedLlmConfig {
+            enabled: true,
+            provider: "openai".to_string(),
+            system_prompt: String::new(),
+            params: GenParams::default(),
+            base_url: Some("http://127.0.0.1:1".to_string()),
+            api_key: None,
+            model: Some("test-model".to_string()),
+        }
+    }
+
     #[test]
     fn test_subscribe_each_receiver_gets_copy() {
         run_with_temp_home(|_| {
-            let cfg = crate::llm::config::resolve(None, None).unwrap();
+            let cfg = engine_test_config();
             let engine = LlmEngine::new(cfg).unwrap();
             let rx1 = engine.subscribe();
             let rx2 = engine.subscribe();
@@ -380,7 +341,7 @@ mod tests {
     #[test]
     fn test_generate_mutual_exclusion() {
         run_with_temp_home(|_| {
-            let cfg = crate::llm::config::resolve(None, None).unwrap();
+            let cfg = engine_test_config();
             let engine = LlmEngine::new(cfg).unwrap();
             // 模拟生成中：generating=true 时再 generate → Busy
             engine.generating.store(true, Ordering::SeqCst);

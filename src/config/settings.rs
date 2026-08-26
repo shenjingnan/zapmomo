@@ -240,82 +240,12 @@ pub struct AppConfig {
     /// 语音会话（KWS→ASR→LLM→TTS 全链路）配置
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub voice: Option<VoiceSettings>,
-    /// 模型库配置（用户通过「添加本地模型」注册的 external 模型等）
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_library: Option<ModelLibrarySettings>,
     /// 全局快捷键配置
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shortcuts: Option<ShortcutsSettings>,
     /// dsh 桥配置（接收 deepseek-harness 插件推送的任务事件）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dsh: Option<DshSettings>,
-}
-
-/// 用户「添加本地模型」注册的模型（external）。
-///
-/// 只保存注册路径，**不复制/不管理用户文件**；移除时只删除本条目。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-pub struct LocalModel {
-    /// 稳定 id（`local-` + sha256(规范化绝对路径) 前 12 位）
-    pub id: String,
-    /// 目录/文件基名（展示用）
-    pub name: String,
-    /// 能力类型：kws | asr | llm | tts
-    pub model_type: String,
-    /// 绝对路径（LLM 必须是具体 .gguf 文件路径）
-    pub path: String,
-    /// 注册时间（RFC3339）
-    pub added_at: String,
-    /// 显式关联的 Registry 模型 id（从 Registry 卡片导入时携带；顶部添加本地模型为 None）
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub registry_id: Option<String>,
-}
-
-/// 模型库配置段。
-///
-/// 只保存**用户配置**（本地注册 + 目录/下载源），不保存 installed inventory。
-/// "电脑上装了哪些模型" 的唯一事实来源是 `~/.zapmomo/models/**/.zapmomo-lib.json` 扫描。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ModelLibrarySettings {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub local_models: Vec<LocalModel>,
-    /// 在线目录 base URL（默认 huggingface.co，预留 ModelScope 等）。
-    #[serde(default = "default_hf_catalog_base_url")]
-    pub hf_catalog_base_url: String,
-    /// 下载源：auto（HF 失败 fallback 镜像）| huggingface | mirror。
-    #[serde(default = "default_hf_download_source")]
-    pub hf_download_source: String,
-    /// 自定义镜像 base URL（默认 https://hf-mirror.com，可改为任意镜像）。
-    #[serde(default = "default_hf_mirror_url")]
-    pub hf_mirror_url: String,
-    /// Hugging Face token（明文 settings.toml；**不是安全存储**）。
-    /// 只进 Authorization header；绝不进 log / error message / cache key / 前端配置 View。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hf_token: Option<String>,
-}
-
-fn default_hf_catalog_base_url() -> String {
-    "https://huggingface.co".to_string()
-}
-
-fn default_hf_download_source() -> String {
-    "auto".to_string()
-}
-
-fn default_hf_mirror_url() -> String {
-    "https://hf-mirror.com".to_string()
-}
-
-impl Default for ModelLibrarySettings {
-    fn default() -> Self {
-        Self {
-            local_models: Vec::new(),
-            hf_catalog_base_url: default_hf_catalog_base_url(),
-            hf_download_source: default_hf_download_source(),
-            hf_mirror_url: default_hf_mirror_url(),
-            hf_token: None,
-        }
-    }
 }
 
 /// 唤醒词检测（KWS）配置。
@@ -584,24 +514,15 @@ pub struct Live2dSettings {
 /// 全部字段可缺省：未配置的项在解析时回退到 `llm::config` 的内置默认值。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct LlmSettings {
-    /// 是否启用 Local LLM，缺省 false
+    /// 是否启用 LLM，缺省 false
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
-    /// provider 标识，缺省 "local"（未来 ollama/openai/...）
+    /// provider 标识，缺省 "openai"（OpenAI 兼容 API）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
-    /// GGUF 模型文件路径（支持 ${env.VAR}，相对路径锚定 ~/.zapmomo/models）
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_path: Option<String>,
     /// 角色 system prompt，缺省用内置默认
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
-    /// 上下文窗口大小（token），缺省 8192
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub context_size: Option<usize>,
-    /// 单次 decode batch 大小，缺省 512
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub batch_size: Option<usize>,
     /// 最多生成 token 数，缺省 512
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<usize>,
@@ -623,25 +544,13 @@ pub struct LlmSettings {
     /// 随机种子，缺省 0（随机）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed: Option<u32>,
-    /// CPU 线程数，缺省 物理核数 - 2
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub threads: Option<i32>,
-    /// 卸载到 GPU 的层数，缺省 -1（全部，Metal）；0 表示纯 CPU
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gpu_layers: Option<i32>,
-    /// 是否开启 Qwen3 思考模式（输出 <think> 块），缺省 false
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub enable_thinking: Option<bool>,
-    /// 是否在应用启动时自动加载模型，缺省 false（懒加载）
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auto_load: Option<bool>,
-    /// HTTP provider 的 base URL（如 https://api.openai.com/v1 或 http://127.0.0.1:8080/v1）
+    /// HTTP provider 的 base URL（如 https://open.bigmodel.cn/api/paas/v4 或 Ollama 地址）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
-    /// HTTP provider 的 API key（本地 server 可留空）
+    /// HTTP provider 的 API key（本地 server / Ollama 可留空）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
-    /// HTTP provider 的模型名（如 qwen3-4b / gpt-4o-mini）
+    /// HTTP provider 的模型名（如 glm-4.7-flash / gpt-4o-mini）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
 }
@@ -730,7 +639,6 @@ impl Default for AppConfig {
             live2d: None,
             llm: None,
             voice: None,
-            model_library: None,
             shortcuts: None,
             dsh: None,
         }
@@ -920,7 +828,6 @@ mod tests {
             live2d: None,
             llm: None,
             voice: None,
-            model_library: None,
             shortcuts: None,
             dsh: None,
         };
@@ -1210,7 +1117,6 @@ mod tests {
                 }),
                 llm: None,
                 voice: None,
-                model_library: None,
                 shortcuts: None,
                 dsh: None,
             };
@@ -1219,38 +1125,6 @@ mod tests {
             assert_eq!(loaded, config);
             // 文件确实写到了 HOME 下
             assert!(home.join(".zapmomo/settings.toml").is_file());
-        });
-    }
-
-    #[test]
-    fn test_model_library_settings_roundtrip() {
-        run_with_temp_home(|home| {
-            let config = AppConfig {
-                model_library: Some(ModelLibrarySettings {
-                    local_models: vec![LocalModel {
-                        id: "local-abcdef123456".to_string(),
-                        name: "MyModel.gguf".to_string(),
-                        model_type: "llm".to_string(),
-                        path: "/tmp/models/MyModel.gguf".to_string(),
-                        added_at: "2026-08-17T00:00:00Z".to_string(),
-                        registry_id: Some("qwen3-1.7b-q4-k-m".to_string()),
-                    }],
-                    ..Default::default()
-                }),
-                ..Default::default()
-            };
-            save_settings(&config).unwrap();
-            let loaded = load_settings().unwrap().unwrap();
-            assert_eq!(loaded, config);
-            // external 注册信息存在 settings 中，不写用户模型目录
-            assert!(home.join(".zapmomo/settings.toml").is_file());
-            // 缺省 local_models 不序列化
-            let empty = AppConfig {
-                model_library: Some(ModelLibrarySettings::default()),
-                ..Default::default()
-            };
-            let toml_str = toml::to_string(&empty).unwrap();
-            assert!(!toml_str.contains("local_models"));
         });
     }
 

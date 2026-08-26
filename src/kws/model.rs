@@ -470,44 +470,6 @@ fn try_download_once(
     try_download_once_core(url, None, tmp_archive, manifest_total, on_progress, cancel)
 }
 
-/// 带 Authorization 的流式下载（HF gated 模型；token 只进 header）。
-pub(crate) fn download_to_with_auth(
-    url: &str,
-    token: &str,
-    tmp_archive: &Path,
-    manifest_total: u64,
-    on_progress: &mut ProgressFn,
-    cancel: Option<&std::sync::atomic::AtomicBool>,
-) -> Result<(), ModelError> {
-    let mut last_err: Option<ModelError> = None;
-    for attempt in 0..3 {
-        if attempt > 0 {
-            std::thread::sleep(std::time::Duration::from_millis(400 * (1 << attempt)));
-        }
-        match try_download_once_core(
-            url,
-            Some(token),
-            tmp_archive,
-            manifest_total,
-            on_progress,
-            cancel,
-        ) {
-            Ok(()) => return Ok(()),
-            Err(e) => {
-                if matches!(e, ModelError::Cancelled) {
-                    let _ = std::fs::remove_file(tmp_archive);
-                    return Err(e);
-                }
-                last_err = Some(e);
-            }
-        }
-    }
-    Err(last_err.map_or_else(
-        || ModelError::Download("未知错误".to_string()),
-        |e| ModelError::Download(e.to_string()),
-    ))
-}
-
 fn try_download_once_core(
     url: &str,
     token: Option<&str>,
