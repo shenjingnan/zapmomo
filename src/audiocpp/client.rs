@@ -240,6 +240,27 @@ fn apply_voice_fields(
             body["voice_ref"] = serde_json::json!(wav_path.to_string_lossy());
             body["reference_text"] = serde_json::json!(reference_text);
         }
+        (
+            VoiceSemantics::ReferenceCloneRequired,
+            TtsVoiceParams::Reference {
+                wav_path,
+                reference_text,
+            },
+        ) => {
+            body["voice_ref"] = serde_json::json!(wav_path.to_string_lossy());
+            body["reference_text"] = serde_json::json!(reference_text);
+        }
+        (VoiceSemantics::ReferenceCloneRequired, TtsVoiceParams::Sid(_)) => {
+            return Err(AudiocppError::UnsupportedVoice(
+                "Qwen3-TTS 需要克隆音色：请先在音色库选择或录制一个音色".to_string(),
+            ));
+        }
+        (VoiceSemantics::ReferenceCloneRequired, TtsVoiceParams::Named(_)) => {
+            return Err(AudiocppError::UnsupportedVoice(format!(
+                "{} 仅支持参考音频克隆（speaker reference），不支持具名音色",
+                desc.model_id
+            )));
+        }
         (VoiceSemantics::ReferenceClone, TtsVoiceParams::Named(v)) => {
             if desc.allows_named_voice {
                 body["voice"] = serde_json::json!(v);
@@ -360,6 +381,14 @@ mod tests {
         ResolvedTtsConfig {
             backend: TtsBackendKind::Audiocpp,
             model_type: crate::tts::config::TtsModelKind::Voxcpm2,
+            ..ResolvedTtsConfig::default()
+        }
+    }
+
+    fn qwen3_06_cfg() -> ResolvedTtsConfig {
+        ResolvedTtsConfig {
+            backend: TtsBackendKind::Audiocpp,
+            model_type: crate::tts::config::TtsModelKind::Qwen3Tts06,
             ..ResolvedTtsConfig::default()
         }
     }
@@ -519,6 +548,43 @@ mod tests {
             last.get("voice").is_none() && last.get("voice_ref").is_none(),
             "Sid 省略全部音色字段（auto voice）"
         );
+    }
+
+    /// qwen3_tts（强制克隆族）：Reference 正常映射；Sid/Named 提前拦截。
+    #[test]
+    fn test_synthesize_qwen3_tts_voice_semantics() {
+        let (base_url, received, _handle) = spawn_stub();
+        let tts = AudiocppTts::new_with_base_url(qwen3_06_cfg(), &base_url);
+
+        // Reference -> voice_ref + reference_text（与 omnivoice 同款映射）
+        tts.synthesize(
+            "你好",
+            1.0,
+            &TtsVoiceParams::Reference {
+                wav_path: std::path::PathBuf::from("/voices/me.wav"),
+                reference_text: "参考转写".into(),
+            },
+        )
+        .unwrap();
+        let body = received.lock().unwrap().last().unwrap().clone();
+        assert_eq!(body["model"], "qwen3-tts-0.6b");
+        assert_eq!(
+            body["voice_ref"].as_str().unwrap().replace('\\', "/"),
+            "/voices/me.wav"
+        );
+        assert_eq!(body["reference_text"], "参考转写");
+
+        // Sid -> 提前拦截（上游 Base 版无 auto voice）
+        let err = tts
+            .synthesize("x", 1.0, &TtsVoiceParams::Sid(0))
+            .unwrap_err();
+        assert!(err.contains("需要克隆音色"), "err: {err}");
+
+        // Named -> 提前拦截（Base 版仅接受 speaker reference）
+        let err = tts
+            .synthesize("x", 1.0, &TtsVoiceParams::Named("v".into()))
+            .unwrap_err();
+        assert!(err.contains("参考音频克隆"), "err: {err}");
     }
 
     /// 非法组合（sherpa kind + audiocpp 后端）在构造期报错，不发起连接。
