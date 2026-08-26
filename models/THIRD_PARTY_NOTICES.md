@@ -162,6 +162,8 @@
 - **上游模型**: https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base / https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base
 - **许可证**: Apache-2.0
 - **用途**: TTS 音色克隆（speaker reference）推理，经 audio.cpp sidecar 后端加载
+- **sha256**: 0.6B `771420bd20ff5f35407b4fa9cf9c5461e153800d3d772ef51c9febc0a520855d` /
+  1.7B `b55e06c7890d43c208d15aed8b4ed3f18215f295e47d5960e061b15bff338ab0`
 
 ## audiocpp_server（audio.cpp 引擎二进制，随安装包分发）
 

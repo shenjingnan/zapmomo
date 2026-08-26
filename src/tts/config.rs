@@ -149,8 +149,8 @@ impl TtsModelKind {
         }
     }
 
-    /// 是否使用参考音频（声音克隆）语义：ZipVoice（sherpa）与 OmniVoice/VoxCPM2
-    /// （audiocpp）支持克隆，其余按 speaker id（sid）说话。
+    /// 是否使用参考音频（声音克隆）语义：ZipVoice（sherpa）与 OmniVoice/VoxCPM2/
+    /// Qwen3-TTS（audiocpp）支持克隆，其余按 speaker id（sid）说话。
     pub fn uses_reference_audio(&self) -> bool {
         matches!(
             self,
@@ -323,7 +323,7 @@ impl Default for ResolvedTtsConfig {
 
 impl ResolvedTtsConfig {
     /// 是否使用参考音频（声音克隆）语义：sherpa 后端仅 ZipVoice，audiocpp 后端
-    /// 仅 OmniVoice/VoxCPM2（pocket 为固定具名音色）。
+    /// 为 OmniVoice/VoxCPM2/Qwen3-TTS 克隆族（pocket 为固定具名音色）。
     ///
     /// 编排层（voice 会话 / GUI / CLI）应调此方法而非裸
     /// `model_type.uses_reference_audio()`——保持 backend 感知，防「audiocpp
@@ -1276,6 +1276,28 @@ mod tests {
         cfg.model_type = TtsModelKind::Zipvoice;
         let err = preflight(&cfg).unwrap_err();
         assert!(err.contains("不支持 audiocpp 后端"), "err: {err}");
+
+        // qwen3：空目录 -> 报缺 base gguf（提示语指向 qwen3 registry id）
+        let cfg = ResolvedTtsConfig {
+            backend: crate::tts::config::TtsBackendKind::Audiocpp,
+            model_type: TtsModelKind::Qwen3Tts06,
+            model_dir: base.path().to_path_buf(),
+            ..ResolvedTtsConfig::default()
+        };
+        let err = preflight(&cfg).unwrap_err();
+        assert!(
+            err.contains("qwen3-tts-12hz-0.6b-base-q8_0.gguf"),
+            "err: {err}"
+        );
+        assert!(err.contains("tts-qwen3-06b-base-q8-audiocpp"), "err: {err}");
+
+        // 单文件齐 -> 通过
+        std::fs::write(
+            cfg.model_dir.join("qwen3-tts-12hz-0.6b-base-q8_0.gguf"),
+            b"x",
+        )
+        .unwrap();
+        assert!(preflight(&cfg).is_ok());
     }
 
     #[test]

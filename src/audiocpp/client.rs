@@ -212,7 +212,10 @@ impl AudiocppTts {
 /// - 参考音频克隆（omnivoice/voxcpm2）：`Reference` → `voice_ref`+`reference_text`
 ///   （本地路径，sidecar 同机可读）；`Named` → 视 `allows_named_voice` 透传
 ///   `voice`（omnivoice 走 server 端 preset/voice_dir 通道）或提前拦截（voxcpm2
-///   上游仅接受 speaker reference）；`Sid` → 省略 voice 字段（server auto voice）。
+///   上游仅接受 speaker reference）；`Sid` → 省略 voice 字段（server auto voice）；
+/// - 强制参考音频克隆（qwen3_tts Base）：`Reference` → 同款 `voice_ref`+
+///   `reference_text` 映射；`Sid`/`Named` 一律提前拦截给中文文案（上游无 auto
+///   voice、仅接受 speaker reference，放过即 server 端报错）。
 fn apply_voice_fields(
     body: &mut serde_json::Value,
     desc: &AudiocppFamilyDesc,

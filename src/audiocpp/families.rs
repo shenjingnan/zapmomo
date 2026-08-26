@@ -43,12 +43,13 @@ pub struct AudiocppFamilyDesc {
     /// 音色语义。
     pub voice_semantics: VoiceSemantics,
     /// 是否透传 `Named` 具名音色（ReferenceClone 族的差异项）：omnivoice 支持
-    /// （server 端 preset/voice_dir 通道）；voxcpm2 上游仅接受 speaker reference，
-    /// 具名请求会被 server 拒绝——client 据此提前拦截并给中文文案。
+    /// （server 端 preset/voice_dir 通道）；voxcpm2/qwen3_tts 上游仅接受 speaker
+    /// reference，具名请求会被 server 拒绝——client 据此提前拦截并给中文文案。
     pub allows_named_voice: bool,
     /// 是否支持 SSE 伪流式（server config `mode` 与请求体 `stream_format` 的依据）。
     /// 流式矩阵（audio.cpp release-0.6.1 实测/README）：omnivoice ✅、voxcpm2 ✅、
-    /// pocket_tts ❌、sherpa 全族 ❌（`OfflineTts` 整段合成，无 sidecar 语义）。
+    /// pocket_tts ❌、qwen3_tts ❌（上游 modes 仅 offline）、sherpa 全族 ❌
+    /// （`OfflineTts` 整段合成，无 sidecar 语义）。
     /// offline-mode server 会拒绝 SSE 请求（实测 HTTP 500），故该标记同时决定
     /// server config 的 `mode:"streaming"` 翻转——两者必须同源。
     pub supports_streaming: bool,
