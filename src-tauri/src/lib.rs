@@ -5817,7 +5817,10 @@ fn default_chatbox_position(app: &AppHandle) -> Option<(f64, f64)> {
     let top = work.position.y as f64 / scale;
     let w = work.size.width as f64 / scale;
     let h = work.size.height as f64 / scale;
-    Some((left + (w - CHATBOX_W) / 2.0, top + h - CHATBOX_H - CHATBOX_BOTTOM_MARGIN))
+    Some((
+        left + (w - CHATBOX_W) / 2.0,
+        top + h - CHATBOX_H - CHATBOX_BOTTOM_MARGIN,
+    ))
 }
 
 /// 逻辑像素坐标是否落在任一显示器的可见工作区内。
