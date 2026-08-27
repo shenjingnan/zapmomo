@@ -36,6 +36,14 @@
 | sha256 | `771420bd20ff5f35407b4fa9cf9c5461e153800d3d772ef51c9febc0a520855d` | `b55e06c7890d43c208d15aed8b4ed3f18215f295e47d5960e061b15bff338ab0` |
 | size_bytes | 1991211136 (~1.86 GiB) | 2695175104 (~2.51 GiB) |
 
+### E2E 实测回填（2026-08-27，0.6B）
+
+- sidecar：release-0.6.1 重建编入 qwen3_tts（`AUDIOCPP_MODELS=pocket_tts,omnivoice,voxcpm2,qwen3_tts`）
+- 模型：0.6B q8_0 GGUF，sha256 校验通过；参考音频 4.8s 中文女声（48kHz 立体声自动处理）
+- 结果：**RTF 0.72**（6.96s 音频 / 5.00s 合成，含 server 冷启动 + 模型加载），验收标准 RTF < 1.0 通过
+- 结论：0.6B 首响 = 首句合成时间，热 server + 短首句场景预计亚秒级；1.7B 未实测
+- 坑：`cargo test` 的 locator 会兜底命中 `~/.zapmomo/engines/` 旧 sidecar（编译进二进制的是 downloader 元数据，`strings` 不能区分有无 qwen3_tts loader），报 `unsupported model family hint: qwen3_tts` 时先替换该目录二进制
+
 ### 首响优化分析（回应「尽可能提高首字说话速度」）
 
 qwen3_tts 无上游流式，**首字延迟 = 首句整段合成时间**。现有架构已提供全部可得优化：
