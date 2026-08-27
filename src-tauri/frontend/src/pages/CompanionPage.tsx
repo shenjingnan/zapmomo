@@ -17,10 +17,10 @@ import {
   useRef,
   useState,
 } from "react";
-import { LibraryDialog } from "@/components/library/LibraryDialog";
 import type { Live2dCatalog } from "@/components/live2d/previewManager";
 import type { SharedLive2dStageHandle } from "@/components/live2d/SharedLive2dStage";
 import { SharedLive2dStage } from "@/components/live2d/SharedLive2dStage";
+import { ModelDialog } from "@/components/models/ModelDialog";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -514,8 +514,7 @@ export function CompanionPage() {
   const isGif = isStaticImageFormat(selected?.format);
   const previewUrl = selected ? toAssetUrl(selected.model_file) : null;
   // 静态图像伙伴（GIF/角色包立绘）不走 PIXI 预览（无 canvas/动作目录），单独 img 分支。
-  const showStage =
-    !!selected?.valid && !isGif && previewSize.width > 0 && previewSize.height > 0;
+  const showStage = !!selected?.valid && !isGif && previewSize.width > 0 && previewSize.height > 0;
 
   return (
     <div className="flex h-full flex-col gap-4">
@@ -766,8 +765,8 @@ export function CompanionPage() {
         </Card>
       </div>
 
-      {/* 移除伙伴确认（样式对齐模型库 ModelConfirmDialog） */}
-      <LibraryDialog
+      {/* 移除伙伴确认（样式对齐模型卸载确认框） */}
+      <ModelDialog
         open={removeTarget != null}
         onClose={() => setRemoveTarget(null)}
         title="移除伙伴"
@@ -797,7 +796,7 @@ export function CompanionPage() {
             </p>
           </div>
         )}
-      </LibraryDialog>
+      </ModelDialog>
     </div>
   );
 }

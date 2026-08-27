@@ -34,8 +34,8 @@ export interface KwsModelSwitchState {
 }
 
 /**
- * KWS 模型切换状态：从模型库列表过滤 KWS 条目，提供下载 / 设为当前 / 卸载。
- * 数据用 `list_model_library`（与模型库页同一后端真相源，含 install_state + current）。
+ * KWS 模型切换状态：从后端模型列表过滤 KWS 条目，提供下载 / 设为当前 / 卸载。
+ * 数据用 `list_model_library`（后端模型列表真相源，含 install_state + current）。
  */
 export function useKwsModelSwitch(): KwsModelSwitchState {
   const runtime = useRuntime();
