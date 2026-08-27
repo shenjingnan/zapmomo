@@ -10,14 +10,6 @@
       "compatibility_notes": "内置唤醒词模型，sherpa-onnx KeywordSpotter 验证可用（中英 3M）。"
     },
     {
-      "model_id": "kws-zipformer-wenetspeech-3.3m",
-      "provider": null,
-      "repo_id": null,
-      "model_type": "kws",
-      "architecture": "sherpa-kws-streaming-zipformer",
-      "compatibility_notes": "内置唤醒词模型，sherpa-onnx KeywordSpotter 验证可用（纯中文 wenetspeech 3.3M）。"
-    },
-    {
       "model_id": "asr-streaming-bilingual-zh-en",
       "provider": null,
       "repo_id": null,
