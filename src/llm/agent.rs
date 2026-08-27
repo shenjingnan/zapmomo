@@ -29,7 +29,7 @@ impl Agent {
         provider: &mut dyn LlmProvider,
         input: &[InputItem],
         params: &GenParams,
-        emit: &mut dyn FnMut(OutputItem),
+        emit: &mut (dyn FnMut(OutputItem) + Send),
         cancel: Arc<AtomicBool>,
     ) -> Result<FinishReason, LlmError> {
         let tools = self.tool_runtime.definitions();
@@ -98,7 +98,7 @@ mod tests {
             input: &[InputItem],
             _tools: &[crate::llm::types::ToolDefinition],
             _params: &GenParams,
-            emit: &mut dyn FnMut(OutputItem),
+            emit: &mut (dyn FnMut(OutputItem) + Send),
             _cancel: Arc<AtomicBool>,
         ) -> Result<FinishReason, LlmError> {
             let has_tool_result = input.iter().any(|i| matches!(i, InputItem::ToolResult(_)));

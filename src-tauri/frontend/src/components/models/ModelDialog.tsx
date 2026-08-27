@@ -17,7 +17,7 @@ const WIDTHS = {
 
 type DialogWidth = keyof typeof WIDTHS;
 
-interface LibraryDialogProps {
+interface ModelDialogProps {
   open: boolean;
   onClose: () => void;
   title: string;
@@ -29,18 +29,18 @@ interface LibraryDialogProps {
 }
 
 /**
- * 模型库通用对话框外壳：基于 shadcn/ui Dialog（Radix），
+ * 通用对话框外壳：基于 shadcn/ui Dialog（Radix），
  * 自动获得焦点陷阱、焦点归还、滚动锁定与 Escape 关闭；
  * 视觉保持 macOS 面板风格（浅遮罩 + 面板色卡片 + 200ms fade/zoom）。
  */
-export function LibraryDialog({
+export function ModelDialog({
   open,
   onClose,
   title,
   children,
   footer,
   width = "md",
-}: LibraryDialogProps) {
+}: ModelDialogProps) {
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
       <DialogContent

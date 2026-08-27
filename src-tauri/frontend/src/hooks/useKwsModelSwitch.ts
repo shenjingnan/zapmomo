@@ -15,18 +15,6 @@ export const KWS_PRESETS = [
     tagline: "中英混合 · 支持中英文唤醒词",
     sizeBytes: 32_885_699,
   },
-  {
-    id: "kws-zipformer-wenetspeech-3.3m",
-    name: "Zipformer KWS wenetspeech 3.3M",
-    tagline: "纯中文 · 轻量（WenetSpeech 1 万小时）",
-    sizeBytes: 32_654_866,
-  },
-  {
-    id: "kws-zipformer-gigaspeech-3.3m",
-    name: "Zipformer KWS gigaspeech 3.3M",
-    tagline: "纯英文 · 轻量（GigaSpeech 1 万小时）",
-    sizeBytes: 17_626_723,
-  },
 ] as const;
 
 export interface KwsModelSwitchState {
@@ -46,8 +34,8 @@ export interface KwsModelSwitchState {
 }
 
 /**
- * KWS 模型切换状态：从模型库列表过滤 KWS 条目，提供下载 / 设为当前 / 卸载。
- * 数据用 `list_model_library`（与模型库页同一后端真相源，含 install_state + current）。
+ * KWS 模型切换状态：从后端模型列表过滤 KWS 条目，提供下载 / 设为当前 / 卸载。
+ * 数据用 `list_model_library`（后端模型列表真相源，含 install_state + current）。
  */
 export function useKwsModelSwitch(): KwsModelSwitchState {
   const runtime = useRuntime();
