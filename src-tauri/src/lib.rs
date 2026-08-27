@@ -670,6 +670,8 @@ struct AsrConfigInfo {
     enabled: bool,
     /// 模型类型（zipformer/paraformer/sensevoice/whisper），前端据此隐藏流式专属参数
     model_type: String,
+    /// 推理后端（sherpa/audiocpp），前端据此显示 audio.cpp 标识与隐藏热词参数
+    backend: String,
     model_dir: String,
     provider: String,
     num_threads: i32,
@@ -699,12 +701,13 @@ fn get_asr_config(state: State<'_, AsrDownloadState>) -> Result<AsrConfigInfo, S
     let asr_settings = settings.as_ref().and_then(|s| s.asr.clone());
     let cfg = zapmomo::asr::config::resolve(asr_settings.as_ref(), None)?;
 
-    // 族感知：SenseVoice/Whisper/Qwen3-ASR/zipformer 各有自己的文件布局，交给 asr::is_installed 探测
-    let models_present = zapmomo::asr::is_installed(&cfg.model_dir);
+    // 族 + 后端感知：sherpa 按模型类型清单探测；audiocpp 按族表 GGUF 单文件探测
+    let models_present = zapmomo::asr::config::models_present(&cfg);
     let punctuation_present = cfg.punctuation_model.is_file();
     tracing::info!(
-        "get_asr_config: model_type={} settings.asr.enabled={:?} resolve.enabled={} models_present={}",
+        "get_asr_config: model_type={} backend={} settings.asr.enabled={:?} resolve.enabled={} models_present={}",
         cfg.model_type.as_str(),
+        cfg.backend.as_str(),
         asr_settings.as_ref().and_then(|a| a.enabled),
         cfg.enabled,
         models_present
@@ -713,6 +716,7 @@ fn get_asr_config(state: State<'_, AsrDownloadState>) -> Result<AsrConfigInfo, S
     Ok(AsrConfigInfo {
         enabled: cfg.enabled,
         model_type: cfg.model_type.as_str().to_string(),
+        backend: cfg.backend.as_str().to_string(),
         model_dir: cfg.model_dir.display().to_string(),
         provider: cfg.provider.clone(),
         num_threads: cfg.num_threads,

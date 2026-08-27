@@ -314,6 +314,17 @@
       "sha256": "b55e06c7890d43c208d15aed8b4ed3f18215f295e47d5960e061b15bff338ab0",
       "size_bytes": 2695175104,
       "license": "Apache-2.0"
+    },
+    {
+      "name": "qwen3-asr-0.6b-audiocpp",
+      "role": "asr-audiocpp-qwen3-06b",
+      "version": "q8_0",
+      "kind": "raw",
+      "archive": "qwen3-asr-0.6b-q8_0.gguf",
+      "source": "https://huggingface.co/audio-cpp/audio.cpp-gguf/resolve/main/Qwen3-ASR-0.6B-GGUF/qwen3-asr-0.6b-q8_0.gguf",
+      "sha256": "6c44ec2fb4cee513892d7863c1fcc3ea6b699ffa4d899b0ef4ab19956d9544f7",
+      "size_bytes": 1151272416,
+      "license": "Apache-2.0"
     }
   ]
 }

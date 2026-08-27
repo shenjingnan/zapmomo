@@ -70,6 +70,8 @@ export interface AsrConfigInfo {
   enabled: boolean;
   /** 模型类型（zipformer/sensevoice/whisper），决定是否展示流式专属参数 */
   model_type: string;
+  /** 推理后端（sherpa/audiocpp）：audiocpp 时显示 audio.cpp 标识并隐藏热词参数 */
+  backend: string;
   model_dir: string;
   provider: string;
   num_threads: number;

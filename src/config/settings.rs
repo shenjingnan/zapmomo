@@ -451,6 +451,12 @@ pub struct AsrSettings {
     /// 调试输出，缺省 false
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub debug: Option<bool>,
+    /// ASR 引擎后端：sherpa（进程内，缺省）| audiocpp（audio.cpp sidecar 进程）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    /// audiocpp 引擎二进制覆盖路径（开发/调试用；缺省由 locator 自动定位）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_path: Option<String>,
 }
 
 /// 文本转语音（TTS）配置。

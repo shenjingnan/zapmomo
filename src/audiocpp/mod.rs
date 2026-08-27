@@ -1,16 +1,18 @@
-/// audio.cpp sidecar 集成（TTS 第二后端）。
+/// audio.cpp sidecar 集成（TTS/ASR 第二后端）。
 ///
 /// audio.cpp（Apache-2.0，ggml 系）作为独立进程 `audiocpp_server` 运行，暴露
-/// OpenAI 风格 HTTP API（`/health`、`/v1/models`、`/v1/audio/speech`）。本模块
-/// 负责：引擎二进制定位（locator）、server config 生成（server_config）、进程
-/// 生命周期管理（server，lease + 按配置指纹多实例并存 + 健康轮询 + 懒重启）、
-/// HTTP 客户端与 wav 解码（client）。
+/// OpenAI 风格 HTTP API（`/health`、`/v1/models`、`/v1/audio/speech`、
+/// `/v1/audio/transcriptions`）。本模块负责：引擎二进制定位（locator）、server
+/// config 生成（server_config）、进程生命周期管理（server，lease + 按配置指纹
+/// 多实例并存 + 健康轮询 + 懒重启）、HTTP 客户端与 wav 编解码（client）。
 ///
 /// 与 sherpa-onnx 进程内引擎的边界：[`crate::tts::TtsEngine`] 门面按
-/// `ResolvedTtsConfig.backend` 分派，本模块不接触 sherpa 类型。
+/// `ResolvedTtsConfig.backend` 分派，ASR 侧由 `voice::asr_backend::AsrBackend`
+/// 按 `ResolvedAsrConfig.backend` 分派，本模块不接触 sherpa 类型。
 ///
-/// 模型族差异（pocket / omnivoice 等）统一收敛在 [`families`] 静态描述表：
-/// 模型 id、GGUF 文件名、必需文件清单、采样率、缺省推理后端、音色语义。
+/// 模型族差异统一收敛在描述表：TTS 见 [`families`]（音色语义等），ASR 见
+/// [`asr_families`]；任务中立的实例规格见 [`server_config::ServerInstanceSpec`]。
+pub mod asr_families;
 pub mod client;
 pub mod families;
 pub mod locator;
@@ -39,6 +41,8 @@ pub enum AudiocppError {
     HttpStatus { status: u16, body: String },
     /// wav 解码失败
     DecodeWav(String),
+    /// wav 编码失败（ASR 上传方向）
+    EncodeWav(String),
     /// 后端不支持的音色参数（如对 PocketTTS 传参考音频克隆）
     UnsupportedVoice(String),
     /// 该模型族不支持 SSE 流式合成（`families::supports_streaming == false`）
@@ -69,7 +73,7 @@ impl AudiocppError {
             ),
             Self::ModelNotListed { model_id } => format!(
                 "audiocpp_server 未加载模型 {model_id}，请检查模型文件是否完整\
-                 （在模型库重新下载，或运行 `zapmomo tts install-model`）。"
+                 （在模型库重新下载，或运行 `zapmomo install-model`）。"
             ),
             Self::Connection(e) => {
                 format!("无法连接 audiocpp_server（引擎未启动或已退出）: {e}")
@@ -78,6 +82,7 @@ impl AudiocppError {
                 format!("audiocpp_server 请求失败（HTTP {status}）: {body}")
             }
             Self::DecodeWav(e) => format!("解码合成音频失败: {e}"),
+            Self::EncodeWav(e) => format!("编码上传音频失败: {e}"),
             Self::UnsupportedVoice(e) => e.clone(),
             Self::StreamingUnsupported(model_id) => {
                 format!("该模型（{model_id}）不支持流式合成，请使用整段合成或更换模型。")

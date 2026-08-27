@@ -395,19 +395,40 @@ pub fn set_selected_model(mt: ModelType, path: &Path) -> Result<(), String> {
         ModelType::Asr => {
             let asr = cfg.asr.get_or_insert_with(Default::default);
             asr.model_dir = Some(path_str);
-            // 切换时同步持久化模型类型：managed 安装目录名 == registry `name`，据此
-            // 推导 sensevoice/whisper；streaming zipformer 与 external 目录无 asr_kind
-            // （None），resolve 会按目录内容兜底探测（对称 TTS 分支）。
+            // 切换时同步持久化模型类型与推理后端：managed 安装目录名 == registry
+            // `name`，据此推导 sensevoice/whisper/qwen3_asr 与 audiocpp（runtime
+            // 字段）；external/local 目录无 asr_kind（None），resolve 按目录内容
+            // 兜底探测（对称 TTS 分支）。
+            let mut matched_registry = false;
             if let Some(name) = path.file_name() {
                 let base = name.to_string_lossy().to_string();
-                if let Some(kind) = crate::model_library::registry::all_models()
+                if let Some(entry) = crate::model_library::registry::all_models()
                     .iter()
                     .filter(|m| m.model_type == ModelType::Asr)
                     .find(|m| m.name == base)
-                    .and_then(|m| m.asr_kind)
                 {
-                    asr.model_type = Some(kind);
+                    matched_registry = true;
+                    if let Some(kind) = entry.asr_kind {
+                        asr.model_type = Some(kind);
+                    }
+                    // audiocpp 条目写 backend；sherpa 条目写 None 复位（保证从
+                    // audiocpp 切回 sherpa 时后端归位缺省）。
+                    asr.backend = (entry.runtime == "audiocpp").then(|| "audiocpp".to_string());
+                    asr.engine_path = None;
                 }
+            }
+            if !matched_registry {
+                // external/local 目录（registry 未收录）：目录内含 audiocpp 族 GGUF
+                // 则自动识别 audiocpp 后端，否则复位缺省（残留 audiocpp 会拦住
+                // sherpa 模型的识别）。
+                let gguf = crate::audiocpp::asr_families::detect_gguf_in_dir(path);
+                asr.backend = gguf.map(|_| "audiocpp".to_string());
+                asr.engine_path = None;
+            }
+            // audiocpp 无热词能力：切到 audiocpp 时清空热词，避免残留配置误导
+            // （patch 层也会过滤，双保险）；切回 sherpa 时用户重新配置。
+            if asr.backend.as_deref() == Some("audiocpp") {
+                asr.hotwords = None;
             }
             // 切换模型目录时重置文件级覆盖：旧模型的手写覆盖（encoder/decoder/joiner/
             // tokens）与族专属参数（language/use_itn）会污染新模型，交回 resolve 自动探测
@@ -1777,6 +1798,68 @@ mod tests {
             assert_eq!(a.tokens, None);
             assert_eq!(a.language, None);
             assert_eq!(a.use_itn, None);
+        });
+    }
+
+    #[test]
+    fn test_set_selected_asr_audiocpp_backend_and_hotwords() {
+        run_with_temp_home(|home| {
+            // 先切 sherpa Qwen3-ASR 并配上热词
+            let sherpa = home.join("models/sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25");
+            set_selected_model(ModelType::Asr, &sherpa).unwrap();
+            update_settings(|cfg| {
+                let asr = cfg.asr.get_or_insert_with(Default::default);
+                asr.hotwords = Some("甲乙方 违约金".to_string());
+            })
+            .unwrap();
+            let cfg = settings::load_settings().unwrap().unwrap();
+            let a = cfg.asr.as_ref().unwrap();
+            assert_eq!(
+                a.model_type,
+                Some(crate::asr::config::AsrModelKind::Qwen3Asr)
+            );
+            assert_eq!(a.backend, None, "sherpa 条目后端归位缺省");
+
+            // 切 audiocpp Qwen3-ASR：backend 写 audiocpp + 热词清空（上游无热词能力）
+            let acpp = home.join("models/qwen3-asr-0.6b-audiocpp");
+            set_selected_model(ModelType::Asr, &acpp).unwrap();
+            let cfg = settings::load_settings().unwrap().unwrap();
+            let a = cfg.asr.as_ref().unwrap();
+            assert_eq!(
+                a.model_type,
+                Some(crate::asr::config::AsrModelKind::Qwen3Asr)
+            );
+            assert_eq!(a.backend.as_deref(), Some("audiocpp"));
+            assert_eq!(a.hotwords, None, "切到 audiocpp 应清空热词");
+            assert_eq!(a.engine_path, None);
+
+            // 切回 sherpa：backend 复位 None（热词不恢复，用户重新配置）
+            set_selected_model(ModelType::Asr, &sherpa).unwrap();
+            let cfg = settings::load_settings().unwrap().unwrap();
+            assert_eq!(cfg.asr.as_ref().and_then(|a| a.backend.as_deref()), None);
+
+            // external 目录：含 audiocpp 族 GGUF → 自动识别 audiocpp 后端
+            let ext = home.join("models-local/my-qwen3-asr");
+            std::fs::create_dir_all(&ext).unwrap();
+            std::fs::write(
+                ext.join(crate::audiocpp::asr_families::QWEN3_ASR_06B.gguf_file),
+                b"x",
+            )
+            .unwrap();
+            set_selected_model(ModelType::Asr, &ext).unwrap();
+            let cfg = settings::load_settings().unwrap().unwrap();
+            assert_eq!(
+                cfg.asr.as_ref().and_then(|a| a.backend.as_deref()),
+                Some("audiocpp"),
+                "external 目录含 GGUF 应自动识别 audiocpp"
+            );
+
+            // external 目录无 GGUF → 后端复位缺省（残留 audiocpp 会拦住 sherpa 识别）
+            let ext2 = home.join("models-local/plain-sherpa");
+            std::fs::create_dir_all(&ext2).unwrap();
+            set_selected_model(ModelType::Asr, &ext2).unwrap();
+            let cfg = settings::load_settings().unwrap().unwrap();
+            assert_eq!(cfg.asr.as_ref().and_then(|a| a.backend.as_deref()), None);
         });
     }
 
