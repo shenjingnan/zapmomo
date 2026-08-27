@@ -90,6 +90,13 @@ export const ASR_PRESETS = [
     sizeBytes: 878_702_423,
     kind: "qwen3_asr",
   },
+  {
+    id: "asr-qwen3-0.6b-audiocpp",
+    name: "Qwen3-ASR 0.6B (audio.cpp)",
+    tagline: "29 语言自动识别 · Metal 加速 · 不支持热词 · 包体约 1.1GB",
+    sizeBytes: 1_151_272_416,
+    kind: "qwen3_asr",
+  },
 ] as const;
 
 export interface AsrModelSwitchState {

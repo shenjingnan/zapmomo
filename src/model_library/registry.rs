@@ -203,6 +203,8 @@ pub fn required_files_for_role(role: &str) -> &'static [&'static str] {
         // 离线 Qwen3-ASR：conv_frontend + 裸名 int8 二件 + tokenizer 三文件
         // （has_required_files 是 is_file 语义，tokenizer 目录不能作条目），先于通配
         "asr-qwen3" => &crate::asr::config::QWEN3_REQUIRED_FILES,
+        // audiocpp Qwen3-ASR：单文件 GGUF，先于 asr-* 通配
+        "asr-audiocpp-qwen3-06b" => &[crate::audiocpp::asr_families::QWEN3_ASR_06B.gguf_file],
         // 所有 streaming zipformer ASR（含每个 ASR 的唯一 role）共用同一组 4 文件
         r if r == "asr" || r.starts_with("asr-") => &crate::asr::config::REQUIRED_FILES,
         "punctuation" => &crate::asr::config::PUNCT_REQUIRED_FILES,
@@ -247,8 +249,8 @@ mod tests {
         let models = all_models();
         assert_eq!(
             models.len(),
-            23,
-            "应为 7 个首批（含 1 KWS）+ 5 个 ASR + 2 个新 TTS + 3 个新 ASR + 2 个流式 Paraformer + 2 个 Kokoro TTS + 1 个 Qwen3-ASR + 1 个 audiocpp PocketTTS + 1 个 audiocpp OmniVoice + 1 个 audiocpp VoxCPM2 + 2 个 Qwen3-TTS（LLM 条目已随本地推理移除）"
+            24,
+            "应为 7 个首批（含 1 KWS）+ 5 个 ASR + 2 个新 TTS + 3 个新 ASR + 2 个流式 Paraformer + 2 个 Kokoro TTS + 1 个 Qwen3-ASR + 1 个 audiocpp PocketTTS + 1 个 audiocpp OmniVoice + 1 个 audiocpp VoxCPM2 + 2 个 Qwen3-TTS + 1 个 audiocpp Qwen3-ASR（LLM 条目已随本地推理移除）"
         );
         assert!(
             models
@@ -352,6 +354,11 @@ mod tests {
         assert!(!q3.contains(&"tokenizer"), "目录不能作完整性条目");
         // 回归：既有 streaming zipformer role 仍为 4 件套（不被新精确 arm 吞掉）
         assert_eq!(required_files_for_role("asr-zh-14m").len(), 4);
+        // audiocpp Qwen3-ASR：单文件 GGUF（families 常量单源），先于 asr-* 通配
+        assert_eq!(
+            required_files_for_role("asr-audiocpp-qwen3-06b"),
+            &[crate::audiocpp::asr_families::QWEN3_ASR_06B.gguf_file]
+        );
         // Qwen3-TTS 两尺寸：钉死各自 gguf 主文件名（families 常量单源）
         assert_eq!(
             required_files_for_role("tts-audiocpp-qwen3-06b"),

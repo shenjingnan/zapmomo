@@ -88,6 +88,41 @@ impl AsrModelKind {
     }
 }
 
+/// ASR 引擎后端（镜像 `crate::tts::config::TtsBackendKind` 的正交语义：
+/// kind 表达模型族、backend 表达运行时）。
+///
+/// - Sherpa（缺省）：sherpa-onnx 进程内引擎（现状全部 5 个族）；
+/// - Audiocpp：audio.cpp sidecar 进程（GGUF + Metal），当前仅 Qwen3Asr 可查
+///   （见 `crate::audiocpp::asr_families`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AsrBackendKind {
+    /// sherpa-onnx 进程内引擎（缺省，老配置无 backend 字段时的行为）
+    #[default]
+    Sherpa,
+    /// audio.cpp sidecar 进程（audiocpp_server，OpenAI 风格 HTTP）
+    Audiocpp,
+}
+
+impl AsrBackendKind {
+    /// snake_case 字符串（配置/JSON 直传）。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Sherpa => "sherpa",
+            Self::Audiocpp => "audiocpp",
+        }
+    }
+
+    /// 解析 snake_case 字符串（与 `AsrModelKind::parse_str` 同款命名）。
+    pub fn parse_str(s: &str) -> Option<Self> {
+        match s {
+            "sherpa" => Some(Self::Sherpa),
+            "audiocpp" => Some(Self::Audiocpp),
+            _ => None,
+        }
+    }
+}
+
 /// SenseVoice 主模型默认文件名（注册 int8 变体
 /// `sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17`；fp32 包 999MB，桌面伙伴不划算）。
 pub const SENSEVOICE_MODEL: &str = "model.int8.onnx";
@@ -167,6 +202,10 @@ pub struct ResolvedAsrConfig {
     pub enabled: bool,
     /// 模型类型（决定引擎构造分支；默认 Zipformer，老配置按目录探测兜底）
     pub model_type: AsrModelKind,
+    /// 引擎后端（sherpa 进程内 / audiocpp sidecar；默认 Sherpa）
+    pub backend: AsrBackendKind,
+    /// audiocpp 引擎二进制覆盖路径（开发/调试用；None = locator 自动定位）
+    pub engine_path: Option<PathBuf>,
     pub model_dir: PathBuf,
     /// SenseVoice 主模型 `model.onnx` / Qwen3-ASR 卷积前端 `conv_frontend.onnx`
     /// （whisper/zipformer 为 None）
@@ -213,6 +252,8 @@ impl Default for ResolvedAsrConfig {
         Self {
             enabled: false,
             model_type: AsrModelKind::Zipformer,
+            backend: AsrBackendKind::Sherpa,
+            engine_path: None,
             model: None,
             language: None,
             use_itn: None,
@@ -508,6 +549,52 @@ pub fn asr_files_present(model_dir: &Path) -> bool {
     asr_files_present_for_kind(model_dir, detect_kind_from_dir(model_dir))
 }
 
+/// ASR 就绪预检（backend 感知的单一权威入口，镜像 `tts::config::preflight`）。
+///
+/// - sherpa：按 `asr_files_present_for_kind` 探测式校验；
+/// - audiocpp：按 `audiocpp::asr_families` 描述表的 `required_files`（单 GGUF）
+///   逐文件校验，hint 用描述表的 `registry_hint`；sherpa-only kind 配 audiocpp
+///   后端的非法组合报错（resolve 已 fail-fast，此处双保险）。
+pub fn preflight(cfg: &ResolvedAsrConfig) -> Result<(), String> {
+    if models_present(cfg) {
+        return Ok(());
+    }
+    let hint = match cfg.backend {
+        AsrBackendKind::Sherpa => "请运行 `zapmomo asr install-model` 下载模型".to_string(),
+        AsrBackendKind::Audiocpp => {
+            match crate::audiocpp::asr_families::asr_family_desc(cfg.model_type) {
+                Some(desc) => format!("请运行 `{hint}` 下载模型", hint = desc.registry_hint),
+                None => {
+                    return Err(format!(
+                        "模型类型 {} 不支持 audiocpp 后端（请检查 [asr].model_type 与 backend 组合）",
+                        cfg.model_type.as_str()
+                    ));
+                }
+            }
+        }
+    };
+    Err(format!(
+        "缺少模型文件（目录: {}）。{hint}",
+        cfg.model_dir.display()
+    ))
+}
+
+/// 模型文件是否齐备（backend 感知；供 `get_asr_config` 的 models_present 等展示路径）。
+pub fn models_present(cfg: &ResolvedAsrConfig) -> bool {
+    match cfg.backend {
+        AsrBackendKind::Sherpa => asr_files_present_for_kind(&cfg.model_dir, cfg.model_type),
+        AsrBackendKind::Audiocpp => {
+            match crate::audiocpp::asr_families::asr_family_desc(cfg.model_type) {
+                Some(desc) => desc
+                    .required_files
+                    .iter()
+                    .all(|f| cfg.model_dir.join(f).is_file()),
+                None => false,
+            }
+        }
+    }
+}
+
 /// 解析模型目录：CLI > settings > 默认。
 fn resolve_model_dir(
     settings: Option<&AsrSettings>,
@@ -557,11 +644,36 @@ pub fn resolve(
         resolve_file(value, &detected, &cfg.model_dir)
     };
 
-    // 模型类型来源：settings 显式配置 > 目录内容探测（老用户无字段 → Zipformer，零行为变化）
-    let kind = s
-        .and_then(|s| s.model_type)
-        .unwrap_or_else(|| detect_kind_from_dir(&cfg.model_dir));
+    // 引擎后端来源：settings 显式配置 > 缺省 Sherpa（老配置无字段 → 零行为变化）
+    cfg.backend = match s.and_then(|s| s.backend.as_deref()) {
+        Some(v) => AsrBackendKind::parse_str(v)
+            .ok_or_else(|| format!("未知 ASR 后端: {v}（支持 sherpa / audiocpp）"))?,
+        None => AsrBackendKind::default(),
+    };
+
+    // 模型类型来源：settings 显式配置 >（audiocpp 后端时）GGUF 文件名探测 >
+    // 目录内容探测（老用户无字段 → Zipformer，零行为变化）。GGUF 探针仅在
+    // backend=audiocpp 时介入，不污染 sherpa 的 ONNX 探测语义。
+    let kind = s.and_then(|s| s.model_type).unwrap_or_else(|| {
+        if cfg.backend == AsrBackendKind::Audiocpp
+            && crate::audiocpp::asr_families::detect_gguf_in_dir(&cfg.model_dir).is_some()
+        {
+            AsrModelKind::Qwen3Asr
+        } else {
+            detect_kind_from_dir(&cfg.model_dir)
+        }
+    });
     cfg.model_type = kind;
+
+    // 非法组合 fail-fast：audiocpp 后端当前仅 qwen3_asr 可查（asr_families 表）
+    if cfg.backend == AsrBackendKind::Audiocpp
+        && crate::audiocpp::asr_families::asr_family_desc(kind).is_none()
+    {
+        return Err(format!(
+            "模型类型 {} 不支持 audiocpp 后端（请检查 [asr].model_type 与 backend 组合）",
+            kind.as_str()
+        ));
+    }
     cfg.language = s.and_then(|s| s.language.clone());
     cfg.use_itn = s.and_then(|s| s.use_itn);
 
@@ -597,27 +709,49 @@ pub fn resolve(
             cfg.tokens = file("tokens", &format!("{prefix}-tokens.txt"))?;
         }
         AsrModelKind::Qwen3Asr => {
-            // 裸名 int8 探测与 paraformer 同款；conv_frontend 固定名不提供覆盖
-            // （包内无 int8 变体，同 SenseVoice 主模型取舍）。tokens 字段承载
-            // tokenizer 目录（settings.tokens 可覆盖目录名），不能用 `file()` 闭包
-            // ——那是 `{prefix}-` 文件名探测。
-            cfg.model = Some(cfg.model_dir.join(QWEN3_CONV_FRONTEND));
-            let enc = detect_bare_int8_onnx(&cfg.model_dir, "encoder");
-            let dec = detect_bare_int8_onnx(&cfg.model_dir, "decoder");
-            cfg.encoder = resolve_file(s.and_then(|s| s.encoder.as_deref()), &enc, &cfg.model_dir)?;
-            cfg.decoder = resolve_file(s.and_then(|s| s.decoder.as_deref()), &dec, &cfg.model_dir)?;
-            cfg.tokens = resolve_file(
-                s.and_then(|s| s.tokens.as_deref()),
-                QWEN3_TOKENIZER_DIR,
-                &cfg.model_dir,
-            )?;
+            if cfg.backend == AsrBackendKind::Audiocpp {
+                // audiocpp 后端：GGUF 定位由 asr_families 表完成（model_dir + gguf_file），
+                // 不消费 ONNX 文件字段（对齐 tts resolve 的 audiocpp 族取舍：
+                // encoder/decoder/tokens 保留默认值但不参与引擎构造）
+                cfg.model = None;
+            } else {
+                // 裸名 int8 探测与 paraformer 同款；conv_frontend 固定名不提供覆盖
+                // （包内无 int8 变体，同 SenseVoice 主模型取舍）。tokens 字段承载
+                // tokenizer 目录（settings.tokens 可覆盖目录名），不能用 `file()` 闭包
+                // ——那是 `{prefix}-` 文件名探测。
+                cfg.model = Some(cfg.model_dir.join(QWEN3_CONV_FRONTEND));
+                let enc = detect_bare_int8_onnx(&cfg.model_dir, "encoder");
+                let dec = detect_bare_int8_onnx(&cfg.model_dir, "decoder");
+                cfg.encoder =
+                    resolve_file(s.and_then(|s| s.encoder.as_deref()), &enc, &cfg.model_dir)?;
+                cfg.decoder =
+                    resolve_file(s.and_then(|s| s.decoder.as_deref()), &dec, &cfg.model_dir)?;
+                cfg.tokens = resolve_file(
+                    s.and_then(|s| s.tokens.as_deref()),
+                    QWEN3_TOKENIZER_DIR,
+                    &cfg.model_dir,
+                )?;
+            }
         }
     }
 
     cfg.enabled = s.and_then(|s| s.enabled).unwrap_or(false);
-    cfg.provider = s
-        .and_then(|s| s.provider.clone())
-        .unwrap_or_else(|| "cpu".to_string());
+    // 推理设备：用户显式配置优先；缺省时 audiocpp 后端按模型族取默认（metal）
+    cfg.provider = s.and_then(|s| s.provider.clone()).unwrap_or_else(|| {
+        match cfg.backend {
+            AsrBackendKind::Audiocpp => {
+                crate::audiocpp::asr_families::asr_family_desc(cfg.model_type)
+                    .map(|d| d.default_provider)
+                    .unwrap_or("cpu")
+            }
+            AsrBackendKind::Sherpa => "cpu",
+        }
+        .to_string()
+    });
+    cfg.engine_path = match s.and_then(|s| s.engine_path.as_deref()) {
+        Some(v) => Some(PathBuf::from(resolve_env_ref(v)?)),
+        None => None,
+    };
     cfg.num_threads = s.and_then(|s| s.num_threads).unwrap_or(2);
     cfg.chunk_size = s.and_then(|s| s.chunk_size).unwrap_or(3200);
     cfg.sample_rate = s.and_then(|s| s.sample_rate).unwrap_or(16000);
@@ -711,8 +845,12 @@ impl AsrParamsPatch {
         //   （qwen3 是离线族中唯一支持热词的，build 层转逗号格式嵌 prompt）
         // - language/use_itn 为 SenseVoice/Whisper 概念，Qwen3-ASR
         //   （29 语言自动识别 + 原生标点）跳过
+        // - audiocpp 后端：hotwords 跳过（audio.cpp qwen3_asr 无 hotwords 选项，
+        //   前端已隐藏，这里兜底）；language 放行（映射请求 language，量化下
+        //   auto 语种识别不可靠时的显式兜底，上游文档明示）
         let paraformer = asr.model_type == Some(AsrModelKind::Paraformer);
         let qwen3 = asr.model_type == Some(AsrModelKind::Qwen3Asr);
+        let audiocpp = asr.backend.as_deref() == Some(AsrBackendKind::Audiocpp.as_str());
 
         if let Some(v) = self.num_threads {
             asr.num_threads = Some(v);
@@ -738,7 +876,7 @@ impl AsrParamsPatch {
             asr.blank_penalty = Some(v);
         }
         if let Some(v) = &self.hotwords
-            && !paraformer
+            && !(paraformer || audiocpp)
         {
             asr.hotwords = if v.trim().is_empty() {
                 None
@@ -750,7 +888,7 @@ impl AsrParamsPatch {
             asr.enable_punctuation = Some(v);
         }
         if let Some(v) = &self.language
-            && !qwen3
+            && !(qwen3 && !audiocpp)
         {
             asr.language = if v.trim().is_empty() {
                 None
@@ -1754,5 +1892,178 @@ mod tests {
         // 空目录 / 不存在 → false
         assert!(!asr_files_present(tempfile::tempdir().unwrap().path()));
         assert!(!asr_files_present(Path::new("/nonexistent-asr")));
+    }
+
+    // ---- AsrBackendKind / audiocpp 后端 ----
+
+    #[test]
+    fn test_backend_kind_str_and_semantics() {
+        for (kind, s) in [
+            (AsrBackendKind::Sherpa, "sherpa"),
+            (AsrBackendKind::Audiocpp, "audiocpp"),
+        ] {
+            assert_eq!(kind.as_str(), s);
+            assert_eq!(AsrBackendKind::parse_str(s), Some(kind));
+        }
+        assert_eq!(AsrBackendKind::parse_str("unknown"), None);
+        assert_eq!(AsrBackendKind::default(), AsrBackendKind::Sherpa);
+        assert_eq!(
+            serde_json::from_str::<AsrBackendKind>("\"audiocpp\"").unwrap(),
+            AsrBackendKind::Audiocpp
+        );
+        assert_eq!(
+            serde_json::to_string(&AsrBackendKind::Audiocpp).unwrap(),
+            "\"audiocpp\""
+        );
+    }
+
+    #[test]
+    fn test_resolve_backend_default_sherpa_and_explicit() {
+        run_with_temp_home(|_| {
+            // 缺省 sherpa（老配置无字段 → 零行为变化）
+            let cfg = resolve(None, None).unwrap();
+            assert_eq!(cfg.backend, AsrBackendKind::Sherpa);
+            assert_eq!(cfg.engine_path, None);
+
+            // 显式 audiocpp + qwen3
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(
+                dir.path()
+                    .join(crate::audiocpp::asr_families::QWEN3_ASR_06B.gguf_file),
+                b"x",
+            )
+            .unwrap();
+            let settings = AsrSettings {
+                model_dir: Some(dir.path().to_string_lossy().to_string()),
+                backend: Some("audiocpp".to_string()),
+                ..AsrSettings::default()
+            };
+            let cfg = resolve(Some(&settings), None).unwrap();
+            assert_eq!(cfg.backend, AsrBackendKind::Audiocpp);
+            assert_eq!(cfg.model_type, AsrModelKind::Qwen3Asr, "GGUF 探测命中");
+            assert_eq!(cfg.model, None, "audiocpp 不消费 ONNX 主模型字段");
+            assert_eq!(cfg.provider, "metal", "audiocpp 缺省 provider 取族表");
+
+            // 显式 provider 优先
+            let settings = AsrSettings {
+                model_dir: Some(dir.path().to_string_lossy().to_string()),
+                backend: Some("audiocpp".to_string()),
+                provider: Some("cpu".to_string()),
+                engine_path: Some("/opt/engines/audiocpp_server".to_string()),
+                ..AsrSettings::default()
+            };
+            let cfg = resolve(Some(&settings), None).unwrap();
+            assert_eq!(cfg.provider, "cpu");
+            assert_eq!(
+                cfg.engine_path.as_deref(),
+                Some(Path::new("/opt/engines/audiocpp_server"))
+            );
+        });
+    }
+
+    #[test]
+    fn test_resolve_backend_invalid_and_combo_error() {
+        run_with_temp_home(|_| {
+            // 非法 backend 值
+            let settings = AsrSettings {
+                backend: Some("mystery".to_string()),
+                ..AsrSettings::default()
+            };
+            let err = resolve(Some(&settings), None).unwrap_err();
+            assert!(err.contains("未知 ASR 后端"), "err: {err}");
+
+            // audiocpp + sherpa-only kind 组合报错（fail-fast）
+            let settings = AsrSettings {
+                backend: Some("audiocpp".to_string()),
+                model_type: Some(AsrModelKind::Zipformer),
+                ..AsrSettings::default()
+            };
+            let err = resolve(Some(&settings), None).unwrap_err();
+            assert!(err.contains("不支持 audiocpp 后端"), "err: {err}");
+        });
+    }
+
+    #[test]
+    fn test_resolve_gguf_probe_only_under_audiocpp_backend() {
+        run_with_temp_home(|_| {
+            // 只含 GGUF 的目录：backend 缺省（sherpa）→ 仍落 Zipformer 兜底
+            // （GGUF 探针不介入 sherpa 路径，行为零变化）
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(
+                dir.path()
+                    .join(crate::audiocpp::asr_families::QWEN3_ASR_06B.gguf_file),
+                b"x",
+            )
+            .unwrap();
+            let settings = AsrSettings {
+                model_dir: Some(dir.path().to_string_lossy().to_string()),
+                ..AsrSettings::default()
+            };
+            let cfg = resolve(Some(&settings), None).unwrap();
+            assert_eq!(cfg.model_type, AsrModelKind::Zipformer);
+        });
+    }
+
+    #[test]
+    fn test_preflight_and_models_present_audiocpp() {
+        run_with_temp_home(|_| {
+            let dir = tempfile::tempdir().unwrap();
+            let settings = AsrSettings {
+                model_dir: Some(dir.path().to_string_lossy().to_string()),
+                model_type: Some(AsrModelKind::Qwen3Asr),
+                backend: Some("audiocpp".to_string()),
+                ..AsrSettings::default()
+            };
+            let cfg = resolve(Some(&settings), None).unwrap();
+            // GGUF 缺失 → preflight 报 registry hint
+            assert!(!models_present(&cfg));
+            let err = preflight(&cfg).unwrap_err();
+            assert!(err.contains("缺少模型文件"), "err: {err}");
+            assert!(err.contains("asr-qwen3-0.6b-audiocpp"), "err: {err}");
+
+            // GGUF 就位 → 通过
+            std::fs::write(
+                dir.path()
+                    .join(crate::audiocpp::asr_families::QWEN3_ASR_06B.gguf_file),
+                b"x",
+            )
+            .unwrap();
+            let cfg = resolve(Some(&settings), None).unwrap();
+            assert!(models_present(&cfg));
+            preflight(&cfg).unwrap();
+        });
+    }
+
+    #[test]
+    fn test_asr_params_patch_audiocpp_rules() {
+        // audiocpp 后端：热词不落盘（上游无此能力）；language 放行（映射请求 language）
+        let mut asr = AsrSettings {
+            model_type: Some(AsrModelKind::Qwen3Asr),
+            backend: Some("audiocpp".to_string()),
+            ..AsrSettings::default()
+        };
+        let patch = AsrParamsPatch {
+            num_threads: Some(4),
+            hotwords: Some("尼日尔河 ZapMomo".to_string()),
+            language: Some("zh".to_string()),
+            ..AsrParamsPatch::default()
+        };
+        patch.apply_to(&mut asr).unwrap();
+        assert_eq!(asr.num_threads, Some(4));
+        assert_eq!(asr.hotwords, None, "audiocpp 后端热词不落盘");
+        assert_eq!(
+            asr.language.as_deref(),
+            Some("zh"),
+            "audiocpp 后端 language 放行"
+        );
+
+        // sherpa qwen3 回归：热词落盘、language 不落盘（既有行为不变）
+        let mut sherpa = AsrSettings {
+            model_type: Some(AsrModelKind::Qwen3Asr),
+            ..AsrSettings::default()
+        };
+        patch.apply_to(&mut sherpa).unwrap();
+        assert_eq!(sherpa.hotwords.as_deref(), Some("尼日尔河 ZapMomo"));
+        assert_eq!(sherpa.language, None);
     }
 }
