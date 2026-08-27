@@ -43,7 +43,9 @@ pub struct AnthropicProvider {
     system_prompt: String,
     /// 是否在末位消息打 cache_control 断点（prompt caching）
     prompt_cache: bool,
-    /// extended thinking 力度（None = API 默认）；开启后与采样参数互斥
+    /// 是否启用思考；关闭时不发任何 thinking/effort 字段
+    thinking: bool,
+    /// 思考力度（thinking 开启时生效；None = medium 内置缺省）。开启后与采样参数互斥
     reasoning_effort: Option<ReasoningEffort>,
     runtime: tokio::runtime::Runtime,
 }
@@ -93,18 +95,35 @@ impl AnthropicProvider {
             format!("anthropic::{model}")
         };
 
-        // extended thinking 力度：非法值快速失败（构造期中文报错，而非首请求 400）
-        let reasoning_effort = config
-            .reasoning_effort
-            .as_deref()
-            .map(parse_reasoning_effort)
-            .transpose()?;
+        // thinking 力度：非法值快速失败（构造期中文报错，而非首请求 400）。
+        // 仅在开关开启时解析；关闭时保留原始配置字符串但运行时忽略（GUI 置灰保留语义）
+        let reasoning_effort = if config.thinking {
+            config
+                .reasoning_effort
+                .as_deref()
+                .map(parse_reasoning_effort)
+                .transpose()?
+        } else {
+            None
+        };
+
+        // 关闭思考对「默认开启 adaptive thinking」的模型不生效（省略 thinking 字段
+        // 等于 adaptive，Anthropic 官方行为）：提示用户该模型下无法靠关闭加速。
+        // 彻底关闭需显式发送 thinking:{"type":"disabled"}，genai 0.6 尚不支持表达，
+        // 待上游支持后在此接入
+        if !config.thinking && defaults_to_adaptive_thinking(&model) {
+            tracing::warn!(
+                "模型 {model} 默认开启 adaptive thinking，「关闭思考」对其不生效；\
+                 如需最快响应建议选用其他模型"
+            );
+        }
 
         Ok(Self {
             client,
             model,
             system_prompt: config.system_prompt.clone(),
             prompt_cache: config.prompt_cache,
+            thinking: config.thinking,
             reasoning_effort,
             runtime,
         })
@@ -179,18 +198,23 @@ impl AnthropicProvider {
         request
     }
 
-    /// 构建 `ChatOptions`：max_tokens 总是发送（Anthropic 必填）；
-    /// temperature/top_p 按模型能力白名单门控（开启 thinking 时互斥不发）；
-    /// 同时开启 `capture_tool_calls`（End 事件取完整 tool call）与
-    /// `capture_usage`（缓存命中观测）。
+    /// 构建 `ChatOptions`：max_tokens 总是发送（Anthropic 必填）；thinking 开启时
+    /// 发送 reasoning_effort（未配置档位用 medium 内置缺省）并与采样参数互斥；
+    /// 关闭时不发任何 thinking 字段（大部分模型 = 不思考）。同时开启
+    /// `capture_tool_calls`（End 事件取完整 tool call）与 `capture_usage`
+    /// （缓存命中观测）。
     pub fn build_options(&self, params: &GenParams) -> ChatOptions {
         let mut options = ChatOptions::default()
             .with_max_tokens(params.max_tokens as u32)
             .with_capture_tool_calls(true)
             .with_capture_usage(true);
-        if let Some(effort) = &self.reasoning_effort {
+        if self.thinking {
             // 开启 thinking 时不可自定义采样参数（Anthropic 要求 temperature=1），互斥
-            options = options.with_reasoning_effort(effort.clone());
+            let effort = self
+                .reasoning_effort
+                .clone()
+                .unwrap_or(ReasoningEffort::Medium);
+            options = options.with_reasoning_effort(effort);
         } else if supports_sampling_params(&self.model) {
             options = options
                 .with_temperature(params.temperature as f64)
@@ -291,6 +315,14 @@ impl AnthropicProvider {
         }
         Ok(finish)
     }
+}
+
+/// 「关闭思考也不生效」的模型名单：这些模型省略 thinking 字段时默认运行 adaptive
+/// thinking（Anthropic 官方行为），无法靠「不发字段」关掉。
+/// 只收录官方文档明确证实的型号（同代新模型未证实的先不警告，宁缺毋滥）。
+fn defaults_to_adaptive_thinking(model: &str) -> bool {
+    let name = model.rsplit("::").next().unwrap_or(model);
+    name.starts_with("claude-opus-5")
 }
 
 /// 解析 reasoning_effort 配置值：非法值构造期快速失败（中文报错），而非首请求 400。
@@ -421,6 +453,7 @@ mod tests {
             enabled: true,
             cli_tools: false,
             prompt_cache: true,
+            thinking: false,
             reasoning_effort: None,
             provider: "anthropic".to_string(),
             system_prompt: "测试系统提示".to_string(),
@@ -733,17 +766,22 @@ mod tests {
     #[test]
     fn test_new_invalid_reasoning_effort() {
         let mut cfg = test_config(None, Some("claude-sonnet-4-6".to_string()));
+        cfg.thinking = true;
         cfg.reasoning_effort = Some("extreme".to_string());
         let err = AnthropicProvider::new(&cfg).err().unwrap();
         assert!(
             err.to_string().contains("reasoning_effort"),
             "实际错误：{err}"
         );
+        // 开关关闭时非法值不校验（运行时忽略）
+        cfg.thinking = false;
+        assert!(AnthropicProvider::new(&cfg).is_ok());
     }
 
     #[test]
     fn test_build_options_reasoning_disables_sampling() {
         let mut cfg = test_config(None, Some("claude-sonnet-4-6".to_string()));
+        cfg.thinking = true;
         cfg.reasoning_effort = Some("low".to_string());
         let provider = AnthropicProvider::new(&cfg).unwrap();
         let options = provider.build_options(&GenParams::default());
@@ -754,6 +792,44 @@ mod tests {
         ));
         assert_eq!(options.temperature, None);
         assert_eq!(options.top_p, None);
+
+        // 开关开、未配档位：medium 内置缺省
+        let mut cfg = test_config(None, Some("claude-sonnet-4-6".to_string()));
+        cfg.thinking = true;
+        let provider = AnthropicProvider::new(&cfg).unwrap();
+        let options = provider.build_options(&GenParams::default());
+        assert!(matches!(
+            options.reasoning_effort,
+            Some(ReasoningEffort::Medium)
+        ));
+    }
+
+    #[test]
+    fn test_thinking_off_sends_nothing_and_keeps_sampling() {
+        // 关闭思考：不发任何 effort 字段；haiku 在采样白名单内，采样参数照发
+        let mut cfg = test_config(None, Some("claude-haiku-4-5".to_string()));
+        cfg.thinking = false;
+        cfg.reasoning_effort = Some("high".to_string()); // 保留但不生效
+        let provider = AnthropicProvider::new(&cfg).unwrap();
+        let options = provider.build_options(&GenParams::default());
+        assert!(options.reasoning_effort.is_none());
+        assert_eq!(
+            options.temperature,
+            Some(GenParams::default().temperature as f64)
+        );
+    }
+
+    #[test]
+    fn test_opus5_thinking_off_warns_but_constructs() {
+        // opus-5 默认开启 adaptive thinking：关闭构造成功（只是 warn 日志）
+        let mut cfg = test_config(None, Some("claude-opus-5".to_string()));
+        cfg.thinking = false;
+        cfg.reasoning_effort = None;
+        let provider = AnthropicProvider::new(&cfg).unwrap();
+        let options = provider.build_options(&GenParams::default());
+        // opus-5 不在采样白名单，关闭思考也不发采样参数
+        assert!(options.reasoning_effort.is_none());
+        assert_eq!(options.temperature, None);
     }
 
     // ---------- 流式 mock 测试 ----------
@@ -913,6 +989,7 @@ mod tests {
             Some(format!("http://127.0.0.1:{port}")),
             Some("claude-sonnet-4-6".to_string()),
         );
+        cfg.thinking = true;
         cfg.reasoning_effort = Some("low".to_string());
         let mut provider = AnthropicProvider::new(&cfg).unwrap();
         let input = vec![
@@ -935,6 +1012,34 @@ mod tests {
         // prompt caching：仅末位消息带 ephemeral 断点
         assert!(!body["messages"][0].to_string().contains("ephemeral"));
         assert!(body["messages"][2].to_string().contains("ephemeral"));
+    }
+
+    #[test]
+    fn test_thinking_off_request_body() {
+        // 关闭思考 + 开采样：请求体不含 thinking/effort，含采样参数
+        let (port, rx) = spawn_mock(TEXT_STREAM, 200);
+        let mut cfg = test_config(
+            Some(format!("http://127.0.0.1:{port}")),
+            Some("claude-haiku-4-5".to_string()),
+        );
+        cfg.thinking = false;
+        cfg.reasoning_effort = Some("high".to_string()); // 保留但不生效
+        let mut provider = AnthropicProvider::new(&cfg).unwrap();
+        let (_items, result) = collect_generate(
+            &mut provider,
+            &user_input("你好"),
+            &[],
+            Arc::new(AtomicBool::new(false)),
+        );
+        assert!(result.is_ok());
+
+        let req = rx.recv().unwrap();
+        let body: serde_json::Value = serde_json::from_str(&req.body).unwrap();
+        assert!(body.get("thinking").is_none());
+        assert!(body.get("output_config").is_none());
+        assert!(body["temperature"].is_number());
+        // prompt caching 不受开关影响
+        assert!(body["messages"][0].to_string().contains("ephemeral"));
     }
 
     #[test]

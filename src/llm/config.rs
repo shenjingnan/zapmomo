@@ -15,7 +15,9 @@ pub struct ResolvedLlmConfig {
     pub cli_tools: bool,
     /// 是否启用 prompt caching（仅 anthropic provider 生效）
     pub prompt_cache: bool,
-    /// extended thinking 力度（仅 anthropic provider 生效；None = API 默认）
+    /// 是否启用思考（extended thinking 开关；仅 anthropic provider 生效）
+    pub thinking: bool,
+    /// 思考力度（仅 anthropic provider 生效；thinking 关闭时保留但忽略）
     pub reasoning_effort: Option<String>,
     /// provider 标识（"openai" / "llamacpp-server" / "anthropic"）
     pub provider: String,
@@ -40,12 +42,19 @@ pub fn default_system_prompt() -> String {
 /// 合并 settings 得到最终配置。默认 provider 为 "openai"。
 pub fn resolve(settings: Option<&LlmSettings>) -> Result<ResolvedLlmConfig, String> {
     let defaults = GenParams::default();
+    // thinking 缺省值按「是否配置了推理强度」推断：配过 effort ≈ 想用思考；
+    // 都没配 → 关闭（语音场景延迟优先）。避免硬编码 false 静默破坏已配置用户
+    let reasoning_effort = settings.and_then(|s| s.reasoning_effort.clone());
+    let thinking = settings
+        .and_then(|s| s.thinking)
+        .unwrap_or_else(|| reasoning_effort.is_some());
 
     Ok(ResolvedLlmConfig {
         enabled: settings.and_then(|s| s.enabled).unwrap_or(false),
         cli_tools: settings.and_then(|s| s.cli_tools).unwrap_or(false),
         prompt_cache: settings.and_then(|s| s.prompt_cache).unwrap_or(true),
-        reasoning_effort: settings.and_then(|s| s.reasoning_effort.clone()),
+        thinking,
+        reasoning_effort,
         provider: settings
             .and_then(|s| s.provider.clone())
             .unwrap_or_else(|| "openai".to_string()),
@@ -133,6 +142,32 @@ mod tests {
             err.to_string().contains("不支持的 LLM provider"),
             "实际错误：{err}"
         );
+    }
+
+    #[test]
+    fn test_thinking_default_inference() {
+        // 都没配：关闭（语音场景延迟优先）
+        let cfg = resolve(None).unwrap();
+        assert!(!cfg.thinking);
+        assert!(cfg.reasoning_effort.is_none());
+        // 只配力度未配开关：推断为开启（避免静默破坏已配置用户）
+        let s = LlmSettings {
+            reasoning_effort: Some("low".to_string()),
+            ..Default::default()
+        };
+        let cfg = resolve(Some(&s)).unwrap();
+        assert!(cfg.thinking);
+        assert_eq!(cfg.reasoning_effort.as_deref(), Some("low"));
+        // 显式配置优先于推断
+        let s = LlmSettings {
+            thinking: Some(false),
+            reasoning_effort: Some("high".to_string()),
+            ..Default::default()
+        };
+        let cfg = resolve(Some(&s)).unwrap();
+        assert!(!cfg.thinking);
+        // 开关关闭时力度仍保留（运行时忽略）
+        assert_eq!(cfg.reasoning_effort.as_deref(), Some("high"));
     }
 
     #[test]

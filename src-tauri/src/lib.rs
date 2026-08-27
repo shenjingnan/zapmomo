@@ -1461,6 +1461,10 @@ struct LlmConfigInfo {
     /// 前端默认 password 圆点展示，用户点小眼睛才显式明文）。
     api_key: Option<String>,
     model: Option<String>,
+    /// 是否启用思考（已 resolve 缺省推断；仅 anthropic provider 生效）
+    thinking: bool,
+    /// 思考力度（thinking 关闭时保留原值但运行时忽略）
+    reasoning_effort: Option<String>,
 }
 
 /// 加载状态事件载荷。
@@ -1537,6 +1541,8 @@ fn get_llm_config(state: State<'_, LlmState>) -> Result<LlmConfigInfo, String> {
         base_url: cfg.base_url,
         api_key: cfg.api_key,
         model: cfg.model,
+        thinking: cfg.thinking,
+        reasoning_effort: cfg.reasoning_effort,
     })
 }
 

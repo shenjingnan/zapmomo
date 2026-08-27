@@ -599,8 +599,13 @@ pub struct LlmSettings {
     /// 仅 provider = "anthropic" 时生效
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_cache: Option<bool>,
-    /// extended thinking 力度（"low" / "medium" / "high" / "max"），缺省不设置
-    /// （用 API 默认）；仅 provider = "anthropic" 时生效。开启后不可自定义采样参数
+    /// 是否启用思考（extended thinking 开关），缺省按「是否配置了推理强度」推断：
+    /// 未显式配置时，配过 reasoning_effort 视为 true，否则 false（最快响应）。
+    /// 仅 provider = "anthropic" 时生效
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<bool>,
+    /// 思考力度（"low" / "medium" / "high" / "max"），仅 thinking 生效时发送。
+    /// 开关关闭时该值仍持久化，但运行时忽略；仅 provider = "anthropic" 时生效
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
     /// provider 标识，缺省 "openai"（OpenAI 兼容 API）；可选 "anthropic"（原生 Messages API）

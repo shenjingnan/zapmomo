@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { LlmCoreConfig } from "@/components/llm/LlmCoreConfig";
 import { LlmRunControl } from "@/components/llm/LlmRunControl";
 import { LlmSystemPrompt } from "@/components/llm/LlmSystemPrompt";
+import { LlmThinkingConfig } from "@/components/llm/LlmThinkingConfig";
 
 /** AI 大脑（LLM）配置页：标题行含连接开关与状态 + 远程连接配置 + 系统提示词。 */
 export function LlmPage() {
@@ -24,6 +25,8 @@ export function LlmPage() {
       </header>
 
       <LlmCoreConfig />
+
+      <LlmThinkingConfig />
 
       <LlmSystemPrompt />
     </div>

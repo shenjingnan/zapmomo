@@ -20,6 +20,8 @@ export interface LlmState {
   setConnection: (baseUrl: string, apiKey: string | null, model: string) => Promise<void>;
   /** 保存系统提示词；失败时 rethrow */
   setSystemPrompt: (prompt: string) => Promise<void>;
+  /** 保存思考开关与推理强度（参数补丁）；失败时 rethrow */
+  setThinkingParams: (thinking: boolean, reasoningEffort?: string) => Promise<void>;
 }
 
 /**
@@ -158,6 +160,21 @@ export function useLlm(): LlmState {
     [refreshConfig],
   );
 
+  const setThinkingParams = useCallback(
+    async (thinking: boolean, reasoningEffort?: string) => {
+      try {
+        await api.setLlmParams({
+          params: { thinking, ...(reasoningEffort !== undefined ? { reasoning_effort: reasoningEffort } : {}) },
+        });
+        await refreshConfig();
+      } catch (e) {
+        setError(String(e));
+        throw e;
+      }
+    },
+    [refreshConfig],
+  );
+
   return {
     config,
     configError,
@@ -173,5 +190,6 @@ export function useLlm(): LlmState {
     stop,
     setConnection,
     setSystemPrompt,
+    setThinkingParams,
   };
 }

@@ -293,6 +293,7 @@ mod tests {
             enabled: true,
             cli_tools: false,
             prompt_cache: true,
+            thinking: false,
             reasoning_effort: None,
             provider: "openai".to_string(),
             system_prompt: "测试系统提示".to_string(),
