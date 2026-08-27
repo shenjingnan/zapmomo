@@ -1,4 +1,4 @@
-import { CircleAlert, MessageSquare, Save, Settings2 } from "lucide-react";
+import { CircleAlert, Eye, EyeOff, MessageSquare, Save, Settings2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -10,7 +10,8 @@ import { LlmTestDialog } from "./LlmTestDialog";
  * 基础配置（macOS 设置行）：远程服务连接三要素（API 地址 / API Key / 模型名）
  * + 底部「测试模型」。
  *
- * API Key 不回显明文：输入框留空表示不修改已保存的 Key；placeholder 展示掩码。
+ * API Key 以 password 圆点回填完整值（本机桌面应用，settings.toml 本身明文存储），
+ * 右侧小眼睛可切换明文查看；清空后保存即移除已保存的 Key。
  */
 export function LlmCoreConfig() {
   const { llm } = useRuntime();
@@ -18,6 +19,7 @@ export function LlmCoreConfig() {
 
   const [baseUrl, setBaseUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
+  const [showApiKey, setShowApiKey] = useState(false);
   const [model, setModel] = useState("");
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -27,6 +29,7 @@ export function LlmCoreConfig() {
   useEffect(() => {
     if (hydrated || !llm.config) return;
     setBaseUrl(llm.config.base_url ?? "");
+    setApiKey(llm.config.api_key ?? "");
     setModel(llm.config.model ?? "");
     setHydrated(true);
   }, [hydrated, llm.config]);
@@ -37,7 +40,7 @@ export function LlmCoreConfig() {
     hydrated &&
     baseUrl === (llm.config?.base_url ?? "") &&
     model === (llm.config?.model ?? "") &&
-    apiKey === "";
+    apiKey === (llm.config?.api_key ?? "");
 
   const handleSave = async () => {
     if (!baseUrl.trim()) {
@@ -51,9 +54,8 @@ export function LlmCoreConfig() {
     setSaving(true);
     setSaveError(null);
     try {
-      // apiKey 留空 = 不修改已保存的 Key
-      await llm.setConnection(baseUrl.trim(), apiKey.trim() ? apiKey.trim() : null, model.trim());
-      setApiKey("");
+      // apiKey 始终以完整值提交；空串 = 清除已保存的 Key（后端 Some("") 语义）
+      await llm.setConnection(baseUrl.trim(), apiKey.trim(), model.trim());
     } catch (e) {
       setSaveError(String(e));
     } finally {
@@ -106,19 +108,30 @@ export function LlmCoreConfig() {
           <label htmlFor="llm-api-key" className="text-sm text-text-primary">
             API Key
           </label>
-          <Input
-            id="llm-api-key"
-            type="password"
-            placeholder={
-              llm.config?.api_key_masked ? `已保存（${llm.config.api_key_masked}）` : "输入 API Key"
-            }
-            value={apiKey}
-            onChange={(e) => {
-              setSaveError(null);
-              setApiKey(e.target.value);
-            }}
-          />
-          <p className="text-xs text-text-muted">留空则不修改已保存的 Key。</p>
+          <div className="relative">
+            <Input
+              id="llm-api-key"
+              type={showApiKey ? "text" : "password"}
+              className="pr-9"
+              placeholder="输入 API Key"
+              value={apiKey}
+              onChange={(e) => {
+                setSaveError(null);
+                setApiKey(e.target.value);
+              }}
+            />
+            <button
+              type="button"
+              aria-label={showApiKey ? "隐藏 API Key" : "显示 API Key"}
+              className="absolute top-1/2 right-2.5 -translate-y-1/2 text-text-muted transition-colors hover:text-text-primary"
+              onClick={() => setShowApiKey((v) => !v)}
+            >
+              {showApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+            </button>
+          </div>
+          <p className="text-xs text-text-muted">
+            清空后保存即移除已保存的 Key（Ollama 等本地服务可留空）。
+          </p>
         </div>
 
         <div className="space-y-1.5">

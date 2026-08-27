@@ -79,7 +79,7 @@ function makeLlmConfig() {
     settings_path: "/home/user/.zapmomo/settings.toml",
     system_prompt: "你是 ZapMomo 的 AI 伙伴。",
     base_url: null as string | null,
-    api_key_masked: null as string | null,
+    api_key: null as string | null,
     model: null as string | null,
     params: { ...DEFAULT_PARAMS },
   };
@@ -90,7 +90,7 @@ let llmConfig: ReturnType<typeof makeLlmConfig>;
 /** 把 mock 配置标记为「已填写远程连接三要素」。 */
 function configureConnection() {
   llmConfig.base_url = "https://open.bigmodel.cn/api/paas/v4";
-  llmConfig.api_key_masked = "sk-***1234";
+  llmConfig.api_key = "sk-real-key-1234";
   llmConfig.model = "glm-4.7-flash";
 }
 
@@ -122,7 +122,6 @@ beforeEach(() => {
         baseUrl?: string;
         apiKey?: string | null;
         model?: string;
-        params?: Record<string, number>;
         prompt?: string;
       },
     ) => {
@@ -155,12 +154,8 @@ beforeEach(() => {
         case "set_llm_connection":
           llmConfig.base_url = args?.baseUrl ?? null;
           llmConfig.model = args?.model ?? null;
-          // apiKey 留空（null）= 不修改已保存的 Key
-          if (args?.apiKey) llmConfig.api_key_masked = "sk-***masked";
-          return Promise.resolve(undefined);
-        case "set_llm_params":
-          // 替换为新对象引用（贴近真实后端：保存后 resolve 出新 params）
-          llmConfig.params = { ...llmConfig.params, ...args?.params };
+          // apiKey 始终以完整值提交；空串 = 清除已保存的 Key
+          llmConfig.api_key = args?.apiKey || null;
           return Promise.resolve(undefined);
         case "set_llm_system_prompt":
           llmConfig.system_prompt = args?.prompt ?? "";
@@ -195,7 +190,7 @@ describe("LlmPage（AI 大脑配置）", () => {
     expect(screen.getByRole("button", { name: "测试模型" })).toBeDisabled();
   });
 
-  it("已有配置回填：API 地址/模型名填入输入框，API Key 以掩码 placeholder 展示", async () => {
+  it("已有配置回填：API 地址/模型名填入输入框，API Key 以 password 圆点回填完整值", async () => {
     configureConnection();
     renderLlmPage();
 
@@ -203,12 +198,28 @@ describe("LlmPage（AI 大脑配置）", () => {
       await screen.findByDisplayValue("https://open.bigmodel.cn/api/paas/v4"),
     ).toBeInTheDocument();
     expect(screen.getByDisplayValue("glm-4.7-flash")).toBeInTheDocument();
-    // Key 不回显明文：输入框为空，placeholder 展示掩码
+    // Key 以 password 形式回填完整值（圆点展示，不暴露明文）
     const keyInput = screen.getByLabelText("API Key");
-    expect(keyInput).toHaveValue("");
-    expect(keyInput).toHaveAttribute("placeholder", "已保存（sk-***1234）");
+    expect(keyInput).toHaveValue("sk-real-key-1234");
+    expect(keyInput).toHaveAttribute("type", "password");
     // 已配置但未连接：开关可用（点击即连接）
     expect(screen.getByRole("switch", { name: "连接开关" })).toBeEnabled();
+  });
+
+  it("小眼睛切换：点击后 API Key 明文展示，再次点击恢复圆点", async () => {
+    configureConnection();
+    const user = userEvent.setup();
+    renderLlmPage();
+
+    const keyInput = await screen.findByLabelText("API Key");
+    await waitFor(() => expect(keyInput).toHaveValue("sk-real-key-1234"));
+    expect(keyInput).toHaveAttribute("type", "password");
+
+    await user.click(screen.getByRole("button", { name: "显示 API Key" }));
+    expect(keyInput).toHaveAttribute("type", "text");
+
+    await user.click(screen.getByRole("button", { name: "隐藏 API Key" }));
+    expect(keyInput).toHaveAttribute("type", "password");
   });
 
   it("未填 API 地址保存：不调用 invoke 且显示内联错误", async () => {
@@ -235,7 +246,7 @@ describe("LlmPage（AI 大脑配置）", () => {
     expect(invokeMock).not.toHaveBeenCalledWith("set_llm_connection", expect.anything());
   });
 
-  it("填写三要素保存：调用 set_llm_connection，成功后清空 API Key 输入框", async () => {
+  it("填写三要素保存：调用 set_llm_connection，保存后输入框保持完整 Key", async () => {
     const user = userEvent.setup();
     renderLlmPage();
     await screen.findByText("AI 大脑（LLM）配置");
@@ -252,13 +263,14 @@ describe("LlmPage（AI 大脑配置）", () => {
         model: "glm-4.7-flash",
       });
     });
-    // 保存成功后 Key 输入框清空（不持久展示明文）
+    // 保存成功后 Key 仍以 password 形式留在输入框（与最新配置一致，回到 pristine）
     await waitFor(() => {
-      expect(screen.getByLabelText("API Key")).toHaveValue("");
+      expect(screen.getByRole("button", { name: "保存连接配置" })).toBeDisabled();
     });
+    expect(screen.getByLabelText("API Key")).toHaveValue("sk-real-key");
   });
 
-  it("API Key 留空保存：apiKey 传 null（不修改已保存的 Key）", async () => {
+  it("已有 Key 时仅改模型名保存：apiKey 提交完整 Key（不变）", async () => {
     configureConnection();
     const user = userEvent.setup();
     renderLlmPage();
@@ -273,9 +285,31 @@ describe("LlmPage（AI 大脑配置）", () => {
     await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith("set_llm_connection", {
         baseUrl: "https://open.bigmodel.cn/api/paas/v4",
-        apiKey: null,
+        apiKey: "sk-real-key-1234",
         model: "glm-4.7-air",
       });
+    });
+  });
+
+  it("清空 API Key 保存：apiKey 传空串（移除已保存的 Key）", async () => {
+    configureConnection();
+    const user = userEvent.setup();
+    renderLlmPage();
+    await screen.findByDisplayValue("glm-4.7-flash");
+
+    await user.clear(screen.getByLabelText("API Key"));
+    await user.click(screen.getByRole("button", { name: "保存连接配置" }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("set_llm_connection", {
+        baseUrl: "https://open.bigmodel.cn/api/paas/v4",
+        apiKey: "",
+        model: "glm-4.7-flash",
+      });
+    });
+    // mock 后端按空串语义清除 Key
+    await waitFor(() => {
+      expect(screen.getByLabelText("API Key")).toHaveValue("");
     });
   });
 
@@ -409,59 +443,6 @@ describe("LlmPage（AI 大脑配置）", () => {
     expect(invokeMock).not.toHaveBeenCalledWith("unload_llm_model");
     // 关闭只关 UI：连接状态保持
     expect(screen.getByText("已连接")).toBeInTheDocument();
-  });
-
-  it("高级参数：展开后回显解析后的参数值", async () => {
-    const user = userEvent.setup();
-    renderLlmPage();
-    await screen.findByText("AI 大脑（LLM）配置");
-
-    await user.click(screen.getByRole("button", { name: /高级参数/ }));
-
-    await waitFor(() => {
-      expect(screen.getByRole("textbox", { name: "温度" })).toHaveValue("0.7");
-    });
-    expect(screen.getByRole("textbox", { name: "最大生成 Tokens" })).toHaveValue("512");
-    expect(screen.getByRole("textbox", { name: "Top-P" })).toHaveValue("0.8");
-    expect(screen.getByRole("textbox", { name: "Top-K" })).toHaveValue("20");
-    expect(screen.getByRole("textbox", { name: "Min-P" })).toHaveValue("0.05");
-    expect(screen.getByRole("textbox", { name: "重复惩罚" })).toHaveValue("1.05");
-    expect(screen.getByRole("textbox", { name: "随机种子" })).toHaveValue("0");
-  });
-
-  it("修改温度保存：调用 set_llm_params", async () => {
-    const user = userEvent.setup();
-    renderLlmPage();
-    await screen.findByText("AI 大脑（LLM）配置");
-
-    await user.click(screen.getByRole("button", { name: /高级参数/ }));
-    const temp = await screen.findByRole("textbox", { name: "温度" });
-    await waitFor(() => expect(temp).toHaveValue("0.7"));
-    await user.clear(temp);
-    await user.type(temp, "0.9");
-    await user.click(screen.getByRole("button", { name: "保存参数" }));
-
-    await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("set_llm_params", {
-        params: { ...DEFAULT_PARAMS, temperature: 0.9 },
-      });
-    });
-  });
-
-  it("越界参数保存：不调用 invoke 且显示内联错误", async () => {
-    const user = userEvent.setup();
-    renderLlmPage();
-    await screen.findByText("AI 大脑（LLM）配置");
-
-    await user.click(screen.getByRole("button", { name: /高级参数/ }));
-    const maxTokens = await screen.findByRole("textbox", { name: "最大生成 Tokens" });
-    await waitFor(() => expect(maxTokens).toHaveValue("512"));
-    await user.clear(maxTokens);
-    await user.type(maxTokens, "1");
-    await user.click(screen.getByRole("button", { name: "保存参数" }));
-
-    expect(await screen.findByText(/最大生成 Tokens 需在 16~262144 之间/)).toBeInTheDocument();
-    expect(invokeMock).not.toHaveBeenCalledWith("set_llm_params", expect.anything());
   });
 
   it("保存系统提示词调用 set_llm_system_prompt；已连接时自动重新连接生效", async () => {

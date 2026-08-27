@@ -44,7 +44,6 @@ import type {
   Live2dModelInfo,
   LlmConfigInfo,
   LlmFinishReason,
-  LlmParamsPatch,
   LlmStatus,
   LlmToken,
   PerformanceScene,
@@ -142,7 +141,6 @@ export const api = {
   /** 保存远程 LLM 连接配置（base_url/api_key/model）；apiKey 为空串时清空，不传则保持不变 */
   setLlmConnection: (args: { baseUrl: string; apiKey?: string | null; model: string }) =>
     invoke<void>("set_llm_connection", args),
-  setLlmParams: (args: { params: LlmParamsPatch }) => invoke<void>("set_llm_params", args),
   setLlmSystemPrompt: (args: { prompt: string }) => invoke<void>("set_llm_system_prompt", args),
   // ---- 语音会话（KWS→ASR→LLM→TTS 全链路）----
   startVoiceSession: () => invoke<void>("start_voice_session"),

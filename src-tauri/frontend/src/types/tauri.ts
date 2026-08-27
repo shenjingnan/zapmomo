@@ -309,9 +309,6 @@ export interface LlmParams {
   seed: number;
 }
 
-/** `set_llm_params` 载荷：采样参数（snake_case 直传，缺省项不修改）。 */
-export type LlmParamsPatch = Partial<LlmParams>;
-
 /** `get_llm_config` 返回 */
 export interface LlmConfigInfo {
   enabled: boolean;
@@ -324,8 +321,8 @@ export interface LlmConfigInfo {
   params: LlmParams;
   /** OpenAI 兼容接口地址 */
   base_url: string | null;
-  /** 掩码后的 API Key（仅展示用） */
-  api_key_masked: string | null;
+  /** 完整 API Key（本机桌面应用；前端默认 password 圆点展示，小眼睛切换明文） */
+  api_key: string | null;
   /** 模型名（如 glm-4.7-flash） */
   model: string | null;
 }

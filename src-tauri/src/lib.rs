@@ -1430,7 +1430,9 @@ struct LlmConfigInfo {
     system_prompt: String,
     params: GenParams,
     base_url: Option<String>,
-    api_key_masked: Option<String>,
+    /// 完整 API Key（本机桌面应用，settings.toml 本身明文存储；
+    /// 前端默认 password 圆点展示，用户点小眼睛才显式明文）。
+    api_key: Option<String>,
     model: Option<String>,
 }
 
@@ -1506,18 +1508,9 @@ fn get_llm_config(state: State<'_, LlmState>) -> Result<LlmConfigInfo, String> {
         system_prompt: cfg.system_prompt,
         params: cfg.params,
         base_url: cfg.base_url,
-        api_key_masked: cfg.api_key.as_deref().map(mask_api_key),
+        api_key: cfg.api_key,
         model: cfg.model,
     })
-}
-
-/// 对 API key 做脱敏展示（只显示首尾各 4 位，中间省略）。
-fn mask_api_key(key: &str) -> String {
-    if key.len() <= 8 {
-        "****".to_string()
-    } else {
-        format!("{}****{}", &key[..4], &key[key.len() - 4..])
-    }
 }
 
 /// 创建/替换远程 LLM 引擎的核心逻辑。

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useToast } from "@/components/ui/toast";
 import { api, onLlmError, onLlmFinished, onLlmStatus, onLlmToken } from "@/lib/tauri";
-import type { LlmConfigInfo, LlmParamsPatch } from "@/types/tauri";
+import type { LlmConfigInfo } from "@/types/tauri";
 
 export interface LlmState {
   config: LlmConfigInfo | null;
@@ -18,8 +18,6 @@ export interface LlmState {
   stop: () => Promise<void>;
   /** 保存远程连接配置（base_url/api_key/model）；失败时 rethrow 供表单内联展示错误 */
   setConnection: (baseUrl: string, apiKey: string | null, model: string) => Promise<void>;
-  /** 批量保存采样参数；失败时 rethrow 供保存按钮内联展示错误 */
-  setParams: (params: LlmParamsPatch) => Promise<void>;
   /** 保存系统提示词；失败时 rethrow */
   setSystemPrompt: (prompt: string) => Promise<void>;
 }
@@ -147,19 +145,6 @@ export function useLlm(): LlmState {
     [refreshConfig],
   );
 
-  const setParams = useCallback(
-    async (params: LlmParamsPatch) => {
-      try {
-        await api.setLlmParams({ params });
-        await refreshConfig();
-      } catch (e) {
-        setError(String(e));
-        throw e; // 保存按钮需要内联错误反馈
-      }
-    },
-    [refreshConfig],
-  );
-
   const setSystemPrompt = useCallback(
     async (prompt: string) => {
       try {
@@ -187,7 +172,6 @@ export function useLlm(): LlmState {
     chat,
     stop,
     setConnection,
-    setParams,
     setSystemPrompt,
   };
 }

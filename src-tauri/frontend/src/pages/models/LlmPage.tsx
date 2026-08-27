@@ -1,11 +1,10 @@
 import { ArrowLeft } from "lucide-react";
 import { Link } from "react-router-dom";
-import { LlmAdvancedParams } from "@/components/llm/LlmAdvancedParams";
 import { LlmCoreConfig } from "@/components/llm/LlmCoreConfig";
 import { LlmRunControl } from "@/components/llm/LlmRunControl";
 import { LlmSystemPrompt } from "@/components/llm/LlmSystemPrompt";
 
-/** AI 大脑（LLM）配置页：标题行含连接开关与状态 + 远程连接配置 + 系统提示词 + 高级参数。 */
+/** AI 大脑（LLM）配置页：标题行含连接开关与状态 + 远程连接配置 + 系统提示词。 */
 export function LlmPage() {
   return (
     <div className="space-y-4">
@@ -27,7 +26,6 @@ export function LlmPage() {
       <LlmCoreConfig />
 
       <LlmSystemPrompt />
-      <LlmAdvancedParams />
     </div>
   );
 }

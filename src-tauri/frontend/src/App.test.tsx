@@ -90,7 +90,7 @@ const LLM_CONFIG = {
   settings_path: "/home/user/.zapmomo/settings.toml",
   system_prompt: "你是 ZapMomo 的 AI 大脑。",
   base_url: null as string | null,
-  api_key_masked: null as string | null,
+  api_key: null as string | null,
   model: null as string | null,
   params: {
     max_tokens: 512,
