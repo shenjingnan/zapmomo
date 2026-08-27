@@ -147,10 +147,11 @@ pub fn resolve_sid_voice(
 ///
 /// 收敛此前散落 4 处（语音会话 / dsh 播报 / GUI 合成 / CLI speak）的同构
 /// 分支逻辑。三档语义：
-/// - 参考音频克隆（sherpa zipvoice / audiocpp omnivoice）：显式音色
-///   （`voice_id` > `cfg.voice`）或自定义 wav → `resolve_reference`；
+/// - 参考音频克隆（sherpa zipvoice / audiocpp omnivoice / audiocpp qwen3_tts）：
+///   显式音色（`voice_id` > `cfg.voice`）或自定义 wav → `resolve_reference`；
 ///   omnivoice 无任何音色时不回退模型包默认参考（包内无 test_wavs），
 ///   返回 `Sid(0)`——client 侧省略音色字段，走 server auto voice；
+///   qwen3_tts Base 无音色时报错（上游无 auto voice，必须克隆音色）；
 /// - audiocpp 固定具名音色族（pocket）：`Named(voice_id > cfg.voice > 族默认)`；
 /// - 其余（kokoro/vits/matcha/kitten）：`resolve_sid_voice`。
 pub fn resolve_voice_params(
@@ -165,7 +166,17 @@ pub fn resolve_voice_params(
     if cfg.uses_reference_audio() {
         let has_any = voice_id.is_some() || cfg.voice.is_some() || custom_wav.is_some();
         if !has_any && cfg.backend == TtsBackendKind::Audiocpp {
-            // omnivoice 兜底：无音色 → auto voice（Sid(0) → client 省略音色字段）
+            // 按族分派无音色兜底：omnivoice → auto voice（Sid(0)，client 省略
+            // 音色字段）；qwen3_tts Base 上游无 auto voice → 提前报错
+            let desc = crate::audiocpp::families::family_desc(cfg.model_type);
+            if desc.is_some_and(|d| {
+                matches!(
+                    d.voice_semantics,
+                    crate::audiocpp::families::VoiceSemantics::ReferenceCloneRequired
+                )
+            }) {
+                return Err("Qwen3-TTS 需要克隆音色：请先在音色库选择或录制一个音色".to_string());
+            }
             return Ok(TtsVoiceParams::Sid(0));
         }
         let (wav, text) = resolve_reference(cfg, voice_id, custom_wav, custom_text)?;
@@ -490,6 +501,30 @@ mod tests {
             out,
             crate::tts::TtsVoiceParams::Named(ref v) if v == "cosette"
         ));
+    }
+
+    /// qwen3_tts 无音色来源时明确报错（omnivoice 走 Sid(0) auto voice，qwen3 不能）。
+    #[test]
+    fn test_resolve_voice_params_qwen3_requires_voice() {
+        let cfg = audiocpp_cfg(crate::tts::config::TtsModelKind::Qwen3Tts06);
+        let err = resolve_voice_params(&cfg, None, None, None, None).unwrap_err();
+        assert!(err.contains("克隆音色"), "err: {err}");
+
+        // 有自定义音色 -> Reference
+        let base = tempfile::tempdir().unwrap();
+        let wav = base.path().join("my.wav");
+        std::fs::write(&wav, sample_wav_bytes()).unwrap();
+        let params = resolve_voice_params(&cfg, None, None, Some(&wav), Some("转写")).unwrap();
+        match params {
+            crate::tts::TtsVoiceParams::Reference {
+                wav_path,
+                reference_text,
+            } => {
+                assert_eq!(wav_path, wav);
+                assert_eq!(reference_text, "转写");
+            }
+            other => panic!("应为 Reference，got {other:?}"),
+        }
     }
 
     /// sherpa 族（zipvoice/kokoro）经由统一入口行为不变（旁路 sid/reference 解析）。

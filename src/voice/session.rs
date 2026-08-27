@@ -339,9 +339,11 @@ impl VoiceSession {
 
     /// TTS 热切换感知：取走邮箱中的新引擎（[`TtsSwap`]），用**会话语境**（voice_id）
     /// 解析新音色后句间换入合成线程。当前在途句子用旧引擎完成（零中断），后续句
-    /// 全部用新引擎。音色解析失败时兜底 `Sid(0)` 并告警（引擎仍换入；Sid 对克隆族
-    /// 是 auto voice、对固定音色族是默认音色，均为可用语义）。语速沿用会话构造值
-    /// （`set_tts_params` 的语速调整属于下一会话；避免句间变速跳变）。
+    /// 全部用新引擎。音色解析失败时按族兜底（见 [`hot_swap_voice_fallback`]）：
+    /// 强制克隆族（qwen3_tts Base）无 auto voice，不换入新引擎（保留旧引擎）；
+    /// 其余族兜底 `Sid(0)` 并告警（Sid 对 omnivoice 等克隆族是 auto voice、对
+    /// 固定音色族是默认音色，均为可用语义）。语速沿用会话构造值（`set_tts_params`
+    /// 的语速调整属于下一会话；避免句间变速跳变）。
     fn refresh_tts_if_switched(&mut self) {
         let Some(slot) = &self.tts_swap_slot else {
             return;
@@ -350,17 +352,26 @@ impl VoiceSession {
         let Some(swap) = swap else {
             return;
         };
-        let voice = crate::tts::voice::resolve_voice_params(
+        let voice = match crate::tts::voice::resolve_voice_params(
             &swap.cfg,
             self.cfg.voice_id.as_deref(),
             None,
             self.cfg.character_voice.as_ref().map(|v| v.wav.as_path()),
             self.cfg.character_voice.as_ref().map(|v| v.text.as_str()),
-        )
-        .unwrap_or_else(|e| {
-            tracing::warn!("TTS 热切换音色解析失败（兜底 sid 0）：{e}");
-            crate::tts::TtsVoiceParams::Sid(0)
-        });
+        ) {
+            Ok(v) => v,
+            Err(e) => match hot_swap_voice_fallback(swap.cfg.model_type) {
+                Some(fallback) => {
+                    tracing::warn!("TTS 热切换音色解析失败（兜底 sid 0）：{e}");
+                    fallback
+                }
+                None => {
+                    // 换入一个每句必报错的新引擎比保留旧引擎更糟：取消本次切换
+                    tracing::warn!("TTS 热切换取消：{e}（保留当前引擎，请先在音色库选择克隆音色）");
+                    return;
+                }
+            },
+        };
         // 会话 cfg 快照同步（供后续读取一致；speed 由 SynthHandle 线程持有不变）
         self.cfg.tts = swap.cfg;
         tracing::info!("语音会话 TTS 热切换生效（gen {}）", swap.generation);
@@ -1121,6 +1132,27 @@ impl AsrReaction for AsrCollector {
     }
 }
 
+/// TTS 热切换音色解析失败的兜底决策（`refresh_tts_if_switched` 的可测核心）：
+/// - 强制克隆族（qwen3_tts Base，上游无 auto voice）→ `None`：不换入新引擎，
+///   保留旧引擎（换入一个每句必报错的新引擎比不换更糟）；
+/// - 其余族 → `Some(Sid(0))`：omnivoice/voxcpm2 是 server auto voice，固定音色族
+///   是默认音色，均为可用语义。
+fn hot_swap_voice_fallback(
+    kind: crate::tts::config::TtsModelKind,
+) -> Option<crate::tts::TtsVoiceParams> {
+    let clone_required = crate::audiocpp::families::family_desc(kind).is_some_and(|d| {
+        matches!(
+            d.voice_semantics,
+            crate::audiocpp::families::VoiceSemantics::ReferenceCloneRequired
+        )
+    });
+    if clone_required {
+        None
+    } else {
+        Some(crate::tts::TtsVoiceParams::Sid(0))
+    }
+}
+
 /// KWS 反应（Armed 待唤醒）：命中唤醒词即停止检测并记录关键词 → 切换 ASR。
 #[derive(Default)]
 struct WakeReaction {
@@ -1149,6 +1181,35 @@ impl Reaction for BargeInReaction<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 热切换音色解析失败兜底：强制克隆族（qwen3_tts 两尺寸）不换引擎（None），
+    /// 其余族兜底 Sid(0)（auto voice / 默认音色语义）。
+    #[test]
+    fn test_hot_swap_voice_fallback_by_family() {
+        use crate::tts::config::TtsModelKind;
+        for kind in [TtsModelKind::Qwen3Tts06, TtsModelKind::Qwen3Tts17] {
+            assert!(
+                hot_swap_voice_fallback(kind).is_none(),
+                "{kind:?} 强制克隆族应保留旧引擎（不换入）"
+            );
+        }
+        for kind in [
+            TtsModelKind::Omnivoice,
+            TtsModelKind::Voxcpm2,
+            TtsModelKind::Pocket,
+            TtsModelKind::Zipvoice,
+            TtsModelKind::Vits,
+            TtsModelKind::Kokoro,
+        ] {
+            assert!(
+                matches!(
+                    hot_swap_voice_fallback(kind),
+                    Some(crate::tts::TtsVoiceParams::Sid(0))
+                ),
+                "{kind:?} 应兜底 Sid(0)"
+            );
+        }
+    }
 
     #[test]
     fn test_reply_accumulator_splits_and_joins() {

@@ -128,7 +128,10 @@ pub(crate) fn build_offline_model_config(cfg: &ResolvedTtsConfig) -> OfflineTtsM
         }
         // audiocpp-only 族：无 sherpa 配置分支（引擎构造在 AudiocppTts，
         // preflight 已按族清单拦截非法组合）
-        TtsModelKind::Omnivoice | TtsModelKind::Voxcpm2 => {}
+        TtsModelKind::Omnivoice
+        | TtsModelKind::Voxcpm2
+        | TtsModelKind::Qwen3Tts06
+        | TtsModelKind::Qwen3Tts17 => {}
     }
     config
 }
@@ -691,6 +694,61 @@ mod tests {
             } else {
                 "auto"
             },
+            duration,
+            elapsed,
+            elapsed / duration
+        );
+    }
+
+    #[test]
+    #[ignore = "需要 qwen3-tts GGUF 在 QWEN3_TTS_E2E_DIR 目录 + audiocpp 引擎可定位 + 参考音频 QWEN3_TTS_E2E_REF"]
+    fn test_qwen3_tts_synthesize_produces_audio() {
+        // E2E：QWEN3_TTS_E2E_DIR=/path/to/qwen3-tts QWEN3_TTS_E2E_REF=/path/to/ref.wav \
+        //   QWEN3_TTS_E2E_REF_TEXT="转写" cargo test -- --ignored
+        let Some(dir) = std::env::var("QWEN3_TTS_E2E_DIR").ok() else {
+            eprintln!("跳过：未设置 QWEN3_TTS_E2E_DIR");
+            return;
+        };
+        let Some(ref_wav) = std::env::var("QWEN3_TTS_E2E_REF").ok() else {
+            eprintln!("跳过：未设置 QWEN3_TTS_E2E_REF（Base 版必须参考音频）");
+            return;
+        };
+        let kind = match std::env::var("QWEN3_TTS_E2E_SIZE").as_deref() {
+            Ok("17") => TtsModelKind::Qwen3Tts17,
+            _ => TtsModelKind::Qwen3Tts06,
+        };
+        let cfg = config::ResolvedTtsConfig {
+            backend: crate::tts::config::TtsBackendKind::Audiocpp,
+            model_type: kind,
+            model_dir: PathBuf::from(&dir),
+            provider: std::env::var("QWEN3_TTS_E2E_PROVIDER")
+                .unwrap_or_else(|_| "metal".to_string()),
+            ..config::ResolvedTtsConfig::default()
+        };
+        let engine = TtsEngine::new(cfg).unwrap();
+        assert_eq!(engine.sample_rate(), 24_000, "qwen3_tts 固定 24kHz");
+        assert!(!engine.supports_streaming(), "qwen3_tts 无流式");
+
+        let voice = TtsVoiceParams::Reference {
+            wav_path: PathBuf::from(ref_wav),
+            reference_text: std::env::var("QWEN3_TTS_E2E_REF_TEXT").unwrap_or_else(|_| {
+                "那还是36年前, 1987年. 我呢考上了武汉大学的计算机系.".to_string()
+            }),
+        };
+        let started = std::time::Instant::now();
+        let samples = engine
+            .synthesize(
+                "你好，我是 ZapMomo 语音伙伴，正在验证 Qwen3-TTS 中文合成。",
+                1.0,
+                &voice,
+            )
+            .unwrap();
+        let elapsed = started.elapsed().as_secs_f32();
+        assert!(!samples.is_empty(), "合成音频不应为空");
+        let duration = samples.len() as f32 / engine.sample_rate() as f32;
+        eprintln!(
+            "qwen3_tts e2e ({:?}): {:.2}s 音频 / {:.2}s 合成 (RTF {:.2})",
+            kind,
             duration,
             elapsed,
             elapsed / duration

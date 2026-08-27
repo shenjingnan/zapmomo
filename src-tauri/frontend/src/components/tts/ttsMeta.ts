@@ -51,13 +51,38 @@ export function ttsModelKindLabel(kind: string): string {
       return "OmniVoice 克隆";
     case "voxcpm2":
       return "VoxCPM2 克隆";
+    case "qwen3_tts_06":
+    case "qwen3_tts_17":
+      return "Qwen3-TTS 克隆";
     default:
       return "TTS";
   }
 }
 
-/** Kokoro 音色分组（与后端 `KokoroVoiceGroup` serde snake_case 对应）。 */
-export type KokoroGroup = "english_female" | "chinese_female" | "chinese_male";
+/**
+ * 参考音频克隆族（共享音色库与音色管理入口）：
+ * zipvoice（sherpa）/ omnivoice / voxcpm2 / qwen3_tts 两尺寸（audiocpp）。
+ * 音色语义判断（TtsBasicConfig / TtsTestDialog）的统一事实源，新增克隆族只改这里。
+ */
+export function isCloneTtsKind(kind: string): boolean {
+  return (
+    kind === "zipvoice" ||
+    kind === "omnivoice" ||
+    kind === "voxcpm2" ||
+    kind === "qwen3_tts_06" ||
+    kind === "qwen3_tts_17"
+  );
+}
+
+/**
+ * 强制克隆族（qwen3_tts 两尺寸）：上游 Base 无 auto voice 兜底、包内无内置音色，
+ * 必须选择克隆音色——无「默认（自动音色）」空值项，音色库为空时下拉禁用。
+ */
+export function isCloneRequiredTtsKind(kind: string): boolean {
+  return kind === "qwen3_tts_06" || kind === "qwen3_tts_17";
+}
+
+/** Kokoro 音色分组（与后端 `KokoroVoiceGroup` serde snake_case 对应）。 */export type KokoroGroup = "english_female" | "chinese_female" | "chinese_male";
 
 /** 分组展示顺序与中文标签（中文优先：女声 → 男声 → 英文）。 */
 const KOKORO_GROUP_ORDER: Array<{ group: KokoroGroup; label: string }> = [

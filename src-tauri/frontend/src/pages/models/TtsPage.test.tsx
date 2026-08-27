@@ -546,6 +546,63 @@ describe("TtsPage（语音合成 TTS）", () => {
     });
   });
 
+  it("qwen3_tts（强制克隆族）：主页音色下拉可选、音色管理可见、占位提示必须选择克隆音色", async () => {
+    ttsConfig = {
+      ...ttsConfig,
+      model_type: "qwen3_tts_06",
+      model_dir: "/home/user/.zapmomo/models/qwen3-tts-12hz-0.6b-base-q8_0",
+      models_present: true,
+    };
+    const user = userEvent.setup();
+    renderTtsPage();
+    await screen.findByText("语音合成（TTS）配置");
+
+    // 克隆族入口：音色管理可见（区别于 sid 固定模型）
+    expect(screen.getByRole("button", { name: "音色管理" })).toBeInTheDocument();
+
+    // 音色下拉可选（非禁用占位），占位提示「必须选择克隆音色」（无 auto voice 兜底）
+    const combobox = await screen.findByRole("combobox", { name: "默认音色" });
+    await waitFor(() => expect(combobox).toBeEnabled());
+    expect(combobox).toHaveTextContent("必须选择克隆音色");
+    await user.click(combobox);
+    expect(await screen.findByRole("option", { name: "雷军（男）" })).toBeInTheDocument();
+    // 强制克隆族无「自动音色」/内置默认占位项（空音色会被后端拦截报错）
+    expect(screen.queryByRole("option", { name: /自动音色/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: /内置 leijun/ })).not.toBeInTheDocument();
+
+    // 选择音色持久化为全局默认音色
+    await user.click(screen.getByRole("option", { name: "雷军（男）" }));
+    expect(invokeMock).toHaveBeenCalledWith("set_tts_voice", { voice: "leijun-1" });
+  });
+
+  it("qwen3_tts：音色库为空时主页音色下拉禁用（需先在音色管理添加）", async () => {
+    ttsVoices = [];
+    ttsConfig = { ...ttsConfig, model_type: "qwen3_tts_17", models_present: true };
+    renderTtsPage();
+    await screen.findByText("语音合成（TTS）配置");
+    const combobox = await screen.findByRole("combobox", { name: "默认音色" });
+    await waitFor(() => expect(combobox).toBeDisabled());
+    // 音色管理入口仍可见（空音色库时的唯一出路）
+    expect(screen.getByRole("button", { name: "音色管理" })).toBeInTheDocument();
+  });
+
+  it("qwen3_tts：TestDialog 音色下拉可选且有管理音色入口（同克隆族）", async () => {
+    ttsConfig = { ...ttsConfig, model_type: "qwen3_tts_06", models_present: true };
+    const user = userEvent.setup();
+    renderTtsPage();
+    await user.click(await screen.findByRole("button", { name: "测试语音" }));
+
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    // 克隆族：音色下拉不禁用（区别于 sid 固定占位）、管理音色入口可见
+    expect(screen.getByRole("combobox", { name: "音色" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "管理音色" })).toBeInTheDocument();
+
+    // 强制克隆族占位提示必须选择克隆音色，且无「默认音色」空值项
+    await user.click(screen.getByRole("combobox", { name: "音色" }));
+    expect(await screen.findByRole("option", { name: "雷军（男）" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "默认音色" })).not.toBeInTheDocument();
+  });
+
   it("管理音色：从页面基础配置打开，上传音频 + 命名 + 参考文本保存调 save_tts_voice", async () => {
     ttsConfig = { ...ttsConfig, models_present: true };
     const user = userEvent.setup();
