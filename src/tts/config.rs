@@ -100,6 +100,15 @@ pub enum TtsModelKind {
     /// VoxCPM2：audio.cpp 后端专用（OpenBMB 2B，48kHz 录音室级 + 30 语种克隆）。
     /// 同款「audiocpp-only kind」语义（见 `Omnivoice` 注释）。
     Voxcpm2,
+    /// Qwen3-TTS 0.6B Base：audio.cpp 后端专用（10 语种音色克隆，24kHz）。
+    /// 同款「audiocpp-only kind」语义（见 `Omnivoice` 注释）。
+    /// Base 版必须提供克隆参考音频（上游无 auto voice）。
+    /// 显式 serde rename：派生 snake_case 会得到 `qwen3_tts06`，与 as_str/parse_str 不一致
+    #[serde(rename = "qwen3_tts_06")]
+    Qwen3Tts06,
+    /// Qwen3-TTS 1.7B Base：audio.cpp 后端专用（质量优先变体）。
+    #[serde(rename = "qwen3_tts_17")]
+    Qwen3Tts17,
     Supertonic,
 }
 
@@ -115,6 +124,8 @@ impl TtsModelKind {
             Self::Pocket => "pocket",
             Self::Omnivoice => "omnivoice",
             Self::Voxcpm2 => "voxcpm2",
+            Self::Qwen3Tts06 => "qwen3_tts_06",
+            Self::Qwen3Tts17 => "qwen3_tts_17",
             Self::Supertonic => "supertonic",
         }
     }
@@ -131,15 +142,20 @@ impl TtsModelKind {
             "pocket" => Some(Self::Pocket),
             "omnivoice" => Some(Self::Omnivoice),
             "voxcpm2" => Some(Self::Voxcpm2),
+            "qwen3_tts_06" => Some(Self::Qwen3Tts06),
+            "qwen3_tts_17" => Some(Self::Qwen3Tts17),
             "supertonic" => Some(Self::Supertonic),
             _ => None,
         }
     }
 
-    /// 是否使用参考音频（声音克隆）语义：ZipVoice（sherpa）与 OmniVoice/VoxCPM2
-    /// （audiocpp）支持克隆，其余按 speaker id（sid）说话。
+    /// 是否使用参考音频（声音克隆）语义：ZipVoice（sherpa）与 OmniVoice/VoxCPM2/
+    /// Qwen3-TTS（audiocpp）支持克隆，其余按 speaker id（sid）说话。
     pub fn uses_reference_audio(&self) -> bool {
-        matches!(self, Self::Zipvoice | Self::Omnivoice | Self::Voxcpm2)
+        matches!(
+            self,
+            Self::Zipvoice | Self::Omnivoice | Self::Voxcpm2 | Self::Qwen3Tts06 | Self::Qwen3Tts17
+        )
     }
 
     /// 是否需要 espeak-ng 数据目录：ZipVoice / Kokoro（包内 `espeak-ng-data/`）。
@@ -307,7 +323,7 @@ impl Default for ResolvedTtsConfig {
 
 impl ResolvedTtsConfig {
     /// 是否使用参考音频（声音克隆）语义：sherpa 后端仅 ZipVoice，audiocpp 后端
-    /// 仅 OmniVoice/VoxCPM2（pocket 为固定具名音色）。
+    /// 为 OmniVoice/VoxCPM2/Qwen3-TTS 克隆族（pocket 为固定具名音色）。
     ///
     /// 编排层（voice 会话 / GUI / CLI）应调此方法而非裸
     /// `model_type.uses_reference_audio()`——保持 backend 感知，防「audiocpp
@@ -318,7 +334,10 @@ impl ResolvedTtsConfig {
             TtsBackendKind::Audiocpp => {
                 matches!(
                     self.model_type,
-                    TtsModelKind::Omnivoice | TtsModelKind::Voxcpm2
+                    TtsModelKind::Omnivoice
+                        | TtsModelKind::Voxcpm2
+                        | TtsModelKind::Qwen3Tts06
+                        | TtsModelKind::Qwen3Tts17
                 )
             }
         }
@@ -878,6 +897,20 @@ mod tests {
         assert!(!TtsModelKind::Zipvoice.has_dict_dir());
     }
 
+    /// qwen3_tts 两尺寸 kind 解析/序列化往返 + 克隆语义。
+    #[test]
+    fn test_qwen3_tts_kind_semantics() {
+        for (s, kind) in [
+            ("qwen3_tts_06", TtsModelKind::Qwen3Tts06),
+            ("qwen3_tts_17", TtsModelKind::Qwen3Tts17),
+        ] {
+            assert_eq!(TtsModelKind::parse_str(s), Some(kind), "{s}");
+            assert_eq!(kind.as_str(), s);
+        }
+        assert!(TtsModelKind::Qwen3Tts06.uses_reference_audio());
+        assert!(TtsModelKind::Qwen3Tts17.uses_reference_audio());
+    }
+
     #[test]
     fn test_detect_kind_from_dir_probes() {
         let base = tempfile::tempdir().unwrap();
@@ -1181,6 +1214,14 @@ mod tests {
         };
         let cfg = resolve(Some(&settings), None).unwrap();
         assert!(!cfg.uses_reference_audio());
+
+        // audiocpp + qwen3_tts -> true（克隆族，backend 感知）
+        let mut cfg = ResolvedTtsConfig {
+            backend: TtsBackendKind::Audiocpp,
+            model_type: TtsModelKind::Qwen3Tts06,
+            ..ResolvedTtsConfig::default()
+        };
+        assert!(cfg.uses_reference_audio());
     }
 
     #[test]
@@ -1235,6 +1276,28 @@ mod tests {
         cfg.model_type = TtsModelKind::Zipvoice;
         let err = preflight(&cfg).unwrap_err();
         assert!(err.contains("不支持 audiocpp 后端"), "err: {err}");
+
+        // qwen3：空目录 -> 报缺 base gguf（提示语指向 qwen3 registry id）
+        let cfg = ResolvedTtsConfig {
+            backend: crate::tts::config::TtsBackendKind::Audiocpp,
+            model_type: TtsModelKind::Qwen3Tts06,
+            model_dir: base.path().to_path_buf(),
+            ..ResolvedTtsConfig::default()
+        };
+        let err = preflight(&cfg).unwrap_err();
+        assert!(
+            err.contains("qwen3-tts-12hz-0.6b-base-q8_0.gguf"),
+            "err: {err}"
+        );
+        assert!(err.contains("tts-qwen3-06b-base-q8-audiocpp"), "err: {err}");
+
+        // 单文件齐 -> 通过
+        std::fs::write(
+            cfg.model_dir.join("qwen3-tts-12hz-0.6b-base-q8_0.gguf"),
+            b"x",
+        )
+        .unwrap();
+        assert!(preflight(&cfg).is_ok());
     }
 
     #[test]

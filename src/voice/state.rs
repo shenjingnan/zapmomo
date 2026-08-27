@@ -55,7 +55,7 @@ pub enum SessionEvent {
     SpeechDetected,
     /// 等待超时无结果（WaitingSpeech|Listening → Armed）
     WaitTimeout,
-    /// 一句话说完（Listening → Thinking）
+    /// 一句话说完（Listening → Thinking；文字输入也可从 Armed|WaitingSpeech 触发）
     UserUtteranceFinal,
     /// 首个句子已入队合成（Thinking → Speaking）
     FirstSentenceEnqueued,
@@ -82,15 +82,18 @@ pub fn transition(state: SessionState, ev: SessionEvent) -> Result<SessionState,
         (WaitingSpeech, SpeechDetected) => Listening,
         // 等待超时（无人说话 / 无有效文本）→ 回待唤醒
         (WaitingSpeech | Listening, WaitTimeout) => Armed,
+        // 文字输入（输入条窗口）绕过唤醒门控：待唤醒/等说话/说话完毕都直接进思考
         (Listening, UserUtteranceFinal) => Thinking,
+        (Armed | WaitingSpeech, UserUtteranceFinal) => Thinking,
         (Thinking, FirstSentenceEnqueued) => Speaking,
         // 播完 / 思考阶段未切出任何句子（空回复）→ 回到待唤醒
         (Speaking, ReplyFinished) => Armed,
         (Thinking, ReplyFinished) => Armed,
         // 播完 → 直接进 ASR 聆听（跟听，免唤醒；空识别时 session 保持 Listening 不退出）
         (Thinking | Speaking, FollowUp) => Listening,
-        // 打断 → 回到待唤醒
+        // 打断 → 回到待唤醒（Greeting：文字输入到达时停掉欢迎语）
         (Thinking | Speaking, BargeIn) => Armed,
+        (Greeting, BargeIn) => Armed,
         // Stop 从任意状态（含 Idle）回到 Idle
         (_, Stop) => Idle,
         (s, ev) => {
@@ -130,6 +133,20 @@ mod tests {
         // 思考中/播报中打断 → 回到待唤醒
         assert_eq!(transition(Thinking, BargeIn).unwrap(), Armed);
         assert_eq!(transition(Speaking, BargeIn).unwrap(), Armed);
+    }
+
+    #[test]
+    fn test_text_input_transitions() {
+        use SessionEvent::*;
+        use SessionState::*;
+        // 文字输入绕过唤醒门控：待唤醒/等说话直接进思考
+        assert_eq!(transition(Armed, UserUtteranceFinal).unwrap(), Thinking);
+        assert_eq!(
+            transition(WaitingSpeech, UserUtteranceFinal).unwrap(),
+            Thinking
+        );
+        // 欢迎语播放中收到文字 → 允许打断停掉欢迎语
+        assert_eq!(transition(Greeting, BargeIn).unwrap(), Armed);
     }
 
     #[test]
@@ -197,7 +214,6 @@ mod tests {
             (Armed, WelcomeDone),
             (Armed, SpeechDetected),
             (Armed, WaitTimeout),
-            (Armed, UserUtteranceFinal),
             (Armed, FirstSentenceEnqueued),
             (Armed, ReplyFinished),
             (Armed, BargeIn),
@@ -208,11 +224,9 @@ mod tests {
             (Greeting, UserUtteranceFinal),
             (Greeting, FirstSentenceEnqueued),
             (Greeting, ReplyFinished),
-            (Greeting, BargeIn),
             (Greeting, FollowUp),
             (WaitingSpeech, KeywordDetected),
             (WaitingSpeech, WelcomeDone),
-            (WaitingSpeech, UserUtteranceFinal),
             (WaitingSpeech, FirstSentenceEnqueued),
             (WaitingSpeech, ReplyFinished),
             (WaitingSpeech, BargeIn),

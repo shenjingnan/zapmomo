@@ -39,3 +39,8 @@ updates:
     commit-message:
       prefix: 'chore'
       include: 'scope'
+    ignore:
+      # pixi.js 8 与 pixi-live2d-display 0.4.0（依赖 PIXI v6/v7 API）不兼容，
+      # 升级会导致 Live2D 初始化失败、角色不渲染（#83 / #174 两次踩坑）。
+      - dependency-name: 'pixi.js'
+        update-types: ['version-update:semver-major']

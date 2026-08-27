@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { groupKokoroVoices, ttsModelKindLabel } from "./ttsMeta";
+import { groupKokoroVoices, isCloneRequiredTtsKind, isCloneTtsKind, ttsModelKindLabel } from "./ttsMeta";
 import { TTS_PRESETS } from "@/hooks/useTtsModelSwitch";
 import type { TtsVoice } from "@/types/tauri";
 
@@ -19,6 +19,30 @@ describe("ttsModelKindLabel", () => {
     expect(ttsModelKindLabel("voxcpm2")).toBe("VoxCPM2 克隆");
     expect(ttsModelKindLabel("pocket")).toBe("PocketTTS");
   });
+
+  it("qwen3_tts 两尺寸均为 Qwen3-TTS 克隆标签", () => {
+    expect(ttsModelKindLabel("qwen3_tts_06")).toBe("Qwen3-TTS 克隆");
+    expect(ttsModelKindLabel("qwen3_tts_17")).toBe("Qwen3-TTS 克隆");
+  });
+});
+
+describe("isCloneTtsKind / isCloneRequiredTtsKind", () => {
+  it("克隆族：zipvoice/omnivoice/voxcpm2/qwen3_tts 两尺寸", () => {
+    for (const kind of ["zipvoice", "omnivoice", "voxcpm2", "qwen3_tts_06", "qwen3_tts_17"]) {
+      expect(isCloneTtsKind(kind), kind).toBe(true);
+    }
+    for (const kind of ["kokoro", "vits", "matcha", "pocket", ""]) {
+      expect(isCloneTtsKind(kind), kind).toBe(false);
+    }
+  });
+
+  it("强制克隆族仅 qwen3_tts 两尺寸（上游 Base 无 auto voice 兜底）", () => {
+    expect(isCloneRequiredTtsKind("qwen3_tts_06")).toBe(true);
+    expect(isCloneRequiredTtsKind("qwen3_tts_17")).toBe(true);
+    expect(isCloneRequiredTtsKind("zipvoice")).toBe(false);
+    expect(isCloneRequiredTtsKind("omnivoice")).toBe(false);
+    expect(isCloneRequiredTtsKind("voxcpm2")).toBe(false);
+  });
 });
 
 describe("TTS_PRESETS", () => {
@@ -32,6 +56,16 @@ describe("TTS_PRESETS", () => {
     const vox = TTS_PRESETS.find((p) => p.id === "tts-voxcpm2-q8-audiocpp");
     expect(vox).toBeDefined();
     expect(vox?.kind).toBe("voxcpm2");
+  });
+
+  it("含 qwen3-tts 两尺寸条目且 id 与后端 registry 一致", () => {
+    const q06 = TTS_PRESETS.find((p) => p.id === "tts-qwen3-06b-base-q8-audiocpp");
+    expect(q06).toBeDefined();
+    expect(q06?.kind).toBe("qwen3_tts_06");
+
+    const q17 = TTS_PRESETS.find((p) => p.id === "tts-qwen3-17b-base-q8-audiocpp");
+    expect(q17).toBeDefined();
+    expect(q17?.kind).toBe("qwen3_tts_17");
   });
 
   it("id 唯一（防预设重复注册）", () => {

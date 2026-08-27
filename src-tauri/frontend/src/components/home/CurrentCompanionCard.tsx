@@ -3,6 +3,7 @@ import { type ReactNode, useCallback, useEffect, useRef, useState } from "react"
 import { SharedLive2dStage } from "@/components/live2d/SharedLive2dStage";
 import { Badge } from "@/components/ui/badge";
 import { Slider } from "@/components/ui/slider";
+import { isStaticImageFormat } from "@/lib/companionFormat";
 import { api, onCompanionOpacityChanged, onCompanionScaleChanged, toAssetUrl } from "@/lib/tauri";
 import type { CompanionModelInfo } from "@/types/tauri";
 
@@ -102,13 +103,13 @@ export function CurrentCompanionCard({ companion, loading, error }: CurrentCompa
     void api.setCompanionOpacity({ opacity: clamped / 100 });
   }, []);
 
-  // 预览分支：GIF 原生播放 > Live2D 实时渲染 > 重试耗尽回退封面/文案 > 空态 / 加载中 / 模型不可用
-  const isGif = companion?.format === "gif";
+  // 预览分支：静态图像（GIF/角色包立绘）原生 img > Live2D 实时渲染 > 重试耗尽回退封面/文案 > 空态 / 加载中 / 模型不可用
+  const isGif = isStaticImageFormat(companion?.format);
   const stageReady =
     companion?.valid === true && !retryExhausted && previewSize.width > 0 && previewSize.height > 0;
   let preview: ReactNode;
-  if (companion != null && companion.valid && isGif) {
-    // GIF 伙伴不走 PIXI，直接原生 img 循环播放。
+  if (companion?.valid && isGif) {
+    // 静态图像伙伴（GIF / 角色包立绘）不走 PIXI，直接原生 img 展示。
     preview = (
       <img
         src={toAssetUrl(companion.model_file)}

@@ -146,6 +146,11 @@ export const api = {
   startVoiceSession: () => invoke<void>("start_voice_session"),
   stopVoiceSession: () => invoke<void>("stop_voice_session"),
   isVoiceSessionRunning: () => invoke<boolean>("is_voice_session_running"),
+  // ---- 文字输入条（chatbox 窗口）----
+  sendVoiceText: (args: { text: string }) => invoke<void>("send_voice_text", args),
+  saveChatboxPosition: (args: { x: number; y: number }) =>
+    invoke<void>("save_chatbox_position", args),
+  hideChatbox: () => invoke<void>("hide_chatbox"),
   // ---- 对话记录（~/.zapmomo/conversations.json）----
   getConversationRecords: () => invoke<ConversationRecord[]>("get_conversation_records"),
   clearConversationRecords: () => invoke<void>("clear_conversation_records"),

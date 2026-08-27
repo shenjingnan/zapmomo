@@ -13,7 +13,7 @@ import {
 import { Slider } from "@/components/ui/slider";
 import { cn } from "@/lib/utils";
 import { useRuntime } from "@/providers/RuntimeContext";
-import { modelNameFromDir } from "./ttsMeta";
+import { modelNameFromDir, isCloneRequiredTtsKind, isCloneTtsKind } from "./ttsMeta";
 
 /** 退出动画时长，需与卡片/遮罩的 duration 一致。 */
 const EXIT_MS = 200;
@@ -123,8 +123,12 @@ export function TtsTestDialog({ open, onClose, onManageVoices, manageOpen }: Tts
   if (!mounted) return null;
 
   const modelName = modelNameFromDir(tts.config?.model_dir);
-  // sid 模型（vits/matcha/...）无参考音频克隆语义：音色固定，不提供选择与「管理音色」
-  const sidModel = !!tts.config?.model_type && tts.config.model_type !== "zipvoice";
+  // sid/固定音色模型（vits/matcha/kokoro/pocket）无参考音频克隆语义：音色固定，
+  // 不提供选择与「管理音色」；克隆族（zipvoice/omnivoice/voxcpm2/qwen3_tts）可选音色
+  const modelKind = tts.config?.model_type ?? "";
+  const sidModel = !!modelKind && !isCloneTtsKind(modelKind);
+  // 强制克隆族（qwen3_tts）：上游 Base 无 auto voice 兜底，无「默认音色」空值项
+  const cloneRequired = isCloneRequiredTtsKind(modelKind);
   const synthPercent = Math.max(0, Math.min(100, (tts.progress ?? 0) * 100));
 
   return (
@@ -208,10 +212,10 @@ export function TtsTestDialog({ open, onClose, onManageVoices, manageOpen }: Tts
                 disabled={tts.voices.length === 0}
               >
                 <SelectTrigger id="tts-test-voice" aria-label="音色" className="w-full">
-                  <SelectValue placeholder="默认音色" />
+                  <SelectValue placeholder={cloneRequired ? "必须选择克隆音色" : "默认音色"} />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="">默认音色</SelectItem>
+                  {!cloneRequired && <SelectItem value="">默认音色</SelectItem>}
                   {tts.voices.map((v) => (
                     <SelectItem key={v.id} value={v.id}>
                       {v.name}
