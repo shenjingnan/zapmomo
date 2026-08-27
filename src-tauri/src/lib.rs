@@ -32,12 +32,6 @@ use zapmomo::kws::{KwsResult, Reaction, ReactionOutcome};
 use zapmomo::llm::types::{ChatMessage, ChatRole, GenParams, InputItem, LlmParamsPatch};
 use zapmomo::llm::{LlmEngine, LlmEvent};
 use zapmomo::model_library;
-use zapmomo::model_library::catalog::{CatalogPage, CatalogQuery, RemoteModelDetail};
-use zapmomo::model_library::download::{
-    DownloadArtifactRequest, DownloadConfig, DownloadEventSink, DownloadManager, DownloadTaskView,
-    UreqFileDownloader,
-};
-use zapmomo::model_library::huggingface::HfApiClient;
 use zapmomo::model_library::{
     InstallState as LibInstallState, LibraryModel, RuntimeAction as LibRuntimeAction,
     SetCurrentResult, SystemResources, registry::ModelType as LibModelType,
@@ -4480,15 +4474,6 @@ fn resolve_library_model(id: &str) -> Result<LibraryModel, String> {
     model_library::resolve_model(id).ok_or_else(|| format!("未知的模型：{id}"))
 }
 
-/// 打开外部链接（仅供 "在 Hugging Face 查看"；只允许 http(s)）。
-#[tauri::command]
-fn open_external(url: String) -> Result<(), String> {
-    if !(url.starts_with("https://") || url.starts_with("http://")) {
-        return Err("仅支持 http(s) 链接".to_string());
-    }
-    open_path(Path::new(&url))
-}
-
 /// 平台化打开目录（macOS `open` / Linux `xdg-open` / Windows `explorer`）。
 fn open_path(p: &Path) -> Result<(), String> {
     let cmd = if cfg!(target_os = "macos") {
@@ -4899,13 +4884,11 @@ impl Drop for StorageMigrateGuard {
 /// 检查「设置/迁移数据目录」是否被占用（下载中 / 语音会话 / 监听 / 迁移中）。
 ///
 /// 命中返回具体错误。
-#[allow(clippy::too_many_arguments)]
 fn check_storage_busy(
     dl_kws: &DownloadState,
     dl_asr: &AsrDownloadState,
     dl_tts: &TtsDownloadState,
     lib_dl: &ModelLibraryState,
-    dl_mgr: &DownloadManager,
     voice: &VoiceSessionState,
     kws: &ListenState,
     asr: &AsrListenState,
@@ -4914,13 +4897,6 @@ fn check_storage_busy(
         || dl_asr.in_progress.load(Ordering::Relaxed)
         || dl_tts.in_progress.load(Ordering::Relaxed)
         || lib_dl.in_progress.load(Ordering::Relaxed)
-    {
-        return Err("有模型正在下载，请先等待下载完成或取消后再操作".to_string());
-    }
-    if dl_mgr
-        .snapshot()
-        .iter()
-        .any(|t| matches!(t.state.as_str(), "queued" | "downloading" | "verifying"))
     {
         return Err("有模型正在下载，请先等待下载完成或取消后再操作".to_string());
     }
@@ -4954,7 +4930,6 @@ async fn set_data_dir(
     dl_asr: State<'_, AsrDownloadState>,
     dl_tts: State<'_, TtsDownloadState>,
     lib_dl: State<'_, ModelLibraryState>,
-    dl_mgr: State<'_, Arc<DownloadManager>>,
     voice: State<'_, VoiceSessionState>,
     kws: State<'_, ListenState>,
     asr: State<'_, AsrListenState>,
@@ -4968,7 +4943,6 @@ async fn set_data_dir(
         dl_asr.inner(),
         dl_tts.inner(),
         lib_dl.inner(),
-        &dl_mgr,
         voice.inner(),
         kws.inner(),
         asr.inner(),
@@ -5003,7 +4977,6 @@ async fn migrate_storage(
     dl_asr: State<'_, AsrDownloadState>,
     dl_tts: State<'_, TtsDownloadState>,
     lib_dl: State<'_, ModelLibraryState>,
-    dl_mgr: State<'_, Arc<DownloadManager>>,
     voice: State<'_, VoiceSessionState>,
     kws: State<'_, ListenState>,
     asr: State<'_, AsrListenState>,
@@ -5016,7 +4989,6 @@ async fn migrate_storage(
         dl_asr.inner(),
         dl_tts.inner(),
         lib_dl.inner(),
-        &dl_mgr,
         voice.inner(),
         kws.inner(),
         asr.inner(),
@@ -5087,366 +5059,6 @@ fn cancel_storage_migration(mig: State<'_, StorageMigrateState>) -> Result<(), S
 #[tauri::command]
 fn open_storage_dir() -> Result<(), String> {
     open_path(&zapmomo::config::settings::get_models_dir())
-}
-
-/// 移除 external 模型注册（不删文件）。current / runtime-loaded / switching 时拒绝。
-#[tauri::command]
-fn remove_local_model(
-    kws: State<'_, ListenState>,
-    asr: State<'_, AsrListenState>,
-    id: String,
-) -> Result<(), String> {
-    let rec = model_library::get_local_models()
-        .into_iter()
-        .find(|l| l.id == id)
-        .ok_or("未找到该本地模型")?;
-    let mt = LibModelType::from_str_value(&rec.model_type).unwrap_or(LibModelType::Llm);
-    let lp = Path::new(&rec.path);
-    if model_library::is_path_current(mt, lp) {
-        return Err("该模型当前被设为当前模型，请先切换到其他模型".to_string());
-    }
-    let running = kws
-        .active_model_dir()
-        .is_some_and(|d| model_library::paths_equal(&d, lp))
-        || asr
-            .active_model_dir()
-            .is_some_and(|d| model_library::paths_equal(&d, lp));
-    if running {
-        return Err("该模型当前仍在运行，请先切换或卸载模型".to_string());
-    }
-    model_library::remove_local_model_record(&id)
-}
-
-/// 添加本地模型（Registry 卡片显式携带 registry_id；顶部添加为 None）。
-#[tauri::command]
-fn add_local_model(
-    path: String,
-    model_type: Option<String>,
-    registry_id: Option<String>,
-) -> Result<LibraryModel, String> {
-    model_library::add_local_model(
-        Path::new(&path),
-        model_type.as_deref(),
-        registry_id.as_deref(),
-    )
-}
-
-/// 打开模型目录（后端按 id 解析真实路径，不接收任意 path）。
-#[tauri::command]
-fn open_model_directory(id: String) -> Result<(), String> {
-    let model = resolve_library_model(&id)?;
-    let path = model.local_path.ok_or("该模型没有安装路径")?;
-    let p = PathBuf::from(&path);
-    let dir = if p.is_dir() {
-        p
-    } else {
-        p.parent().map(Path::to_path_buf).unwrap_or(p)
-    };
-    open_path(&dir)
-}
-
-// ===========================================================================
-// 模型目录（Catalog）—— Provider-Neutral 在线目录
-// ===========================================================================
-
-/// 目录服务状态：持有 HF 客户端（缓存线程安全）。token/端点变更时整体重建。
-struct CatalogState {
-    client: Mutex<Arc<HfApiClient>>,
-}
-
-impl CatalogState {
-    /// 从 settings 构建（base_url / token / 下载源）。
-    fn from_settings() -> Self {
-        let ml = zapmomo::config::settings::load_settings()
-            .ok()
-            .flatten()
-            .and_then(|s| s.model_library)
-            .unwrap_or_default();
-        Self {
-            client: Mutex::new(Arc::new(HfApiClient::from_settings(&ml))),
-        }
-    }
-
-    /// 重建客户端（token / 端点变化后调用）。
-    #[allow(dead_code)] // 由 Phase 3 的 catalog_set_token / catalog_set_endpoint 使用
-    fn rebuild(&self) {
-        let ml = zapmomo::config::settings::load_settings()
-            .ok()
-            .flatten()
-            .and_then(|s| s.model_library)
-            .unwrap_or_default();
-        *self.client.lock().unwrap_or_else(|e| e.into_inner()) =
-            Arc::new(HfApiClient::from_settings(&ml));
-    }
-
-    /// 取当前客户端引用（Arc clone，锁只保护 Arc 指针本身）。
-    fn current(&self) -> Result<Arc<HfApiClient>, String> {
-        self.client
-            .lock()
-            .map(|g| g.clone())
-            .map_err(|e| format!("目录服务锁失效：{e}"))
-    }
-}
-
-/// 解析 provider 参数（第一版仅支持 huggingface）。
-fn require_hf_provider(provider: Option<&str>) -> Result<(), String> {
-    match provider {
-        None | Some("huggingface") => Ok(()),
-        Some(other) => Err(format!("暂不支持的模型目录来源：{other}")),
-    }
-}
-
-/// 搜索在线模型目录（分页）+ canonical merge（Verified 精选 + HF + 本地状态）。
-/// `provider` 预留 ModelScope 等。
-#[tauri::command]
-async fn catalog_search_models(
-    state: State<'_, CatalogState>,
-    provider: Option<String>,
-    query: CatalogQuery,
-) -> Result<CatalogPage<zapmomo::model_library::catalog::UnifiedModelItem>, String> {
-    use zapmomo::model_library::catalog::{curated_unified, merge_catalog};
-    require_hf_provider(provider.as_deref())?;
-    let client = state.current()?;
-    let query_for_remote = query.clone();
-    let remote = tauri::async_runtime::spawn_blocking(move || {
-        client.search(&query_for_remote).map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| format!("目录请求异常：{e}"))??;
-    let local_summary = model_library::local_install_summary();
-    let curated = curated_unified(&query, &local_summary);
-    Ok(merge_catalog(
-        remote,
-        curated,
-        &local_summary,
-        query.category,
-    ))
-}
-
-/// 获取模型详情（仅元数据，不含完整文件树）。
-#[tauri::command]
-async fn catalog_get_model_detail(
-    state: State<'_, CatalogState>,
-    provider: Option<String>,
-    model_id: String,
-    revision: Option<String>,
-) -> Result<RemoteModelDetail, String> {
-    require_hf_provider(provider.as_deref())?;
-    let client = state.current()?;
-    tauri::async_runtime::spawn_blocking(move || {
-        client
-            .model_detail(&model_id, revision.as_deref())
-            .map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| format!("目录请求异常：{e}"))?
-}
-
-/// 获取模型文件树（懒加载；Variant/Files/Compatibility 共用同一缓存）。
-#[tauri::command]
-async fn catalog_get_model_files(
-    state: State<'_, CatalogState>,
-    provider: Option<String>,
-    model_id: String,
-    revision: Option<String>,
-) -> Result<Vec<zapmomo::model_library::catalog::RemoteModelFile>, String> {
-    require_hf_provider(provider.as_deref())?;
-    let client = state.current()?;
-    tauri::async_runtime::spawn_blocking(move || {
-        client
-            .model_files(&model_id, revision.as_deref())
-            .map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| format!("目录请求异常：{e}"))?
-}
-
-/// 兼容性判定（两阶段 Stage2：加载 files → ArchitectureDetector → Resolver → Artifacts）。
-/// files 走共享缓存（Variant/Files/Compatibility 不重复请求）。
-#[tauri::command]
-async fn catalog_get_compatibility(
-    state: State<'_, CatalogState>,
-    provider: Option<String>,
-    model_id: String,
-    revision: Option<String>,
-) -> Result<zapmomo::model_library::compat::Compatibility, String> {
-    use zapmomo::model_library::compat::CompatibilityResolver;
-    require_hf_provider(provider.as_deref())?;
-    let client = state.current()?;
-    tauri::async_runtime::spawn_blocking(move || {
-        let files = client
-            .model_files(&model_id, revision.as_deref())
-            .map_err(|e| e.to_string())?;
-        let compat = CompatibilityResolver::new().from_files(&model_id, &files);
-        Ok(compat)
-    })
-    .await
-    .map_err(|e| format!("目录请求异常：{e}"))?
-}
-
-/// 获取模型 README（懒加载）。
-#[tauri::command]
-async fn catalog_get_model_readme(
-    state: State<'_, CatalogState>,
-    provider: Option<String>,
-    model_id: String,
-    revision: Option<String>,
-) -> Result<Option<String>, String> {
-    require_hf_provider(provider.as_deref())?;
-    let client = state.current()?;
-    tauri::async_runtime::spawn_blocking(move || {
-        client
-            .model_readme(&model_id, revision.as_deref())
-            .map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| format!("目录请求异常：{e}"))?
-}
-
-/// 当前下载配置（来自 settings；token 不经此结构传给前端）。
-fn current_download_config() -> DownloadConfig {
-    let ml = zapmomo::config::settings::load_settings()
-        .ok()
-        .flatten()
-        .and_then(|s| s.model_library)
-        .unwrap_or_default();
-    DownloadConfig {
-        catalog_base: ml.hf_catalog_base_url,
-        download_source: ml.hf_download_source,
-        mirror_url: ml.hf_mirror_url,
-    }
-}
-
-/// 当前下载器（带 token；token 只进 Authorization header，不落日志）。
-fn current_downloader() -> Arc<dyn zapmomo::model_library::download::FileDownloader> {
-    let ml = zapmomo::config::settings::load_settings()
-        .ok()
-        .flatten()
-        .and_then(|s| s.model_library)
-        .unwrap_or_default();
-    Arc::new(UreqFileDownloader::new(ml.hf_token, ml.hf_catalog_base_url))
-}
-
-/// 下载进度事件 sink：把任务视图推给前端（`download-progress`）。
-struct TauriDownloadSink {
-    app: AppHandle,
-}
-
-impl DownloadEventSink for TauriDownloadSink {
-    fn on_update(&self, view: &DownloadTaskView) {
-        let _ = self.app.emit("download-progress", view);
-    }
-}
-
-/// 入队下载（顺序队列；独立 taskId，同 repo 多 variant 可并行排队）。
-#[tauri::command]
-fn download_enqueue(
-    app: AppHandle,
-    state: State<'_, Arc<DownloadManager>>,
-    request: DownloadArtifactRequest,
-) -> Result<DownloadTaskView, String> {
-    let mgr = state.inner().clone();
-    // 设置事件 sink（需要 AppHandle；幂等，每次覆盖）
-    mgr.set_sink(Arc::new(TauriDownloadSink { app }));
-    let cfg = current_download_config();
-    mgr.enqueue(&request, &cfg)
-}
-
-/// 取消下载任务（Queued 直接移除；Downloading 置取消标志）。
-#[tauri::command]
-fn download_cancel(state: State<'_, Arc<DownloadManager>>, task_id: String) -> Result<(), String> {
-    state.inner().cancel(&task_id)
-}
-
-/// 下载队列快照。
-#[tauri::command]
-fn download_snapshot(state: State<'_, Arc<DownloadManager>>) -> Vec<DownloadTaskView> {
-    state.inner().snapshot()
-}
-
-/// 下载源视图（不含 token）。
-#[tauri::command]
-fn catalog_get_endpoint() -> EndpointConfigView {
-    let ml = zapmomo::config::settings::load_settings()
-        .ok()
-        .flatten()
-        .and_then(|s| s.model_library)
-        .unwrap_or_default();
-    EndpointConfigView {
-        catalog_base: ml.hf_catalog_base_url,
-        download_source: ml.hf_download_source,
-        mirror_url: ml.hf_mirror_url,
-    }
-}
-
-/// 设置下载源（写 settings + 重建客户端/下载器；token 不经此命令）。
-#[tauri::command]
-fn catalog_set_endpoint(
-    state: State<'_, CatalogState>,
-    dl: State<'_, Arc<DownloadManager>>,
-    catalog_base: String,
-    download_source: String,
-    mirror_url: String,
-) -> Result<(), String> {
-    if !(download_source == "auto"
-        || download_source == "huggingface"
-        || download_source == "mirror"
-        || download_source == "hf-mirror")
-    {
-        return Err("download_source 必须是 auto / huggingface / mirror".to_string());
-    }
-    if !(catalog_base.starts_with("https://") || catalog_base.starts_with("http://")) {
-        return Err("catalog_base 必须是 http(s) 链接".to_string());
-    }
-    if !(mirror_url.is_empty()
-        || mirror_url.starts_with("https://")
-        || mirror_url.starts_with("http://"))
-    {
-        return Err("mirror_url 必须是 http(s) 链接".to_string());
-    }
-    let mirror_url = if mirror_url.trim().is_empty() {
-        default_mirror_url()
-    } else {
-        mirror_url.trim().to_string()
-    };
-    model_library::update_settings(|cfg| {
-        let lib = cfg.model_library.get_or_insert_with(Default::default);
-        lib.hf_catalog_base_url = catalog_base;
-        lib.hf_download_source = download_source;
-        lib.hf_mirror_url = mirror_url;
-    })?;
-    state.rebuild();
-    dl.inner().set_downloader(current_downloader());
-    Ok(())
-}
-
-fn default_mirror_url() -> String {
-    "https://hf-mirror.com".to_string()
-}
-
-/// 设置 Hugging Face token（明文 settings.toml；只进 Authorization header，不落日志/不出现在 View）。
-#[tauri::command]
-fn catalog_set_token(
-    state: State<'_, CatalogState>,
-    dl: State<'_, Arc<DownloadManager>>,
-    token: Option<String>,
-) -> Result<(), String> {
-    model_library::update_settings(|cfg| {
-        let lib = cfg.model_library.get_or_insert_with(Default::default);
-        lib.hf_token = token;
-    })?;
-    state.rebuild();
-    dl.inner().set_downloader(current_downloader());
-    Ok(())
-}
-
-/// 下载源视图载荷（不含 token）。
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct EndpointConfigView {
-    catalog_base: String,
-    download_source: String,
-    mirror_url: String,
 }
 
 /// 角色窗口初始尺寸（逻辑像素，与 `setup` 中的 `inner_size` 保持一致）。
@@ -5554,8 +5166,6 @@ pub fn run() {
         .manage(VoiceSessionState::new())
         .manage(DshBridgeState::new())
         .manage(ModelLibraryState::default())
-        .manage(CatalogState::from_settings())
-        .manage(Arc::new(DownloadManager::new(current_downloader())))
         .manage(StorageMigrateState::default())
         .invoke_handler(tauri::generate_handler![
             get_app_info,
@@ -5621,21 +5231,6 @@ pub fn run() {
             cancel_model_download,
             set_current_model,
             delete_model,
-            remove_local_model,
-            add_local_model,
-            open_model_directory,
-            catalog_search_models,
-            catalog_get_model_detail,
-            catalog_get_model_files,
-            catalog_get_compatibility,
-            catalog_get_model_readme,
-            open_external,
-            download_enqueue,
-            download_cancel,
-            download_snapshot,
-            catalog_get_endpoint,
-            catalog_set_endpoint,
-            catalog_set_token,
             get_storage_info,
             set_data_dir,
             migrate_storage,

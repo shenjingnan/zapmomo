@@ -1,15 +1,14 @@
 import { CircleAlert, Download, Loader2, Trash2 } from "lucide-react";
 import { useState } from "react";
-import { Link } from "react-router-dom";
-import { LibraryDialog } from "@/components/library/LibraryDialog";
-import { ModelConfirmDialog } from "@/components/library/LibraryDialogs";
+import { ModelConfirmDialog } from "@/components/models/ModelConfirmDialog";
+import { ModelDialog } from "@/components/models/ModelDialog";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { ASR_PRESETS, useAsrModelSwitch } from "@/hooks/useAsrModelSwitch";
 import { useSmoothProgress } from "@/hooks/useSmoothProgress";
-import { formatBytes } from "@/lib/catalog/quantization";
+import { formatBytes } from "@/lib/utils";
 import { useRuntime } from "@/providers/RuntimeContext";
 import type { LibraryModel } from "@/types/modelLibrary";
 import { asrModelKindLabel } from "./asrMeta";
@@ -49,7 +48,7 @@ export function AsrModelDialog({ open, onClose }: AsrModelDialogProps) {
   const percent = useSmoothProgress(targetPercent);
 
   return (
-    <LibraryDialog open={open} onClose={onClose} title="选择识别模型" width="lg">
+    <ModelDialog open={open} onClose={onClose} title="选择识别模型" width="lg">
       <p className="text-xs text-text-muted">
         内置识别模型：下载后即可设为当前；正在识别时切换会自动重启识别。
       </p>
@@ -149,16 +148,6 @@ export function AsrModelDialog({ open, onClose }: AsrModelDialogProps) {
         </Alert>
       )}
 
-      <div className="flex flex-wrap items-center gap-2 pt-1">
-        <Link
-          to="/models/library"
-          onClick={onClose}
-          className="text-xs text-text-secondary transition-colors hover:text-text-primary"
-        >
-          更多模型 → 模型库
-        </Link>
-      </div>
-
       <ModelConfirmDialog
         open={confirmModel !== null}
         model={confirmModel}
@@ -168,6 +157,6 @@ export function AsrModelDialog({ open, onClose }: AsrModelDialogProps) {
           void switcher.remove(m.id);
         }}
       />
-    </LibraryDialog>
+    </ModelDialog>
   );
 }

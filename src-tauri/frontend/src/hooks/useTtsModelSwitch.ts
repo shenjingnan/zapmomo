@@ -105,8 +105,8 @@ export interface TtsModelSwitchState {
 }
 
 /**
- * TTS 模型切换状态：从模型库列表过滤 TTS 条目，提供下载 / 设为当前 / 卸载。
- * 数据用 `list_model_library`（与模型库页同一后端真相源，含 install_state + current）。
+ * TTS 模型切换状态：从后端模型列表过滤 TTS 条目，提供下载 / 设为当前 / 卸载。
+ * 数据用 `list_model_library`（后端模型列表真相源，含 install_state + current）。
  * 与 ASR 版差异：TTS 无监听概念，切换不需要重启任何 runtime。
  */
 export function useTtsModelSwitch(): TtsModelSwitchState {
@@ -186,7 +186,7 @@ export function useTtsModelSwitch(): TtsModelSwitchState {
         toast.error(String(e));
         return;
       }
-      // 刷新 TTS 配置（当前模型名/就绪状态）与模型库列表；后端只写配置即生效
+      // 刷新 TTS 配置（当前模型名/就绪状态）与模型列表；后端只写配置即生效
       await Promise.allSettled([runtimeRef.current.tts.refreshConfig(), refresh()]);
       toast.success(res.message);
     },

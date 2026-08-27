@@ -38,7 +38,7 @@ function ErrorAlert({ issues }: { issues: GuideIssue[] }) {
   );
 }
 
-/** 未配置卡：单项直达对应配置页；多项直达模型库统一处理。 */
+/** 未配置卡：单项直达对应配置页；多项每能力一个直达按钮。 */
 function UnconfiguredAlert({ issues }: { issues: GuideIssue[] }) {
   const single = issues.length === 1;
   return (
@@ -52,13 +52,19 @@ function UnconfiguredAlert({ issues }: { issues: GuideIssue[] }) {
           <span>
             {single
               ? "下载并配置模型后即可启用该能力。"
-              : `${issues.map((i) => i.name).join("、")}需要模型支持，可到模型库统一下载。`}
+              : `${issues.map((i) => i.name).join("、")}需要模型支持，请分别到配置页下载。`}
           </span>
-          <Button variant="outline" size="sm" className="shadow-none" asChild>
-            <Link to={single ? issues[0].href : "/models/library"}>
-              {single ? `去配置${issues[0].name}` : "去模型库"}
-            </Link>
-          </Button>
+          {issues.map((issue) => (
+            <Button
+              key={issue.capability}
+              variant="outline"
+              size="sm"
+              className="shadow-none"
+              asChild
+            >
+              <Link to={issue.href}>去配置{issue.name}</Link>
+            </Button>
+          ))}
         </div>
       </AlertDescription>
     </Alert>

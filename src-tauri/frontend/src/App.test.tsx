@@ -198,7 +198,6 @@ describe("App（KWS 控制面板）", () => {
     expect(screen.getByAltText("ZapMomo")).toBeInTheDocument();
     expect(screen.getByText("概览")).toBeInTheDocument();
     expect(screen.getByText("模型摘要")).toBeInTheDocument();
-    expect(screen.getByText("管理模型")).toBeInTheDocument();
   });
 
   it("概览页 ASR 开关调用 start_asr_listen", async () => {
@@ -255,13 +254,18 @@ describe("App（KWS 控制面板）", () => {
     ).toBeInTheDocument();
   });
 
-  it("概览页引导卡：默认全未配置 → 去模型库", async () => {
+  it("概览页引导卡：默认全未配置 → 每项能力一个直达按钮", async () => {
     renderApp("/models");
     expect(await screen.findByText("4 项能力尚未配置模型")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "去模型库" })).toHaveAttribute(
-      "href",
-      "/models/library",
-    );
+    const cases: Array<[string, string]> = [
+      ["去配置唤醒词（KWS）", "/models/kws"],
+      ["去配置语音识别（ASR）", "/models/asr"],
+      ["去配置AI 大脑（LLM）", "/models/llm"],
+      ["去配置语音合成（TTS）", "/models/tts"],
+    ];
+    for (const [name, href] of cases) {
+      expect(screen.getByRole("link", { name })).toHaveAttribute("href", href);
+    }
   });
 
   it("概览页引导卡：全部配置正常时不渲染", async () => {

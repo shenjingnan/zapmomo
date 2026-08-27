@@ -1,30 +1,22 @@
 import { open } from "@tauri-apps/plugin-dialog";
-import { CircleAlert, Download, FolderOpen, HardDrive, Settings2 } from "lucide-react";
+import { CircleAlert, FolderOpen, HardDrive, Settings2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { DeviceSelect } from "@/components/DeviceSelect";
-import { LibraryDialog } from "@/components/library/LibraryDialog";
-import { formatBytes } from "@/components/library/libraryMeta";
+import { ModelDialog } from "@/components/models/ModelDialog";
 import { DshSection } from "@/components/settings/DshSection";
 import { ShortcutsSection } from "@/components/settings/ShortcutsSection";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/components/ui/toast";
 import { api, onAutostartChanged, onStorageMigrateProgress } from "@/lib/tauri";
+import { formatBytes } from "@/lib/utils";
 import { useRuntime } from "@/providers/RuntimeContext";
 import type { StorageInfo, StorageMigrateProgress } from "@/types/modelLibrary";
 
 /**
- * 设置页：通用设置（麦克风来源 / 隐藏 Dock 图标）+ 模型下载源 + 存储位置（数据目录）。
+ * 设置页：通用设置（麦克风来源 / 隐藏 Dock 图标）+ 存储位置（数据目录）。
  * 存储位置支持自定义数据目录（新下载走新目录、存量双根可见）与「迁移已有模型释放空间」。
  */
 export function SettingsPage() {
@@ -34,12 +26,6 @@ export function SettingsPage() {
   const toast = useToast();
   const [hideDockIcon, setHideDockIcon] = useState<boolean | null>(null);
   const [autostart, setAutostart] = useState(false);
-
-  // 模型下载源配置
-  const [downloadSource, setDownloadSource] = useState("auto");
-  const [mirrorUrl, setMirrorUrl] = useState("");
-  const [endpointLoading, setEndpointLoading] = useState(true);
-  const [endpointSaving, setEndpointSaving] = useState(false);
 
   // 存储位置（数据目录）
   const [storageInfo, setStorageInfo] = useState<StorageInfo | null>(null);
@@ -79,17 +65,6 @@ export function SettingsPage() {
     return () => {
       void unlistenPromise.then((unlisten) => unlisten());
     };
-  }, []);
-
-  useEffect(() => {
-    void api
-      .catalogGetEndpoint()
-      .then((e) => {
-        setDownloadSource(e.downloadSource);
-        setMirrorUrl(e.mirrorUrl);
-      })
-      .catch(() => {})
-      .finally(() => setEndpointLoading(false));
   }, []);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: 挂载时一次性订阅；refreshStorage/toast 引用仅作调用，不参与依赖
@@ -133,26 +108,6 @@ export function SettingsPage() {
   const handleToggleAutostart = (enabled: boolean) => {
     setAutostart(enabled);
     void api.setAutostart({ enabled }).catch(() => setAutostart((prev) => !prev));
-  };
-
-  const saveEndpoint = async () => {
-    if (downloadSource !== "huggingface" && !mirrorUrl.trim()) {
-      toast.error("请填写镜像地址");
-      return;
-    }
-    setEndpointSaving(true);
-    try {
-      await api.catalogSetEndpoint({
-        catalogBase: "https://huggingface.co",
-        downloadSource,
-        mirrorUrl,
-      });
-      toast.success("下载源已保存");
-    } catch (e) {
-      toast.error(String(e));
-    } finally {
-      setEndpointSaving(false);
-    }
   };
 
   // ---- 存储位置交互 ----
@@ -266,72 +221,6 @@ export function SettingsPage() {
             </Alert>
           </div>
         )}
-      </section>
-
-      {/* 模型下载 */}
-      <section className="overflow-hidden rounded-[16px] border border-panel-border bg-panel-background">
-        <div className="px-3.5 py-2.5">
-          <div className="flex items-center gap-2.5">
-            <Download className="h-4 w-4 shrink-0 text-text-secondary" />
-            <div>
-              <h2 className="text-base font-semibold text-text-primary">模型下载</h2>
-              <p className="mt-0.5 text-xs text-text-muted">
-                选择模型文件的下载来源；可自定义镜像地址（如 hf-mirror.com）
-              </p>
-            </div>
-          </div>
-        </div>
-
-        <dl className="divide-y divide-divider">
-          <div className="flex items-center justify-between gap-3.5 px-3.5 py-2.5">
-            <div className="min-w-0">
-              <dt className="text-sm text-text-primary">下载来源</dt>
-              <dd className="mt-0.5 text-xs text-text-muted">
-                自动 = 官方优先，失败回退镜像；仅官方 / 仅镜像
-              </dd>
-            </div>
-            <Select
-              value={downloadSource}
-              onValueChange={setDownloadSource}
-              disabled={endpointLoading}
-            >
-              <SelectTrigger className="h-9 w-44">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="auto">自动（官方 + 镜像）</SelectItem>
-                <SelectItem value="huggingface">仅官方（Hugging Face）</SelectItem>
-                <SelectItem value="mirror">仅镜像</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-
-          {downloadSource !== "huggingface" && (
-            <div className="flex items-center justify-between gap-3.5 px-3.5 py-2.5">
-              <div className="min-w-0">
-                <dt className="text-sm text-text-primary">镜像地址</dt>
-                <dd className="mt-0.5 text-xs text-text-muted">可填写任意镜像，如 hf-mirror.com</dd>
-              </div>
-              <Input
-                value={mirrorUrl}
-                onChange={(e) => setMirrorUrl(e.target.value)}
-                placeholder="https://hf-mirror.com"
-                disabled={endpointLoading}
-                className="h-9 w-64"
-              />
-            </div>
-          )}
-
-          <div className="flex items-center justify-end gap-2 px-3.5 py-2.5">
-            <Button
-              size="sm"
-              onClick={() => void saveEndpoint()}
-              disabled={endpointLoading || endpointSaving}
-            >
-              保存下载源
-            </Button>
-          </div>
-        </dl>
       </section>
 
       {/* 存储位置（数据目录） */}
@@ -449,7 +338,7 @@ export function SettingsPage() {
       <DshSection />
 
       {/* 更改目录确认框 */}
-      <LibraryDialog
+      <ModelDialog
         open={dirDialogOpen}
         onClose={() => setDirDialogOpen(false)}
         title="更改数据目录"
@@ -468,10 +357,10 @@ export function SettingsPage() {
           切换后新的模型下载 / 导入将进入新目录，已有模型仍保持可用。
           如需释放旧目录空间，可稍后在「存储位置」执行迁移。
         </p>
-      </LibraryDialog>
+      </ModelDialog>
 
       {/* 迁移确认框 */}
-      <LibraryDialog
+      <ModelDialog
         open={migrateDialogOpen}
         onClose={() => setMigrateDialogOpen(false)}
         title="迁移已有模型"
@@ -490,7 +379,7 @@ export function SettingsPage() {
           将把旧目录中的模型迁移到当前数据目录。同盘迁移瞬时完成；跨盘复制耗时较长且期间请勿关闭应用。
           迁移可随时取消，已迁移的模型会保留。
         </p>
-      </LibraryDialog>
+      </ModelDialog>
     </div>
   );
 }

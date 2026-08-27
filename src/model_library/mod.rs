@@ -11,10 +11,6 @@
 //! 模型加载/引擎生命周期由各能力模块与 Tauri 层负责，本模块**不复制任何 runtime**。
 
 pub mod catalog;
-pub mod compat;
-pub mod download;
-pub mod gguf;
-pub mod huggingface;
 pub mod install;
 pub mod registry;
 pub mod storage;
@@ -294,17 +290,6 @@ pub fn paths_equal(a: &Path, b: &Path) -> bool {
     } else {
         a == b
     }
-}
-
-fn local_model_id(path: &Path) -> String {
-    use sha2::{Digest, Sha256};
-    let key = if cfg!(windows) {
-        path.to_string_lossy().to_lowercase()
-    } else {
-        path.to_string_lossy().to_string()
-    };
-    let hash = hex::encode(Sha256::digest(key.as_bytes()));
-    format!("local-{}", &hash[..12])
 }
 
 fn unique_suffix() -> String {
@@ -589,31 +574,6 @@ pub fn resolve_model(id: &str) -> Option<LibraryModel> {
     list_models()
         .into_iter()
         .find(|m| m.id == id || m.install_id.as_deref() == Some(id))
-}
-
-/// 模型级本地状态聚合（按 model_id / repo_id 分组），供 unified 列表 merge。
-pub fn local_install_summary()
--> std::collections::HashMap<String, crate::model_library::catalog::LocalModelSummary> {
-    use crate::model_library::catalog::LocalModelSummary;
-    let mut map: std::collections::HashMap<String, LocalModelSummary> =
-        std::collections::HashMap::new();
-    for m in list_models() {
-        if !matches!(m.source, ModelSource::Hf | ModelSource::Registry) {
-            continue;
-        }
-        let key = m.repo_id.clone().unwrap_or_else(|| m.id.clone());
-        let e = map.entry(key).or_default();
-        if matches!(
-            m.install_state,
-            InstallState::Installed | InstallState::Invalid
-        ) {
-            e.installed_artifact_count += 1;
-        }
-        if m.current {
-            e.has_current_artifact = true;
-        }
-    }
-    map
 }
 
 /// 从 HF 安装元数据构建 LibraryModel。
@@ -978,123 +938,6 @@ fn ensure_managed_meta(reg: &RegistryModel, dest: &Path) {
     };
     if let Ok(json) = serde_json::to_string_pretty(&meta) {
         let _ = std::fs::write(&meta_path, json);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// 添加本地模型（external 注册）
-// ---------------------------------------------------------------------------
-
-/// 目录/文件自动识别：仅当唯一匹配时才返回类型（`.gguf` 文件 → LLM；目录按 required files）。
-fn detect_model_type(path: &Path) -> Option<ModelType> {
-    if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("gguf") {
-        return Some(ModelType::Llm);
-    }
-    if !path.is_dir() {
-        return None;
-    }
-    let mut found = Vec::new();
-    if crate::kws::config::kws_files_present(path) {
-        found.push(ModelType::Kws);
-    }
-    if crate::asr::is_installed(path) {
-        found.push(ModelType::Asr);
-    }
-    if crate::tts::is_installed(path) {
-        found.push(ModelType::Tts);
-    }
-    if found.len() == 1 { found.pop() } else { None }
-}
-
-/// 注册本地模型。`registry_id` 来自 Registry 卡片的显式导入动作（不做 basename 推断）。
-pub fn add_local_model(
-    path: &Path,
-    model_type: Option<&str>,
-    registry_id: Option<&str>,
-) -> Result<LibraryModel, String> {
-    let reg = match registry_id {
-        Some(rid) => {
-            let m =
-                registry::model_by_id(rid).ok_or_else(|| format!("未知的 Registry 模型：{rid}"))?;
-            if let Some(t) = model_type
-                && m.model_type.as_str() != t
-            {
-                return Err("Registry 模型类型与所选类型不一致".to_string());
-            }
-            Some(m)
-        }
-        None => None,
-    };
-    let abs = std::path::absolute(path).map_err(|e| format!("无效路径：{e}"))?;
-    let abs = abs.canonicalize().unwrap_or(abs);
-
-    let mt = match &reg {
-        Some(r) => r.model_type,
-        None => {
-            if let Some(t) = model_type {
-                ModelType::from_str_value(t).ok_or_else(|| format!("无效的模型类型：{t}"))?
-            } else {
-                // 未指定类型：仅当能唯一识别时才自动推断，否则让用户选择
-                detect_model_type(&abs)
-                    .ok_or_else(|| "无法确定模型类型，请手动选择模型类型".to_string())?
-            }
-        }
-    };
-    match mt {
-        ModelType::Llm => {
-            if abs.is_dir() {
-                return Err("LLM 模型请选择具体的 .gguf 文件（而非目录）".to_string());
-            }
-            if !abs.is_file() {
-                return Err(format!("文件不存在：{}", abs.display()));
-            }
-            if !is_gguf_file(&abs) {
-                return Err("不是有效的 GGUF 模型文件".to_string());
-            }
-        }
-        ModelType::Kws | ModelType::Asr | ModelType::Tts => {
-            if !abs.is_dir() {
-                return Err("该类型模型请选择模型目录".to_string());
-            }
-        }
-    }
-
-    let name = abs
-        .file_name()
-        .map(|f| f.to_string_lossy().to_string())
-        .unwrap_or_else(|| "本地模型".to_string());
-    let id = local_model_id(&abs);
-
-    // 唯一绑定：同一 registry_id 已绑定且在使用则拒绝（runtime/切换安全由 command 层把关）
-    if let Some(rid) = registry_id
-        && let Some(existing) = get_local_models()
-            .into_iter()
-            .find(|l| l.registry_id.as_deref() == Some(rid))
-        && is_path_current(mt, Path::new(&existing.path))
-    {
-        return Err("该模型已导入且当前被设为当前模型，请先切换到其他模型后再重新导入".to_string());
-    }
-
-    let record = LocalModel {
-        id,
-        name,
-        model_type: mt.as_str().to_string(),
-        path: abs.display().to_string(),
-        added_at: crate::datetime::iso_timestamp_now(),
-        registry_id: registry_id.map(str::to_string),
-    };
-    add_local_model_record(record.clone())?;
-
-    let sel = current_selections();
-    if let Some(rid) = registry_id {
-        // 返回绑定后的 registry 模型
-        let models = list_models();
-        models
-            .into_iter()
-            .find(|m| m.id == rid)
-            .ok_or_else(|| "注册成功但无法刷新模型".to_string())
-    } else {
-        Ok(build_local_model(&record, &sel))
     }
 }
 
@@ -1781,94 +1624,22 @@ mod tests {
     }
 
     #[test]
-    fn test_add_local_model_registry_binding() {
-        run_with_temp_home(|home| {
-            // 造一个本地 KWS 模型目录
-            let dir = home.join("models-local");
-            std::fs::create_dir_all(&dir).unwrap();
-            let model_dir = dir.join("my-kws-model");
-            std::fs::create_dir_all(&model_dir).unwrap();
-
-            // 从 Registry 卡片导入（registry_id 显式绑定，不依赖 basename）
-            let m = add_local_model(
-                &model_dir,
-                Some("kws"),
-                Some("kws-zipformer-wenetspeech-3.3m"),
-            )
-            .unwrap();
-            assert_eq!(m.id, "kws-zipformer-wenetspeech-3.3m");
-            assert_eq!(m.source, ModelSource::Registry);
-            // registry 卡片绑定记录存在
-            let records = get_local_models();
-            let rec = records
-                .iter()
-                .find(|l| l.registry_id.as_deref() == Some("kws-zipformer-wenetspeech-3.3m"))
-                .expect("应存在绑定");
-            assert!(rec.path.ends_with("my-kws-model"));
-            // 不产生 standalone 重复卡片
-            let models = list_models();
-            assert_eq!(
-                models
-                    .iter()
-                    .filter(|m| m.id == "kws-zipformer-wenetspeech-3.3m")
-                    .count(),
-                1
-            );
-        });
-    }
-
-    #[test]
-    fn test_add_local_model_generic_and_errors() {
-        run_with_temp_home(|home| {
-            let dir = home.join("models-local");
-            std::fs::create_dir_all(&dir).unwrap();
-            let model_dir = dir.join("random-kws");
-            std::fs::create_dir_all(&model_dir).unwrap();
-
-            // 顶部添加本地模型：registry_id=None
-            let m = add_local_model(&model_dir, Some("kws"), None).unwrap();
-            assert_eq!(m.source, ModelSource::Local);
-            assert_eq!(m.ownership, StorageOwnership::External);
-            assert!(m.id.starts_with("local-"));
-
-            // sherpa 类型必须选目录：传文件 → Err
-            let a_file = dir.join("some.onnx");
-            std::fs::write(&a_file, b"onnx").unwrap();
-            let err = add_local_model(&a_file, Some("kws"), None).unwrap_err();
-            assert!(err.contains("请选择模型目录"), "err={err}");
-
-            // 未知 registry_id
-            let err = add_local_model(&model_dir, Some("kws"), Some("nope")).unwrap_err();
-            assert!(err.contains("未知的 Registry 模型"));
-
-            // registry_id 类型不一致
-            let err = add_local_model(
-                &model_dir,
-                Some("asr"),
-                Some("kws-zipformer-wenetspeech-3.3m"),
-            )
-            .unwrap_err();
-            assert!(err.contains("类型与所选类型不一致"));
-
-            // LLM 类型仍校验 GGUF（历史 external LLM 注册兼容）
-            let txt = dir.join("plain.txt");
-            std::fs::write(&txt, b"hello").unwrap();
-            let err = add_local_model(&txt, Some("llm"), None).unwrap_err();
-            assert!(err.contains("不是有效的 GGUF"));
-        });
-    }
-
-    #[test]
     fn test_external_remove_never_deletes_file() {
         run_with_temp_home(|home| {
             let dir = home.join("models-local");
             std::fs::create_dir_all(&dir).unwrap();
             let model_dir = dir.join("keepme-kws");
             std::fs::create_dir_all(&model_dir).unwrap();
-            let m = add_local_model(&model_dir, Some("kws"), None).unwrap();
-            assert!(m.id.starts_with("local-"));
-            let id = m.id.clone();
-            remove_local_model_record(&id).unwrap();
+            let record = LocalModel {
+                id: "local-keepme".to_string(),
+                name: "keepme-kws".to_string(),
+                model_type: "kws".to_string(),
+                path: model_dir.display().to_string(),
+                added_at: "2026-08-27T00:00:00Z".to_string(),
+                registry_id: None,
+            };
+            add_local_model_record(record).unwrap();
+            remove_local_model_record("local-keepme").unwrap();
             // 原始目录仍在
             assert!(model_dir.is_dir());
             assert!(get_local_models().is_empty());
@@ -1884,9 +1655,17 @@ mod tests {
             let b = dir.join("b-kws");
             std::fs::create_dir_all(&a).unwrap();
             std::fs::create_dir_all(&b).unwrap();
-            add_local_model(&a, Some("kws"), Some("kws-zipformer-wenetspeech-3.3m")).unwrap();
+            let mk = |dir: &std::path::Path| LocalModel {
+                id: format!("local-{}", dir.file_name().unwrap().to_string_lossy()),
+                name: "binding".to_string(),
+                model_type: "kws".to_string(),
+                path: dir.display().to_string(),
+                added_at: "2026-08-27T00:00:00Z".to_string(),
+                registry_id: Some("kws-zipformer-wenetspeech-3.3m".to_string()),
+            };
+            add_local_model_record(mk(&a)).unwrap();
             // 第二次导入另一个目录 → 重新关联（旧绑定被替换）
-            add_local_model(&b, Some("kws"), Some("kws-zipformer-wenetspeech-3.3m")).unwrap();
+            add_local_model_record(mk(&b)).unwrap();
             let records = get_local_models();
             let bindings: Vec<_> = records
                 .iter()
@@ -2275,8 +2054,16 @@ mod tests {
             std::fs::create_dir_all(&dir).unwrap();
             let model_dir = dir.join("current-kws");
             std::fs::create_dir_all(&model_dir).unwrap();
-            let m = add_local_model(&model_dir, Some("kws"), None).unwrap();
-            set_selected_model(ModelType::Kws, Path::new(&m.local_path.unwrap())).unwrap();
+            add_local_model_record(LocalModel {
+                id: "local-current".to_string(),
+                name: "current-kws".to_string(),
+                model_type: "kws".to_string(),
+                path: model_dir.display().to_string(),
+                added_at: "2026-08-27T00:00:00Z".to_string(),
+                registry_id: None,
+            })
+            .unwrap();
+            set_selected_model(ModelType::Kws, &model_dir).unwrap();
             assert!(is_path_current(ModelType::Kws, &model_dir));
             // 切换走后不再是 current（供 command 层「移除前需先切换」判定使用）
             let other = home.join("models-local/other-kws");
@@ -2288,7 +2075,7 @@ mod tests {
     /// 造一个 HF 安装（meta v2 + gguf 文件），返回 (install_dir, runtime_path, install_id)。
     fn make_hf_install(repo: &str, variant: &str, gguf_name: &str) -> (PathBuf, PathBuf, String) {
         use crate::model_library::catalog::ModelCategory;
-        use crate::model_library::download::ArtifactSource;
+        use crate::model_library::install::ArtifactSource;
         use crate::model_library::install::{
             InstallMeta, META_SCHEMA_VERSION, ModelStorage, derive_install_id,
         };
@@ -2330,7 +2117,7 @@ mod tests {
     fn test_hf_multi_variant_install_and_current_derived() {
         run_with_temp_home(|_| {
             use crate::model_library::catalog::ModelCategory;
-            use crate::model_library::download::ArtifactSource;
+            use crate::model_library::install::ArtifactSource;
             use crate::model_library::install::{
                 InstallMeta, META_SCHEMA_VERSION, ModelStorage, derive_install_id,
             };
@@ -2394,12 +2181,6 @@ mod tests {
                 .unwrap();
             assert!(a.current);
             assert!(!b.current);
-
-            // local_install_summary：同 repo 聚合
-            let summary = local_install_summary();
-            let s = summary.get(repo).unwrap();
-            assert_eq!(s.installed_artifact_count, 2);
-            assert!(s.has_current_artifact);
         });
     }
 
