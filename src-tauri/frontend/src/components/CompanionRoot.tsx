@@ -96,6 +96,12 @@ export function CompanionRoot() {
   aspectRatioRef.current = aspectRatio;
   const scaleRef = useRef(scale);
   scaleRef.current = scale;
+  // 切换伙伴时随事件下发的私有布局：暂存到模型加载完成（metrics 回调）后一次性应用；
+  // null = 无待恢复布局（启动 / 清屏）。
+  const pendingLayoutRef = useRef<{
+    scale: number | null;
+    position: { x: number; y: number } | null;
+  } | null>(null);
 
   /**
    * 由「基准高度 × scale × 宽高比」计算窗口尺寸（逻辑像素），并 clamp 到屏幕可用区域。
@@ -153,6 +159,41 @@ export function CompanionRoot() {
     [computeSize],
   );
 
+  /**
+   * 应用切换伙伴时下发的私有布局（尺寸/位置）：
+   * - 有私有位置：记忆坐标就是最终窗口的左上角，尺寸+位置同时下发直接恢复；
+   * - 无私有位置：沿用当前位置，只按该伙伴（或当前）scale 中心锚定修正尺寸；
+   * - 无私有 scale：沿用当前 scale（「沿用当前状态」语义，不回退全局默认）。
+   * 只更新本地状态，不写回后端（布局本就是后端持久化后随事件下发的）。
+   */
+  const applyCompanionLayout = useCallback(
+    async (
+      ratio: number,
+      layout: { scale: number | null; position: { x: number; y: number } | null },
+    ) => {
+      const s = layout.scale ?? scaleRef.current;
+      if (layout.scale != null) {
+        scaleRef.current = layout.scale;
+        setScale(layout.scale);
+      }
+      if (layout.position) {
+        const win = getCurrentWindow();
+        const { width, height } = computeSize(ratio, s);
+        const sizeOp = win.setSize(new LogicalSize(width, height));
+        const posOp = win
+          .setPosition(new LogicalPosition(layout.position.x, layout.position.y))
+          .catch((e) => {
+            console.warn("恢复伙伴窗口位置失败，已保留当前位置:", e);
+          });
+        await Promise.allSettled([sizeOp, posOp]);
+        setSize({ width, height });
+        return;
+      }
+      await resizeTo(ratio, s);
+    },
+    [computeSize, resizeTo],
+  );
+
   /** 用户缩放：更新 scale、resize 并持久化比例。 */
   const applyScale = useCallback(
     async (s: number) => {
@@ -199,6 +240,10 @@ export function CompanionRoot() {
           : { url: null, isGif: false },
       );
       setProps(info.props ?? null);
+      // 暂存该伙伴的私有布局，等模型加载出真实宽高比后恢复（见 handleModelMetrics）。
+      pendingLayoutRef.current = info.model_file
+        ? { scale: info.window_scale ?? null, position: info.window_position ?? null }
+        : null;
     });
     return () => {
       void unlisten.then((fn) => fn());
@@ -261,6 +306,7 @@ export function CompanionRoot() {
 
   // 模型加载后更新真实宽高比，并用当前 scale 重算尺寸（不持久化 scale）。
   // 启动阶段（首次回调）同样用左上角锚定，理由同 config 恢复 effect。
+  // 切换伙伴带私有布局时，宽高比就绪后一次性恢复该伙伴的尺寸/位置。
   const startupAnchorRef = useRef(true);
   const handleModelMetrics = useCallback(
     async (metrics: { aspectRatio: number }) => {
@@ -269,11 +315,17 @@ export function CompanionRoot() {
           ? metrics.aspectRatio
           : DEFAULT_ASPECT_RATIO;
       setAspectRatio(ratio);
+      const pending = pendingLayoutRef.current;
+      if (pending) {
+        pendingLayoutRef.current = null;
+        await applyCompanionLayout(ratio, pending);
+        return;
+      }
       const anchor = startupAnchorRef.current ? "topleft" : "center";
       startupAnchorRef.current = false;
       await resizeTo(ratio, scaleRef.current, anchor);
     },
-    [resizeTo],
+    [resizeTo, applyCompanionLayout],
   );
 
   // GIF 伙伴无 Live2D 句柄；切到 GIF 时清空，防 dsh 动作触发已卸载的模型。
