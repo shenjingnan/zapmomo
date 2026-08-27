@@ -291,6 +291,9 @@ mod tests {
     fn test_config(base_url: Option<String>, model: Option<String>) -> ResolvedLlmConfig {
         ResolvedLlmConfig {
             enabled: true,
+            cli_tools: false,
+            prompt_cache: true,
+            reasoning_effort: None,
             provider: "openai".to_string(),
             system_prompt: "测试系统提示".to_string(),
             params: GenParams::default(),

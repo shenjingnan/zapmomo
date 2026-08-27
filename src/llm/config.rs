@@ -1,8 +1,8 @@
 /// LLM 配置解析：把可缺省的 `LlmSettings` 合并成解析后的 `ResolvedLlmConfig`。
 ///
-/// 优先级：settings.toml > 内置默认。只支持 OpenAI 兼容远程 provider
-/// （智谱 GLM / DeepSeek / OpenRouter / llama-server / Ollama 等），
-/// 本地 llama.cpp 推理已移除。
+/// 优先级：settings.toml > 内置默认。支持 OpenAI 兼容远程 provider
+/// （智谱 GLM / DeepSeek / OpenRouter / llama-server / Ollama 等）与 Anthropic
+/// 原生 Messages API（provider = "anthropic"），本地 llama.cpp 推理已移除。
 use crate::config::settings::LlmSettings;
 use crate::llm::types::GenParams;
 
@@ -11,13 +11,20 @@ use crate::llm::types::GenParams;
 pub struct ResolvedLlmConfig {
     /// 是否启用 LLM
     pub enabled: bool,
-    /// provider 标识（"openai" / "llamacpp-server"）
+    /// 是否注册 CLI 工具（run_command）；未注册即对模型不可达
+    pub cli_tools: bool,
+    /// 是否启用 prompt caching（仅 anthropic provider 生效）
+    pub prompt_cache: bool,
+    /// extended thinking 力度（仅 anthropic provider 生效；None = API 默认）
+    pub reasoning_effort: Option<String>,
+    /// provider 标识（"openai" / "llamacpp-server" / "anthropic"）
     pub provider: String,
     /// 角色 system prompt
     pub system_prompt: String,
     /// 采样/生成参数（远程 API 仅 max_tokens / temperature / top_p 生效）
     pub params: GenParams,
-    /// HTTP provider 的 base URL（如 https://open.bigmodel.cn/api/paas/v4）
+    /// HTTP provider 的 base URL（如 https://open.bigmodel.cn/api/paas/v4；
+    /// anthropic 缺省为官方端点 https://api.anthropic.com/v1/）
     pub base_url: Option<String>,
     /// HTTP provider 的 API key
     pub api_key: Option<String>,
@@ -36,6 +43,9 @@ pub fn resolve(settings: Option<&LlmSettings>) -> Result<ResolvedLlmConfig, Stri
 
     Ok(ResolvedLlmConfig {
         enabled: settings.and_then(|s| s.enabled).unwrap_or(false),
+        cli_tools: settings.and_then(|s| s.cli_tools).unwrap_or(false),
+        prompt_cache: settings.and_then(|s| s.prompt_cache).unwrap_or(true),
+        reasoning_effort: settings.and_then(|s| s.reasoning_effort.clone()),
         provider: settings
             .and_then(|s| s.provider.clone())
             .unwrap_or_else(|| "openai".to_string()),
@@ -80,6 +90,7 @@ mod tests {
     fn test_settings_provider_and_params() {
         let s = LlmSettings {
             enabled: Some(true),
+            cli_tools: Some(true),
             provider: Some("llamacpp-server".to_string()),
             temperature: Some(0.9),
             max_tokens: Some(128),
@@ -91,6 +102,7 @@ mod tests {
         };
         let cfg = resolve(Some(&s)).unwrap();
         assert!(cfg.enabled);
+        assert!(cfg.cli_tools);
         assert_eq!(cfg.provider, "llamacpp-server");
         assert_eq!(cfg.params.temperature, 0.9);
         assert_eq!(cfg.params.max_tokens, 128);
@@ -121,5 +133,18 @@ mod tests {
             err.to_string().contains("不支持的 LLM provider"),
             "实际错误：{err}"
         );
+    }
+
+    #[test]
+    fn test_anthropic_provider_accepted() {
+        let s = LlmSettings {
+            provider: Some("anthropic".to_string()),
+            model: Some("claude-haiku-4-5".to_string()),
+            api_key: Some("sk-test".to_string()),
+            ..Default::default()
+        };
+        let cfg = resolve(Some(&s)).unwrap();
+        assert_eq!(cfg.provider, "anthropic");
+        assert!(crate::llm::create_provider(cfg).is_ok());
     }
 }
