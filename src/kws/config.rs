@@ -154,7 +154,8 @@ fn detect_default_onnx(model_dir: &Path, prefix: &str, fallback: &str) -> String
 
 /// keywords 默认文件名探测：不同模型包自带的关键词文件名不同，按候选链取第一个存在的。
 fn detect_keywords_rel(model_dir: &Path) -> String {
-    /// 候选链（固定顺序）：zh-en 在前（与 DEFAULT_KEYWORDS_REL 一致），wenetspeech 次之。
+    /// 候选链（固定顺序）：zh-en 的 `test_wavs/keywords.txt` 在前（与 DEFAULT_KEYWORDS_REL
+    /// 一致），其余为其它 sherpa KWS 包（external/HF 导入）的常见布局兜底。
     const CANDIDATES: [&str; 4] = [
         DEFAULT_KEYWORDS_REL,
         "test_wavs/test_keywords.txt",
@@ -235,7 +236,7 @@ pub fn resolve(
             _ => None,
         };
         // 未显式配置时按模型目录内容探测默认文件名（不同模型包内文件名不同，
-        // 如 wenetspeech 是 epoch-12 系列 + test_wavs/test_keywords.txt）
+        // 如 epoch-12 系列三件套 + test_wavs/test_keywords.txt 布局）
         let detected = if value.is_none() {
             detect_default_name(field, &cfg.model_dir, default_name)
         } else {
@@ -556,8 +557,9 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_detects_wenetspeech_layout() {
-        // wenetspeech：epoch-12 三件套 + test_wavs/test_keywords.txt
+    fn test_resolve_detects_epoch_layout() {
+        // 非默认布局（external/HF 导入的 sherpa KWS 包常见形态）：
+        // epoch-12 三件套 + test_wavs/test_keywords.txt
         let dir = fake_model_dir(
             "encoder-epoch-12-avg-2-chunk-16-left-64.onnx",
             "decoder-epoch-12-avg-2-chunk-16-left-64.onnx",
@@ -586,43 +588,6 @@ mod tests {
                 .join("joiner-epoch-12-avg-2-chunk-16-left-64.onnx")
         );
         assert_eq!(cfg.tokens, dir.path().join("tokens.txt"));
-        assert_eq!(
-            cfg.keywords_file,
-            dir.path().join("test_wavs/test_keywords.txt")
-        );
-    }
-
-    #[test]
-    fn test_resolve_detects_gigaspeech_layout() {
-        // gigaspeech：与 wenetspeech 同款 epoch-12 三件套 + test_wavs/test_keywords.txt，
-        // 额外含 bpe.model（探测规则零改动即命中，bpe.model 不参与文件探测）
-        let dir = fake_model_dir(
-            "encoder-epoch-12-avg-2-chunk-16-left-64.onnx",
-            "decoder-epoch-12-avg-2-chunk-16-left-64.onnx",
-            "joiner-epoch-12-avg-2-chunk-16-left-64.onnx",
-            "test_wavs/test_keywords.txt",
-            &["bpe.model"],
-        );
-        let settings = KwsSettings {
-            model_dir: Some(dir.path().to_string_lossy().to_string()),
-            ..KwsSettings::default()
-        };
-        let cfg = resolve(Some(&settings), None).unwrap();
-        assert_eq!(
-            cfg.encoder,
-            dir.path()
-                .join("encoder-epoch-12-avg-2-chunk-16-left-64.onnx")
-        );
-        assert_eq!(
-            cfg.decoder,
-            dir.path()
-                .join("decoder-epoch-12-avg-2-chunk-16-left-64.onnx")
-        );
-        assert_eq!(
-            cfg.joiner,
-            dir.path()
-                .join("joiner-epoch-12-avg-2-chunk-16-left-64.onnx")
-        );
         assert_eq!(
             cfg.keywords_file,
             dir.path().join("test_wavs/test_keywords.txt")
@@ -704,7 +669,7 @@ mod tests {
 
     #[test]
     fn test_kws_files_present() {
-        // wenetspeech 完整目录 → true；缺 encoder → false；空目录 → false
+        // 完整 epoch 布局目录 → true；缺 encoder → false；空目录 → false
         let dir = fake_model_dir(
             "encoder-epoch-12-avg-2-chunk-16-left-64.onnx",
             "decoder-epoch-12-avg-2-chunk-16-left-64.onnx",

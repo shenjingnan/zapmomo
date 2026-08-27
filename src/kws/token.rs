@@ -114,29 +114,9 @@ fn validate_tokens(token_str: &str, tokens: &HashSet<String>) -> Result<(), Stri
     Ok(())
 }
 
-/// 当前模型支持的自定义唤醒词语言（按 tokens.txt 同目录的伴生文件探测）。
+/// 当前模型支持的自定义唤醒词语言已固定为中英双语（zh-en 模型）：中文走 ppinyin，
+/// 英文走 en.phone ARPAbet g2p（见 [`english`]）。
 ///
-/// - `bpe.model` 存在 → `["en"]`（gigaspeech，英文专用，中文会被编码拒绝）
-/// - `en.phone` 存在 → `["zh", "en"]`（zh-en 双语）
-/// - 均无 → `["zh"]`（wenetspeech 纯中文）
-///
-/// 供 GUI 在切换模型/输入唤醒词时提前给出兼容性提示（而非等启动监听才报错）。
-pub fn keyword_languages(tokens_path: &Path) -> Vec<&'static str> {
-    let dir = tokens_path.parent().unwrap_or_else(|| Path::new("."));
-    if dir.join("bpe.model").is_file() {
-        vec!["en"]
-    } else if dir.join("en.phone").is_file() {
-        vec!["zh", "en"]
-    } else {
-        vec!["zh"]
-    }
-}
-
-/// 输入是否含 CJK 汉字（与 [`is_cjk`] 同一判定，供 GUI 兼容性检查复用）。
-pub fn contains_cjk(s: &str) -> bool {
-    s.chars().any(is_cjk)
-}
-
 /// 把用户输入的自定义关键词编码成 sherpa-onnx 可接受的格式。
 ///
 /// 支持输入：
@@ -146,27 +126,17 @@ pub fn contains_cjk(s: &str) -> bool {
 /// - 已 tokenized 音素：`L AY1 T AH1 P`
 /// - 显式显示词：`n ǐ h ǎo x iǎo zh ì @你好小智`
 /// - 多个关键词：用 `/` 或换行分隔
-///
-/// gigaspeech 模型（tokens.txt 同目录存在 `bpe.model`）为 BPE 模式：英文短语经
-/// sentencepiece 切分子词（大写化），手写子词序列透传，不支持中文。
 pub fn encode_custom_keywords(input: &str, tokens_path: &Path) -> Result<String, String> {
     let tokens = load_token_set(tokens_path)?;
     // en.phone 与 tokens.txt 同在模型根目录（缺失时英文退化为纯 g2p）
     let en_phone_path = tokens_path.with_file_name("en.phone");
-    // bpe.model 与 tokens.txt 同在模型根目录（gigaspeech），存在即 BPE 模式
-    let bpe_path = tokens_path.with_file_name("bpe.model");
-    let bpe = if bpe_path.is_file() {
-        Some(super::bpe::load(&bpe_path)?)
-    } else {
-        None
-    };
     let mut lines = Vec::new();
     for raw in input.split(['/', '\n']) {
         let raw = raw.trim();
         if raw.is_empty() {
             continue;
         }
-        lines.push(encode_keyword(raw, &tokens, &en_phone_path, bpe.as_ref())?);
+        lines.push(encode_keyword(raw, &tokens, &en_phone_path)?);
     }
     if lines.is_empty() {
         return Err("未提供任何关键词".to_string());
@@ -179,7 +149,6 @@ fn encode_keyword(
     raw: &str,
     tokens: &HashSet<String>,
     en_phone_path: &Path,
-    bpe: Option<&super::bpe::BpeModel>,
 ) -> Result<String, String> {
     // 拆出 `@` 后的显式显示词（可选）
     let (token_part, display) = match raw.rsplit_once('@') {
@@ -189,21 +158,8 @@ fn encode_keyword(
     let token_part_has_cjk = token_part.chars().any(is_cjk);
 
     // 原始中文 → ppinyin；已是 token 序列（手写拼音/音素）→ 透传；否则按英文单词转换。
-    // BPE 模式（gigaspeech）：子词序列透传，英文短语经 bpe.model 切分，中文不支持。
     // `auto_display` 标记是否自动把原文作为显示词（中文与英文转换均需，纯 token 序列不需）。
-    let (token_str, auto_display) = if let Some(sp) = bpe {
-        if token_part_has_cjk {
-            return Err(
-                "当前模型（gigaspeech）仅支持英文唤醒词；中文唤醒词请切换到 zh-en 或 wenetspeech 模型"
-                    .to_string(),
-            );
-        }
-        if is_token_sequence(token_part, tokens) {
-            (token_part.to_string(), false)
-        } else {
-            (super::bpe::encode_phrase(sp, token_part)?.join(" "), true)
-        }
-    } else if token_part_has_cjk {
+    let (token_str, auto_display) = if token_part_has_cjk {
         (hanzi_to_ppinyin(token_part, tokens)?.join(" "), true)
     } else if is_token_sequence(token_part, tokens) {
         (token_part.to_string(), false)
@@ -353,121 +309,11 @@ mod tests {
         assert!(encode_custom_keywords("  \n/ ", f.path()).is_err());
     }
 
-    /// 官方 gigaspeech 包内 bpe.model（239KB，Apache-2.0），钉住真实 BPE 编码行为。
-    const BPE_MODEL: &[u8] = include_bytes!("testdata/bpe.model");
-
-    /// 构造 gigaspeech 布局的模型目录：BPE tokens.txt + bpe.model。
-    fn gigaspeech_dir() -> tempfile::TempDir {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("tokens.txt"),
-            "<blk> 0\n▁HE 49\nY 17\n▁MO 107\nMO 255\n▁A 6\nLE 50\nX 193\nA 20\n",
-        )
-        .unwrap();
-        std::fs::write(dir.path().join("bpe.model"), BPE_MODEL).unwrap();
-        dir
-    }
-
     #[test]
-    fn test_encode_bpe_english_phrase() {
-        let dir = gigaspeech_dir();
-        let encoded = encode_custom_keywords("HEY MOMO", &dir.path().join("tokens.txt")).unwrap();
-        assert_eq!(encoded, "▁HE Y ▁MO MO @HEY_MOMO");
-    }
-
-    #[test]
-    fn test_encode_bpe_lowercase_uppercases() {
-        let dir = gigaspeech_dir();
-        // 小写与大写编码一致；自动显示词保留用户输入原样
-        let encoded = encode_custom_keywords("hey momo", &dir.path().join("tokens.txt")).unwrap();
-        assert_eq!(encoded, "▁HE Y ▁MO MO @hey_momo");
-    }
-
-    #[test]
-    fn test_encode_bpe_handwritten_pieces_passthrough() {
-        let dir = gigaspeech_dir();
-        // 手写子词序列（全部在 token 集中）→ 透传，不加自动显示词
-        let encoded = encode_custom_keywords("▁A LE X A", &dir.path().join("tokens.txt")).unwrap();
-        assert_eq!(encoded, "▁A LE X A");
-    }
-
-    #[test]
-    fn test_encode_bpe_explicit_display() {
-        let dir = gigaspeech_dir();
-        let encoded =
-            encode_custom_keywords("HEY MOMO @wake_up", &dir.path().join("tokens.txt")).unwrap();
-        assert_eq!(encoded, "▁HE Y ▁MO MO @wake_up");
-    }
-
-    #[test]
-    fn test_encode_bpe_multiple_keywords() {
-        let dir = gigaspeech_dir();
-        let encoded =
-            encode_custom_keywords("ALEXA / HEY MOMO", &dir.path().join("tokens.txt")).unwrap();
-        assert_eq!(encoded, "▁A LE X A @ALEXA\n▁HE Y ▁MO MO @HEY_MOMO");
-    }
-
-    #[test]
-    fn test_encode_bpe_chinese_rejected() {
-        let dir = gigaspeech_dir();
-        let err = encode_custom_keywords("你好小智", &dir.path().join("tokens.txt")).unwrap_err();
-        assert!(err.contains("仅支持英文"), "err: {err}");
-    }
-
-    #[test]
-    fn test_encode_bpe_invalid_piece_errors() {
-        let dir = gigaspeech_dir();
-        // 词表外字符（逗号不在 tokens.txt）→ BPE 切出无效 piece，validate 报清晰错误
-        let err = encode_custom_keywords("HEY, MOMO", &dir.path().join("tokens.txt")).unwrap_err();
-        assert!(err.contains("不在模型 tokens.txt"), "err: {err}");
-    }
-
-    #[test]
-    fn test_encode_without_bpe_model_keeps_phone_path() {
-        // 同样的英文输入、无 bpe.model → 走既有 en.phone 路径（回归保护）
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("tokens.txt"),
-            "<blk> 0\nHH 36\nAY1 19\nAH0 9\nL 45\nOW1 50\n",
-        )
-        .unwrap();
-        std::fs::write(
-            dir.path().join("en.phone"),
-            "HI HH AY1\nHELLO HH AH0 L OW1\n",
-        )
-        .unwrap();
-        let encoded = encode_custom_keywords("hi hello", &dir.path().join("tokens.txt")).unwrap();
-        assert_eq!(encoded, "HH AY1 HH AH0 L OW1 @hi_hello");
-    }
-
-    #[test]
-    fn test_keyword_languages_by_companion_files() {
-        // 无伴生文件 → wenetspeech 纯中文
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("tokens.txt"), "<blk> 0\nn 131\n").unwrap();
-        assert_eq!(
-            keyword_languages(&dir.path().join("tokens.txt")),
-            vec!["zh"]
-        );
-        // en.phone → zh-en 双语
-        std::fs::write(dir.path().join("en.phone"), "HI HH AY1\n").unwrap();
-        assert_eq!(
-            keyword_languages(&dir.path().join("tokens.txt")),
-            vec!["zh", "en"]
-        );
-        // bpe.model 优先级最高 → gigaspeech 英文专用
-        std::fs::write(dir.path().join("bpe.model"), b"x").unwrap();
-        assert_eq!(
-            keyword_languages(&dir.path().join("tokens.txt")),
-            vec!["en"]
-        );
-    }
-
-    #[test]
-    fn test_contains_cjk() {
-        assert!(contains_cjk("大月下"));
-        assert!(contains_cjk("hey 你好"));
-        assert!(!contains_cjk("HEY MOMO"));
-        assert!(!contains_cjk("L AY1 T AH1 P @LIGHT_UP"));
+    fn test_is_cjk_boundaries() {
+        assert!(is_cjk('大'));
+        assert!(is_cjk('㐀'));
+        assert!(!is_cjk('A'));
+        assert!(!is_cjk('ǐ'));
     }
 }

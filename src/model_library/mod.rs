@@ -1351,7 +1351,7 @@ mod tests {
             .unwrap();
 
             // 切换到新模型目录
-            let new_dir = home.join("models/wenetspeech");
+            let new_dir = home.join("models/new-kws");
             set_selected_model(ModelType::Kws, &new_dir).unwrap();
 
             let cfg = settings::load_settings().unwrap().unwrap();
@@ -1661,7 +1661,7 @@ mod tests {
                 model_type: "kws".to_string(),
                 path: dir.display().to_string(),
                 added_at: "2026-08-27T00:00:00Z".to_string(),
-                registry_id: Some("kws-zipformer-wenetspeech-3.3m".to_string()),
+                registry_id: Some("kws-zipformer-zh-en-3m".to_string()),
             };
             add_local_model_record(mk(&a)).unwrap();
             // 第二次导入另一个目录 → 重新关联（旧绑定被替换）
@@ -1669,7 +1669,7 @@ mod tests {
             let records = get_local_models();
             let bindings: Vec<_> = records
                 .iter()
-                .filter(|l| l.registry_id.as_deref() == Some("kws-zipformer-wenetspeech-3.3m"))
+                .filter(|l| l.registry_id.as_deref() == Some("kws-zipformer-zh-en-3m"))
                 .collect();
             assert_eq!(bindings.len(), 1, "同一 registry_id 只允许一条绑定");
             assert!(bindings[0].path.ends_with("b-kws"));

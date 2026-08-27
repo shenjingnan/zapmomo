@@ -298,9 +298,6 @@ struct KwsConfigInfo {
     enabled: bool,
     custom_keywords: String,
     model_dir: String,
-    /// 当前模型支持的自定义唤醒词语言（如 `["zh","en"]`；gigaspeech 为 `["en"]`），
-    /// 供前端在输入唤醒词时提前给出兼容性提示。
-    keyword_languages: Vec<&'static str>,
     provider: String,
     num_threads: i32,
     sample_rate: i32,
@@ -399,7 +396,6 @@ fn get_kws_config(state: State<'_, DownloadState>) -> Result<KwsConfigInfo, Stri
             .and_then(|s| s.custom_keywords.clone())
             .unwrap_or_default(),
         model_dir: cfg.model_dir.display().to_string(),
-        keyword_languages: zapmomo::kws::token::keyword_languages(&cfg.tokens),
         provider: cfg.provider.clone(),
         num_threads: cfg.num_threads,
         sample_rate: cfg.sample_rate,
@@ -4619,27 +4615,6 @@ fn cancel_model_download(state: State<'_, ModelLibraryState>) -> Result<(), Stri
     Ok(())
 }
 
-/// KWS 切换后的唤醒词兼容性警告：新模型英文专用而已保存的自定义唤醒词含中文。
-///
-/// 只提示不阻止（切换本身有效；启动监听时的编码校验仍是最终兜底）。
-fn kws_keyword_compat_warning(model_dir: &std::path::Path) -> Option<String> {
-    let langs = zapmomo::kws::token::keyword_languages(&model_dir.join("tokens.txt"));
-    if langs.as_slice() != ["en"] {
-        return None;
-    }
-    let settings = zapmomo::config::settings::load_settings().ok()?;
-    let kw = settings
-        .as_ref()
-        .and_then(|s| s.kws.as_ref())
-        .and_then(|k| k.custom_keywords.clone())?;
-    if zapmomo::kws::token::contains_cjk(&kw) {
-        return Some(format!(
-            "\n注意：该模型仅支持英文唤醒词，当前已保存的自定义唤醒词「{kw}」含中文，请先在配置中修改。"
-        ));
-    }
-    None
-}
-
 /// 设为当前模型（「使用」）。
 ///
 /// 只写 `model_dir`，**绝不写 enabled / 自动启动能力**。
@@ -4680,7 +4655,7 @@ async fn set_current_model(
                 .unwrap_or_else(|e| e.into_inner()) = None;
         }
 
-        let (action, effective, mut message) = match mt {
+        let (action, effective, message) = match mt {
             LibModelType::Kws if kws.is_listening() => (
                 LibRuntimeAction::RestartRequired,
                 false,
@@ -4769,12 +4744,6 @@ async fn set_current_model(
                 format!("已将 {} 设为当前模型", model.display_name),
             ),
         };
-        // KWS 切换：新模型英文专用而已存唤醒词含中文 → 追加警告（toast 即时可见）
-        if mt == LibModelType::Kws
-            && let Some(warn) = kws_keyword_compat_warning(&path)
-        {
-            message.push_str(&warn);
-        }
         return Ok(SetCurrentResult {
             model_type: mt,
             model_id: model.id,
