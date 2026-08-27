@@ -35,68 +35,6 @@
       }
     },
     {
-      "id": "kws-zipformer-wenetspeech-3.3m",
-      "name": "sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01",
-      "display_name": "Zipformer KWS wenetspeech 3.3M",
-      "model_type": "kws",
-      "runtime": "sherpa-onnx",
-      "format": "ONNX",
-      "description": "流式唤醒词检测，纯中文（WenetSpeech 1 万小时），拼音编码、轻量。",
-      "languages": [
-        "zh"
-      ],
-      "tags": [
-        "wake-word",
-        "streaming",
-        "lightweight"
-      ],
-      "parameter_count": null,
-      "quantization": null,
-      "version": "2024-01-01",
-      "size_bytes": 32654866,
-      "homepage": "https://github.com/k2-fsa/sherpa-onnx/releases/tag/kws-models",
-      "required_assets": [
-        "wake-word-wenetspeech"
-      ],
-      "optional_assets": [],
-      "download": {
-        "manifest_role": "wake-word-wenetspeech",
-        "extra_roles": [],
-        "kind": "archive"
-      }
-    },
-    {
-      "id": "kws-zipformer-gigaspeech-3.3m",
-      "name": "sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01",
-      "display_name": "Zipformer KWS gigaspeech 3.3M",
-      "model_type": "kws",
-      "runtime": "sherpa-onnx",
-      "format": "ONNX",
-      "description": "流式唤醒词检测，纯英文（GigaSpeech XL 1 万小时），BPE 子词编码、轻量。",
-      "languages": [
-        "en"
-      ],
-      "tags": [
-        "wake-word",
-        "streaming",
-        "lightweight"
-      ],
-      "parameter_count": null,
-      "quantization": null,
-      "version": "2024-01-01",
-      "size_bytes": 17626723,
-      "homepage": "https://github.com/k2-fsa/sherpa-onnx/releases/tag/kws-models",
-      "required_assets": [
-        "wake-word-gigaspeech"
-      ],
-      "optional_assets": [],
-      "download": {
-        "manifest_role": "wake-word-gigaspeech",
-        "extra_roles": [],
-        "kind": "archive"
-      }
-    },
-    {
       "id": "asr-streaming-bilingual-zh-en",
       "name": "sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20",
       "display_name": "Streaming Zipformer ASR zh-en",

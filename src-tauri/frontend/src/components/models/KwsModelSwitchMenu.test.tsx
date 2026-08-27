@@ -125,13 +125,9 @@ describe("KwsModelSwitchMenu 模型快速切换（弹窗版）", () => {
     expect(navProbe.count).toBe(0);
   });
 
-  it("切换到 wenetspeech 后显示新模型目录名", () => {
-    makeKwsConfig(
-      "/home/user/.zapmomo/models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01",
-    );
+  it("切换模型后显示新模型目录名", () => {
+    makeKwsConfig("/home/user/.zapmomo/models/my-custom-kws-model");
     renderMenu();
-    expect(
-      screen.getByText("sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01"),
-    ).toBeInTheDocument();
+    expect(screen.getByText("my-custom-kws-model")).toBeInTheDocument();
   });
 });

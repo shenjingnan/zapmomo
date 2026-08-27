@@ -1508,7 +1508,7 @@ mod tests {
             .unwrap();
 
             // 切换到新模型目录
-            let new_dir = home.join("models/wenetspeech");
+            let new_dir = home.join("models/new-kws");
             set_selected_model(ModelType::Kws, &new_dir).unwrap();
 
             let cfg = settings::load_settings().unwrap().unwrap();
@@ -1790,19 +1790,15 @@ mod tests {
             std::fs::create_dir_all(&model_dir).unwrap();
 
             // 从 Registry 卡片导入（registry_id 显式绑定，不依赖 basename）
-            let m = add_local_model(
-                &model_dir,
-                Some("kws"),
-                Some("kws-zipformer-wenetspeech-3.3m"),
-            )
-            .unwrap();
-            assert_eq!(m.id, "kws-zipformer-wenetspeech-3.3m");
+            let m =
+                add_local_model(&model_dir, Some("kws"), Some("kws-zipformer-zh-en-3m")).unwrap();
+            assert_eq!(m.id, "kws-zipformer-zh-en-3m");
             assert_eq!(m.source, ModelSource::Registry);
             // registry 卡片绑定记录存在
             let records = get_local_models();
             let rec = records
                 .iter()
-                .find(|l| l.registry_id.as_deref() == Some("kws-zipformer-wenetspeech-3.3m"))
+                .find(|l| l.registry_id.as_deref() == Some("kws-zipformer-zh-en-3m"))
                 .expect("应存在绑定");
             assert!(rec.path.ends_with("my-kws-model"));
             // 不产生 standalone 重复卡片
@@ -1810,7 +1806,7 @@ mod tests {
             assert_eq!(
                 models
                     .iter()
-                    .filter(|m| m.id == "kws-zipformer-wenetspeech-3.3m")
+                    .filter(|m| m.id == "kws-zipformer-zh-en-3m")
                     .count(),
                 1
             );
@@ -1842,12 +1838,8 @@ mod tests {
             assert!(err.contains("未知的 Registry 模型"));
 
             // registry_id 类型不一致
-            let err = add_local_model(
-                &model_dir,
-                Some("asr"),
-                Some("kws-zipformer-wenetspeech-3.3m"),
-            )
-            .unwrap_err();
+            let err = add_local_model(&model_dir, Some("asr"), Some("kws-zipformer-zh-en-3m"))
+                .unwrap_err();
             assert!(err.contains("类型与所选类型不一致"));
 
             // LLM 类型仍校验 GGUF（历史 external LLM 注册兼容）
@@ -1884,13 +1876,13 @@ mod tests {
             let b = dir.join("b-kws");
             std::fs::create_dir_all(&a).unwrap();
             std::fs::create_dir_all(&b).unwrap();
-            add_local_model(&a, Some("kws"), Some("kws-zipformer-wenetspeech-3.3m")).unwrap();
+            add_local_model(&a, Some("kws"), Some("kws-zipformer-zh-en-3m")).unwrap();
             // 第二次导入另一个目录 → 重新关联（旧绑定被替换）
-            add_local_model(&b, Some("kws"), Some("kws-zipformer-wenetspeech-3.3m")).unwrap();
+            add_local_model(&b, Some("kws"), Some("kws-zipformer-zh-en-3m")).unwrap();
             let records = get_local_models();
             let bindings: Vec<_> = records
                 .iter()
-                .filter(|l| l.registry_id.as_deref() == Some("kws-zipformer-wenetspeech-3.3m"))
+                .filter(|l| l.registry_id.as_deref() == Some("kws-zipformer-zh-en-3m"))
                 .collect();
             assert_eq!(bindings.len(), 1, "同一 registry_id 只允许一条绑定");
             assert!(bindings[0].path.ends_with("b-kws"));

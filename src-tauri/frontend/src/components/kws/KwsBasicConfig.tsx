@@ -37,12 +37,6 @@ export function KwsBasicConfig({ onTestOpen, onSwitchOpen }: KwsBasicConfigProps
   // 当前模型是否为默认 zh-en：只有它才允许用 legacy「下载模型」一键下载
   // （download_kws_model 固定装 zh-en；其他模型缺失时走「选择模型」弹窗）
   const isDefaultModel = isDefaultKwsModelDir(modelPath);
-  // 当前模型支持的自定义唤醒词语言（旧后端缺省时按双语兜底，不误报）
-  const langs = config?.keyword_languages ?? ["zh", "en"];
-  const englishOnly = !langs.includes("zh");
-  // 英文专用模型 + 已保存/正在输入的关键词含中文 → 常驻警示（后端范围与 is_cjk 一致）
-  const hasCjk = (s: string) => /[㐀-䶿一-鿿豈-﫿]/.test(s);
-  const keywordIncompatible = englishOnly && hasCjk(sessionKeywords ?? "");
 
   const percent =
     progress?.stage === "downloading" ? Math.max(0, Math.min(100, progress.percent)) : 100;
@@ -149,18 +143,12 @@ export function KwsBasicConfig({ onTestOpen, onSwitchOpen }: KwsBasicConfigProps
             <dd className="mt-0.5 text-xs text-text-muted">
               提供后将仅监听这些关键词（会话级），留空使用模型内置关键词。
             </dd>
-            {keywordIncompatible && (
-              <dd className="mt-0.5 text-xs text-amber-600">
-                当前模型仅支持英文唤醒词，输入含中文将无法启动监听（中文请切换到 zh-en 或
-                wenetspeech 模型）。
-              </dd>
-            )}
           </div>
           <Input
             className="w-64 shrink-0"
             value={sessionKeywords}
             onChange={(e) => setSessionKeywords(e.target.value)}
-            placeholder={englishOnly ? "如 HEY MOMO，多个用 / 分隔" : "多个用 / 分隔"}
+            placeholder="多个用 / 分隔"
             aria-label="自定义唤醒词"
             disabled={kws.listening.isListening || kws.listening.pending}
           />
