@@ -51,16 +51,6 @@ impl VerifiedRegistry {
         })
     }
 
-    /// 供测试构造空实例。
-    #[cfg(test)]
-    fn empty() -> &'static VerifiedRegistry {
-        static EMPTY: OnceLock<VerifiedRegistry> = OnceLock::new();
-        EMPTY.get_or_init(|| VerifiedRegistry {
-            schema_version: 0,
-            entries: Vec::new(),
-        })
-    }
-
     pub fn all(&self) -> &[VerifiedEntry] {
         &self.entries
     }
@@ -99,17 +89,12 @@ mod tests {
     #[test]
     fn test_overlay_parses_and_is_verified() {
         let reg = VerifiedRegistry::builtin();
-        assert_eq!(reg.entries.len(), 24, "应与内置精选一一对应");
+        assert_eq!(reg.entries.len(), 15, "应与内置精选一一对应");
         // 不复制 model_registry 的定义字段：这里只应有验证字段
         assert!(
             reg.all()
                 .iter()
                 .all(|e| e.repo_id.is_none() || e.architecture.is_some())
-        );
-        assert!(reg.is_verified_repo("unsloth/Qwen3-4B-Instruct-2507-GGUF"));
-        assert!(
-            reg.is_verified_repo("unsloth/qwen3-4b-instruct-2507-gguf"),
-            "repo_id 大小写不敏感"
         );
         assert!(!reg.is_verified_repo("Some/Unknown"));
     }
@@ -117,20 +102,17 @@ mod tests {
     #[test]
     fn test_entry_lookup() {
         let reg = VerifiedRegistry::builtin();
-        let e = reg
-            .entry_for_repo("unsloth/Qwen3-4B-Instruct-2507-GGUF")
-            .unwrap();
-        assert_eq!(e.recommended_variant.as_deref(), Some("Q4_K_M"));
         let m = reg.entry_for_model("kws-zipformer-zh-en-3m").unwrap();
         assert!(m.repo_id.is_none(), "sherpa 内置无 HF repo");
         assert_eq!(m.model_type.as_deref(), Some("kws"));
     }
 
     #[test]
-    fn test_hf_repo_ids_contains_llm_repos() {
+    fn test_hf_repo_ids_empty_after_llm_removal() {
+        // 本地 LLM 推理移除后，verified overlay 不再含任何 HF repo 映射
+        // （剩余 sherpa 内置均来自 GitHub releases，无 HF repo）
         let repos = VerifiedRegistry::builtin().hf_repo_ids();
-        assert!(repos.contains(&"unsloth/Qwen3-8B-GGUF"));
-        // sherpa 内置不应出现在 HF repo 列表
+        assert!(repos.is_empty(), "LLM 条目移除后不应再有 HF repo 映射");
         assert!(!repos.contains(&"kws-zipformer-zh-en-3m"));
     }
 }

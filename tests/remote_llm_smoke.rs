@@ -4,7 +4,6 @@
 //! ```bash
 //! ZHIPU_API_KEY=<your-key> cargo test --test remote_llm_smoke -- --ignored --nocapture
 //! ```
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
@@ -20,10 +19,8 @@ fn test_zhipu_glm_streaming_smoke() {
     let config = ResolvedLlmConfig {
         enabled: true,
         provider: "openai".to_string(),
-        model_path: PathBuf::new(),
         system_prompt: "你是测试助手，用一句话回答。".to_string(),
         params: GenParams::default(),
-        auto_load: false,
         base_url: Some("https://open.bigmodel.cn/api/paas/v4".to_string()),
         api_key: Some(api_key),
         model: Some("glm-4.7-flash".to_string()),

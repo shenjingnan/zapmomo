@@ -41,12 +41,6 @@ hound = "3.5"
 # base64 解码（audio.cpp SSE 流式 delta 载荷；纯 Rust 零传递依赖）
 base64 = "0.22"
 
-# 本地 LLM（llama.cpp Rust 绑定）：默认后端在 macOS ARM64 自动启用 Metal，其余平台 CPU fallback
-llama-cpp-2 = "0.1.154"
-
-# token 逐字节解码（llama-cpp-2 的 token_to_piece 需要持久的 UTF-8 decoder）
-encoding_rs = "0.8"
-
 # HTTP 客户端（OpenAI 兼容 Responses / llama.cpp-server）
 reqwest = { version = "0.13", features = ["blocking", "json"] }
 
@@ -60,7 +54,7 @@ pinyin = "0.11"
 # 异步运行时
 tokio = { version = "1", features = ["full"] }
 
-# 系统资源检测（模型库「系统资源」卡片：内存 / 磁盘 / CPU）
+# 系统资源检测（audio.cpp sidecar 残留进程按 pid 存活检查与清理）
 sysinfo = "0.33"
 
 # dsh 桥：loopback HTTP 接收 deepseek-harness 插件推送的任务事件

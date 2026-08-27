@@ -15,11 +15,6 @@ vi.mock("@/providers/RuntimeContext", () => ({
   useRuntime: () => state.runtime,
 }));
 
-// 选择模型弹窗有专属测试与 App 集成覆盖；此处 stub 避免 llm.download 等依赖。
-vi.mock("@/components/llm/LlmPresetDialog", () => ({
-  LlmPresetDialog: () => null,
-}));
-
 // KWS 选择模型弹窗同理：stub 避免 useKwsModelSwitch 的 useToast/invoke 依赖。
 vi.mock("@/components/kws/KwsModelDialog", () => ({
   KwsModelDialog: () => null,
@@ -33,33 +28,6 @@ vi.mock("@/components/asr/AsrModelDialog", () => ({
 // TTS 选择模型弹窗同理：stub 避免 useTtsModelSwitch 的 useToast/invoke 依赖。
 vi.mock("@/components/tts/TtsModelDialog", () => ({
   TtsModelDialog: () => null,
-}));
-
-// LLM 行快速切换菜单依赖 useLlmPresets（内部用 useToast/invoke）；mock 模块避免依赖 Provider。
-const { presetsState } = vi.hoisted(() => ({
-  presetsState: {
-    models: null as
-      | {
-          id: string;
-          modelType: string;
-          installState: string;
-          current: boolean;
-          localPath: string | null;
-          displayName: string;
-          installId: string | null;
-        }[]
-      | null,
-    loading: false,
-    error: null,
-    refresh: () => Promise.resolve(),
-    download: () => Promise.resolve(),
-    setCurrent: () => Promise.resolve(),
-    remove: () => Promise.resolve(),
-  },
-}));
-
-vi.mock("@/hooks/useLlmPresets", () => ({
-  useLlmPresets: () => presetsState,
 }));
 
 // ---- runtime 切片工厂：只填 ModelSummary 读取的字段（其余方法 vi.fn() 兜底）----
@@ -126,10 +94,10 @@ function makeLlm(o?: {
   error?: string | null;
 }) {
   return {
-    config: {
-      models_present: o?.modelsPresent ?? false,
-      model_path: "/zap/.zapmomo/models/llm.gguf",
-    },
+    // 远程连接语义：modelsPresent 映射为「已填写 API 地址 + 模型名」
+    config: o?.modelsPresent
+      ? { base_url: "https://open.bigmodel.cn/api/paas/v4", model: "glm-4.7-flash" }
+      : { base_url: null, model: null },
     ready: o?.ready ?? false,
     loading: o?.loading ?? false,
     error: o?.error ?? null,
@@ -277,14 +245,14 @@ describe("ModelSummary 模型摘要状态", () => {
     expectRowStatus(rowFor("asr"), "未配置模型");
   });
 
-  it("LLM 行不受影响：模型在但未加载 → 未启用；KWS/ASR 已就绪互不干扰", () => {
+  it("LLM 行不受影响：已配置但未连接 → 未连接；KWS/ASR 已就绪互不干扰", () => {
     state.runtime = makeRuntime({
       kws: makeKws({ modelsPresent: true, enabled: true }),
       asr: makeAsr({ modelsPresent: true, enabled: true }),
       llm: makeLlm({ modelsPresent: true }),
     });
     renderSummary();
-    expectRowStatus(rowFor("llm"), "未启用");
+    expectRowStatus(rowFor("llm"), "未连接");
     expectRowStatus(rowFor("kws"), "已就绪");
     expectRowStatus(rowFor("asr"), "已就绪");
   });

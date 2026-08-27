@@ -339,10 +339,8 @@ pub fn current_selections() -> Selections {
             .as_ref()
             .and_then(|c| crate::tts::config::resolve(c.tts.as_ref(), None).ok())
             .map(|c| c.model_dir),
-        llm: s
-            .as_ref()
-            .and_then(|c| crate::llm::config::resolve(c.llm.as_ref(), None).ok())
-            .map(|c| c.model_path),
+        // LLM 已改为远程连接（无本地模型路径选择），恒 None
+        llm: None,
     }
 }
 
@@ -355,6 +353,23 @@ pub fn selection_path(mt: ModelType) -> Option<PathBuf> {
         ModelType::Tts => s.tts,
         ModelType::Llm => s.llm,
     }
+}
+
+/// GGUF 文件有效性检查（扩展名 + 魔数）。
+///
+/// 原实现来自已移除的 llama 后端（`llm::local::llama::is_gguf_file`）；
+/// 本地 LLM 推理移除后此处仅服务于「用户历史注册的 external LLM 条目」
+/// 的完整性探测。
+fn is_gguf_file(path: &Path) -> bool {
+    use std::io::Read;
+    if path.extension().and_then(|e| e.to_str()) != Some("gguf") {
+        return false;
+    }
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut magic = [0u8; 4];
+    f.read_exact(&mut magic).is_ok() && &magic == b"GGUF"
 }
 
 /// 路径是否为该能力当前 selection。
@@ -453,7 +468,7 @@ pub fn set_selected_model(mt: ModelType, path: &Path) -> Result<(), String> {
             tts.reference_text = None;
         }
         ModelType::Llm => {
-            cfg.llm.get_or_insert_with(Default::default).model_path = Some(path_str);
+            // LLM 已改为远程连接：无本地模型路径可写，切换不产生配置副作用
         }
     })
 }
@@ -464,7 +479,7 @@ pub fn restore_selected_model(mt: ModelType, old: Option<String>) -> Result<(), 
         ModelType::Kws => cfg.kws.get_or_insert_with(Default::default).model_dir = old,
         ModelType::Asr => cfg.asr.get_or_insert_with(Default::default).model_dir = old,
         ModelType::Tts => cfg.tts.get_or_insert_with(Default::default).model_dir = old,
-        ModelType::Llm => cfg.llm.get_or_insert_with(Default::default).model_path = old,
+        ModelType::Llm => {}
     })
 }
 
@@ -612,7 +627,7 @@ fn build_installed_model(
     let (runtime_path, install_state) = if mt == ModelType::Llm {
         let gguf = first_gguf_in(dir);
         match gguf {
-            Some(p) if crate::llm::local::llama::is_gguf_file(&p) => (p, InstallState::Installed),
+            Some(p) if is_gguf_file(&p) => (p, InstallState::Installed),
             Some(p) => (p, InstallState::Invalid),
             None => (dir.to_path_buf(), InstallState::Invalid),
         }
@@ -713,14 +728,14 @@ fn build_registry_model(
         };
         let (local_path, ownership, install_state) = if let Some(b) = binding {
             let p = PathBuf::from(&b.path);
-            let state = if p.is_file() && crate::llm::local::llama::is_gguf_file(&p) {
+            let state = if p.is_file() && is_gguf_file(&p) {
                 InstallState::Installed
             } else {
                 InstallState::Invalid
             };
             (Some(p), StorageOwnership::External, state)
         } else if let Some(c) = &canonical {
-            if c.is_file() && crate::llm::local::llama::is_gguf_file(c) {
+            if c.is_file() && is_gguf_file(c) {
                 ensure_managed_meta(reg, c.parent().unwrap_or(&root));
                 (
                     Some(c.clone()),
@@ -868,7 +883,7 @@ fn build_local_model(lm: &LocalModel, sel: &Selections) -> LibraryModel {
     } else {
         match mt {
             ModelType::Llm => {
-                if crate::llm::local::llama::is_gguf_file(&path) {
+                if is_gguf_file(&path) {
                     InstallState::Installed
                 } else {
                     InstallState::Invalid
@@ -1033,7 +1048,7 @@ pub fn add_local_model(
             if !abs.is_file() {
                 return Err(format!("文件不存在：{}", abs.display()));
             }
-            if !crate::llm::local::llama::is_gguf_file(&abs) {
+            if !is_gguf_file(&abs) {
                 return Err("不是有效的 GGUF 模型文件".to_string());
             }
         }
@@ -1456,23 +1471,22 @@ mod tests {
     #[test]
     fn test_current_selection_and_set_restore() {
         run_with_temp_home(|home| {
-            // set/restore LLM selection
+            // set/restore KWS selection（LLM 已改远程连接，无本地 selection 语义）
             // 用临时 HOME 下的绝对路径（不要硬编码 Unix 风格 /tmp，Windows 上 is_absolute 语义不同）。
-            let x = home.join("x.gguf");
-            set_selected_model(ModelType::Llm, &x).unwrap();
+            let x = home.join("models/x-kws");
+            set_selected_model(ModelType::Kws, &x).unwrap();
             let s = current_selections();
-            assert!(paths_equal(s.llm.as_ref().unwrap(), &x));
-            assert!(!s.llm.as_ref().unwrap().is_file(), "不应要求文件存在");
+            assert!(paths_equal(s.kws.as_ref().unwrap(), &x));
+            assert!(!s.kws.as_ref().unwrap().is_dir(), "不应要求目录存在");
 
-            // 绝不写 enabled
-            let y = home.join("y.gguf");
-            restore_selected_model(ModelType::Llm, Some(y.display().to_string())).unwrap();
+            let y = home.join("models/y-kws");
+            restore_selected_model(ModelType::Kws, Some(y.display().to_string())).unwrap();
             let s2 = current_selections();
-            assert!(paths_equal(s2.llm.as_ref().unwrap(), &y));
+            assert!(paths_equal(s2.kws.as_ref().unwrap(), &y));
 
             let cfg = settings::load_settings().unwrap().unwrap();
-            // set/restore 不触碰 kws/tts enabled
-            assert!(cfg.kws.is_none());
+            // set/restore 不触碰 enabled
+            assert_eq!(cfg.kws.unwrap().enabled, None);
             assert!(cfg.tts.is_none());
         });
     }
@@ -1769,31 +1783,34 @@ mod tests {
     #[test]
     fn test_add_local_model_registry_binding() {
         run_with_temp_home(|home| {
-            // 造一个合法的 GGUF（magic 头）
+            // 造一个本地 KWS 模型目录
             let dir = home.join("models-local");
             std::fs::create_dir_all(&dir).unwrap();
-            let gguf = dir.join("arbitrary-name.gguf");
-            std::fs::write(&gguf, b"GGUFxxxxx").unwrap();
+            let model_dir = dir.join("my-kws-model");
+            std::fs::create_dir_all(&model_dir).unwrap();
 
             // 从 Registry 卡片导入（registry_id 显式绑定，不依赖 basename）
-            let m = add_local_model(&gguf, Some("llm"), Some("qwen3-1.7b-q4-k-m")).unwrap();
-            assert_eq!(m.id, "qwen3-1.7b-q4-k-m");
-            assert_eq!(m.install_state, InstallState::Installed);
-            assert_eq!(m.ownership, StorageOwnership::External);
+            let m = add_local_model(
+                &model_dir,
+                Some("kws"),
+                Some("kws-zipformer-wenetspeech-3.3m"),
+            )
+            .unwrap();
+            assert_eq!(m.id, "kws-zipformer-wenetspeech-3.3m");
             assert_eq!(m.source, ModelSource::Registry);
-            // registry 卡片 local_path 指向导入的文件
+            // registry 卡片绑定记录存在
             let records = get_local_models();
             let rec = records
                 .iter()
-                .find(|l| l.registry_id.as_deref() == Some("qwen3-1.7b-q4-k-m"))
+                .find(|l| l.registry_id.as_deref() == Some("kws-zipformer-wenetspeech-3.3m"))
                 .expect("应存在绑定");
-            assert!(rec.path.ends_with("arbitrary-name.gguf"));
+            assert!(rec.path.ends_with("my-kws-model"));
             // 不产生 standalone 重复卡片
             let models = list_models();
             assert_eq!(
                 models
                     .iter()
-                    .filter(|m| m.id == "qwen3-1.7b-q4-k-m")
+                    .filter(|m| m.id == "kws-zipformer-wenetspeech-3.3m")
                     .count(),
                 1
             );
@@ -1805,28 +1822,35 @@ mod tests {
         run_with_temp_home(|home| {
             let dir = home.join("models-local");
             std::fs::create_dir_all(&dir).unwrap();
-            let gguf = dir.join("random.gguf");
-            std::fs::write(&gguf, b"GGUFxxxxx").unwrap();
+            let model_dir = dir.join("random-kws");
+            std::fs::create_dir_all(&model_dir).unwrap();
 
             // 顶部添加本地模型：registry_id=None
-            let m = add_local_model(&gguf, Some("llm"), None).unwrap();
+            let m = add_local_model(&model_dir, Some("kws"), None).unwrap();
             assert_eq!(m.source, ModelSource::Local);
             assert_eq!(m.ownership, StorageOwnership::External);
             assert!(m.id.starts_with("local-"));
 
-            // 同目录多个 GGUF：选目录 → Err（不能自动挑）
-            let err = add_local_model(&dir, Some("llm"), None).unwrap_err();
-            assert!(err.contains("具体的 .gguf 文件"), "err={err}");
+            // sherpa 类型必须选目录：传文件 → Err
+            let a_file = dir.join("some.onnx");
+            std::fs::write(&a_file, b"onnx").unwrap();
+            let err = add_local_model(&a_file, Some("kws"), None).unwrap_err();
+            assert!(err.contains("请选择模型目录"), "err={err}");
 
             // 未知 registry_id
-            let err = add_local_model(&gguf, Some("llm"), Some("nope")).unwrap_err();
+            let err = add_local_model(&model_dir, Some("kws"), Some("nope")).unwrap_err();
             assert!(err.contains("未知的 Registry 模型"));
 
             // registry_id 类型不一致
-            let err = add_local_model(&gguf, Some("asr"), Some("qwen3-1.7b-q4-k-m")).unwrap_err();
+            let err = add_local_model(
+                &model_dir,
+                Some("asr"),
+                Some("kws-zipformer-wenetspeech-3.3m"),
+            )
+            .unwrap_err();
             assert!(err.contains("类型与所选类型不一致"));
 
-            // 非 GGUF
+            // LLM 类型仍校验 GGUF（历史 external LLM 注册兼容）
             let txt = dir.join("plain.txt");
             std::fs::write(&txt, b"hello").unwrap();
             let err = add_local_model(&txt, Some("llm"), None).unwrap_err();
@@ -1839,14 +1863,14 @@ mod tests {
         run_with_temp_home(|home| {
             let dir = home.join("models-local");
             std::fs::create_dir_all(&dir).unwrap();
-            let gguf = dir.join("keepme.gguf");
-            std::fs::write(&gguf, b"GGUFxxxxx").unwrap();
-            let m = add_local_model(&gguf, Some("llm"), None).unwrap();
+            let model_dir = dir.join("keepme-kws");
+            std::fs::create_dir_all(&model_dir).unwrap();
+            let m = add_local_model(&model_dir, Some("kws"), None).unwrap();
             assert!(m.id.starts_with("local-"));
             let id = m.id.clone();
             remove_local_model_record(&id).unwrap();
-            // 原始文件仍在
-            assert!(gguf.is_file());
+            // 原始目录仍在
+            assert!(model_dir.is_dir());
             assert!(get_local_models().is_empty());
         });
     }
@@ -1856,44 +1880,20 @@ mod tests {
         run_with_temp_home(|home| {
             let dir = home.join("models-local");
             std::fs::create_dir_all(&dir).unwrap();
-            let a = dir.join("a.gguf");
-            let b = dir.join("b.gguf");
-            std::fs::write(&a, b"GGUFxxxxx").unwrap();
-            std::fs::write(&b, b"GGUFxxxxx").unwrap();
-            add_local_model(&a, Some("llm"), Some("qwen3-0.6b-q4-k-m")).unwrap();
-            // 第二次导入另一个 GGUF → 重新关联（旧绑定被替换）
-            add_local_model(&b, Some("llm"), Some("qwen3-0.6b-q4-k-m")).unwrap();
+            let a = dir.join("a-kws");
+            let b = dir.join("b-kws");
+            std::fs::create_dir_all(&a).unwrap();
+            std::fs::create_dir_all(&b).unwrap();
+            add_local_model(&a, Some("kws"), Some("kws-zipformer-wenetspeech-3.3m")).unwrap();
+            // 第二次导入另一个目录 → 重新关联（旧绑定被替换）
+            add_local_model(&b, Some("kws"), Some("kws-zipformer-wenetspeech-3.3m")).unwrap();
             let records = get_local_models();
             let bindings: Vec<_> = records
                 .iter()
-                .filter(|l| l.registry_id.as_deref() == Some("qwen3-0.6b-q4-k-m"))
+                .filter(|l| l.registry_id.as_deref() == Some("kws-zipformer-wenetspeech-3.3m"))
                 .collect();
             assert_eq!(bindings.len(), 1, "同一 registry_id 只允许一条绑定");
-            assert!(bindings[0].path.ends_with("b.gguf"));
-        });
-    }
-
-    #[test]
-    fn test_registry_linked_external_missing_shows_invalid() {
-        run_with_temp_home(|home| {
-            let dir = home.join("models-local");
-            std::fs::create_dir_all(&dir).unwrap();
-            let gguf = dir.join("vanishing.gguf");
-            std::fs::write(&gguf, b"GGUFxxxxx").unwrap();
-            add_local_model(&gguf, Some("llm"), Some("qwen3-4b-instruct-2507-q4-k-m")).unwrap();
-            // 用户手动删除文件
-            std::fs::remove_file(&gguf).unwrap();
-            let models = list_models();
-            let m = models
-                .iter()
-                .find(|m| m.id == "qwen3-4b-instruct-2507-q4-k-m")
-                .unwrap();
-            assert_eq!(
-                m.install_state,
-                InstallState::Invalid,
-                "丢失文件必须 Invalid，不能退回需导入"
-            );
-            assert_eq!(m.ownership, StorageOwnership::External);
+            assert!(bindings[0].path.ends_with("b-kws"));
         });
     }
 
@@ -2273,14 +2273,15 @@ mod tests {
         run_with_temp_home(|home| {
             let dir = home.join("models-local");
             std::fs::create_dir_all(&dir).unwrap();
-            let gguf = dir.join("current.gguf");
-            std::fs::write(&gguf, b"GGUFxxxxx").unwrap();
-            let m = add_local_model(&gguf, Some("llm"), None).unwrap();
-            set_selected_model(ModelType::Llm, Path::new(&m.local_path.unwrap())).unwrap();
-            assert!(is_path_current(ModelType::Llm, &gguf));
+            let model_dir = dir.join("current-kws");
+            std::fs::create_dir_all(&model_dir).unwrap();
+            let m = add_local_model(&model_dir, Some("kws"), None).unwrap();
+            set_selected_model(ModelType::Kws, Path::new(&m.local_path.unwrap())).unwrap();
+            assert!(is_path_current(ModelType::Kws, &model_dir));
             // 切换走后不再是 current（供 command 层「移除前需先切换」判定使用）
-            set_selected_model(ModelType::Llm, Path::new("/tmp/other.gguf")).unwrap();
-            assert!(!is_path_current(ModelType::Llm, &gguf));
+            let other = home.join("models-local/other-kws");
+            set_selected_model(ModelType::Kws, &other).unwrap();
+            assert!(!is_path_current(ModelType::Kws, &model_dir));
         });
     }
 
@@ -2323,58 +2324,76 @@ mod tests {
         (dir, runtime, install_id)
     }
 
-    /// 同 repo 多 variant 并存：Q4 已装+Current / Q5 已装，list_models 与 summary 正确表达。
+    /// 同 repo 多 artifact 并存（ASR HF 安装）：list_models 与 summary 正确表达，
+    /// current 从 selection 派生（is_current 不持久化）。
     #[test]
     fn test_hf_multi_variant_install_and_current_derived() {
         run_with_temp_home(|_| {
-            let repo = "Qwen/Qwen3-4B-GGUF";
-            let (_, q4_runtime, q4_install) =
-                make_hf_install(repo, "Q4_K_M", "Qwen3-4B-Q4_K_M.gguf");
-            let (_, q5_runtime, q5_install) =
-                make_hf_install(repo, "Q5_K_M", "Qwen3-4B-Q5_K_M.gguf");
+            use crate::model_library::catalog::ModelCategory;
+            use crate::model_library::download::ArtifactSource;
+            use crate::model_library::install::{
+                InstallMeta, META_SCHEMA_VERSION, ModelStorage, derive_install_id,
+            };
+
+            // 造一个 sherpa HF 安装（meta v2 + 占位文件），返回 (install_dir, install_id)
+            let make_hf_asr_install = |repo: &str, artifact: &str| -> (PathBuf, String) {
+                let dir = ModelStorage::install_dir("hf", repo, ModelCategory::Asr, artifact);
+                std::fs::create_dir_all(&dir).unwrap();
+                std::fs::write(dir.join("model.onnx"), b"onnx").unwrap();
+                let install_id =
+                    derive_install_id(&ArtifactSource::HuggingFace, repo, artifact, None);
+                let meta = InstallMeta {
+                    schema_version: META_SCHEMA_VERSION,
+                    install_id: install_id.clone(),
+                    source: "hf".into(),
+                    model_id: repo.into(),
+                    repo_id: Some(repo.into()),
+                    revision: Some("main".into()),
+                    model_type: "asr".into(),
+                    artifact_id: artifact.into(),
+                    variant: None,
+                    architecture: Some("sherpa-asr-streaming-zipformer".into()),
+                    installed_at: "2026-08-17T00:00:00Z".into(),
+                    registry_id: None,
+                    version: None,
+                    managed: Some(true),
+                };
+                ModelStorage::write_meta(&dir, &meta).unwrap();
+                (dir, install_id)
+            };
+
+            let repo = "k2-fsa/sherpa-onnx-test";
+            let (a_dir, a_install) = make_hf_asr_install(repo, "artifact-a");
+            let (_b_dir, b_install) = make_hf_asr_install(repo, "artifact-b");
 
             let models = list_models();
             let hf: Vec<_> = models
                 .iter()
                 .filter(|m| m.source == ModelSource::Hf)
                 .collect();
-            assert_eq!(hf.len(), 2, "两个 variant 各自一条 HF 安装");
+            assert_eq!(hf.len(), 2, "两个 artifact 各自一条 HF 安装");
             // install_id 稳定且唯一
             let ids: Vec<_> = hf
                 .iter()
                 .map(|m| m.install_id.as_deref().unwrap())
                 .collect();
-            assert!(ids.contains(&q4_install.as_str()));
-            assert!(ids.contains(&q5_install.as_str()));
-            assert_ne!(q4_install, q5_install);
+            assert!(ids.contains(&a_install.as_str()));
+            assert!(ids.contains(&b_install.as_str()));
+            assert_ne!(a_install, b_install);
 
-            // 设为 Q4 current → 仅 Q4 is_current（is_current 不持久化，从 settings 派生）
-            set_selected_model(ModelType::Llm, &q4_runtime).unwrap();
+            // 设为 A current → 仅 A is_current（is_current 不持久化，从 settings 派生）
+            set_selected_model(ModelType::Asr, &a_dir).unwrap();
             let models2 = list_models();
-            let q4 = models2
+            let a = models2
                 .iter()
-                .find(|m| m.install_id.as_deref() == Some(&q4_install))
+                .find(|m| m.install_id.as_deref() == Some(&a_install))
                 .unwrap();
-            let q5 = models2
+            let b = models2
                 .iter()
-                .find(|m| m.install_id.as_deref() == Some(&q5_install))
+                .find(|m| m.install_id.as_deref() == Some(&b_install))
                 .unwrap();
-            assert!(q4.current);
-            assert!(!q5.current);
-
-            // 切换后无需改 metadata
-            set_selected_model(ModelType::Llm, &q5_runtime).unwrap();
-            let models3 = list_models();
-            let q4b = models3
-                .iter()
-                .find(|m| m.install_id.as_deref() == Some(&q4_install))
-                .unwrap();
-            let q5b = models3
-                .iter()
-                .find(|m| m.install_id.as_deref() == Some(&q5_install))
-                .unwrap();
-            assert!(!q4b.current);
-            assert!(q5b.current);
+            assert!(a.current);
+            assert!(!b.current);
 
             // local_install_summary：同 repo 聚合
             let summary = local_install_summary();

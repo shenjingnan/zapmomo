@@ -1,3 +1,4 @@
+import { isLlmConfigured } from "@/components/llm/llmMeta";
 import type { RuntimeState } from "@/providers/RuntimeContext";
 
 export type GuideCapability = "kws" | "asr" | "llm" | "tts";
@@ -50,7 +51,8 @@ function capabilityIssue(
     case "llm": {
       const llm = runtime.llm;
       if (llm.configError || llm.error) return { capability, name, kind: "error", href };
-      if (llm.config && !llm.config.models_present) {
+      // 远程连接语义：未填 API 地址/模型名即未配置。
+      if (llm.config && !isLlmConfigured(llm.config)) {
         return { capability, name, kind: "unconfigured", href };
       }
       return null;

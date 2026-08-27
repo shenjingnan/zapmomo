@@ -1404,7 +1404,7 @@ mod tests {
         let sine: Vec<f32> = (0..3200)
             .map(|i| ((i as f32 / 3200.0) * std::f32::consts::TAU).sin())
             .collect();
-        assert!((chunk_rms(&sine) - 0.7071).abs() < 0.01);
+        assert!((chunk_rms(&sine) - std::f32::consts::FRAC_1_SQRT_2).abs() < 0.01);
         // 幅度更大 → RMS 更大（用于阈值门控判断）
         assert!(chunk_rms(&[0.9, 0.9]) > chunk_rms(&[0.1, 0.1]));
     }

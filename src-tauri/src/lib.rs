@@ -1424,135 +1424,16 @@ async fn download_tts_model(
     .map_err(|e| format!("下载任务异常: {e}"))?
 }
 
-/// `download_llm_model` 的返回：最终模型文件路径 + 是否写入了 settings 配置。
-#[derive(Serialize)]
-struct LlmDownloadResult {
-    model_path: String,
-    applied: bool,
-}
-
-/// 下载 LLM 预设模型（registry id，如 "qwen3-0.6b-q4-k-m"），完成后按需写入 [llm].model_path。
-///
-/// 复用模型库安装链路（staging → sha256 → 原子 commit → managed 元数据），并与模型库下载
-/// 共用 ModelLibraryState（全应用同时只允许一个 managed 下载）。进度经
-/// `llm-model-download-progress` 事件推送。模型加载不在此做：由前端确认无 voice 会话后
-/// 调 load_llm_model（load_llm_impl 无切换保护，voice 运行中替换引擎会造成双模型）。
-#[tauri::command]
-async fn download_llm_model(
-    app: AppHandle,
-    state: State<'_, ModelLibraryState>,
-    id: String,
-) -> Result<LlmDownloadResult, String> {
-    let flag = state.in_progress.clone();
-    if flag.swap(true, Ordering::SeqCst) {
-        return Err("模型下载已在进行中，请稍候".to_string());
-    }
-    state.cancel.store(false, Ordering::SeqCst);
-    *state.current_id.lock().unwrap_or_else(|e| e.into_inner()) = Some(id.clone());
-
-    let model =
-        model_library::registry::model_by_id(&id).ok_or_else(|| format!("未知的模型：{id}"))?;
-    // 早退需手动复位（guard 在 spawn_blocking 闭包内，覆盖不到这里）
-    if model.model_type != LibModelType::Llm
-        || model.download.is_none()
-        || model.file_name.is_none()
-    {
-        flag.store(false, Ordering::SeqCst);
-        *state.current_id.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        return Err("该模型不是可下载的 LLM 预设".to_string());
-    }
-
-    let app = app.clone();
-    let cancel = state.cancel.clone();
-    let install_cancel = cancel.clone();
-    let current_id = state.current_id.clone();
-    let final_file = tauri::async_runtime::spawn_blocking(move || {
-        let _guard = LibraryDownloadGuard {
-            in_progress: flag,
-            cancel,
-            current_id,
-        };
-        let final_file = model_library::managed_install_dir(model)
-            .join(model.file_name.as_deref().unwrap_or_default());
-        // 幂等预检：最终文件已存在（此前经模型库下载过）→ 跳过下载。
-        // install_managed_model 总是先下载到全新 staging 再 commit，不预检会对已存在模型重复全量下载。
-        if final_file.is_file() {
-            let _ = app.emit(
-                "llm-model-download-progress",
-                DownloadProgressPayload {
-                    stage: "done".to_string(),
-                    percent: 100.0,
-                    message: "模型已就绪".to_string(),
-                },
-            );
-            return Ok(final_file);
-        }
-        let mut progress = |p: zapmomo::kws::model::DownloadProgress| {
-            let _ = app.emit(
-                "llm-model-download-progress",
-                DownloadProgressPayload {
-                    stage: download_stage_str(p.stage).to_string(),
-                    percent: p.percent,
-                    message: p.message,
-                },
-            );
-        };
-        model_library::install_managed_model(model, &mut progress, Some(&install_cancel))
-            .map(|_| final_file)
-            .map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| format!("下载任务异常: {e}"))??;
-
-    // 条件写配置：当前已配置且文件存在（用户手动选择过）则不覆盖；
-    // 未配置 / 配置了缺失路径（models_present=false 的两种情况）都写入新下载的模型。
-    let applied = match llm_resolved_config() {
-        Ok(cfg) if cfg.model_path.is_file() => false,
-        Ok(_) => {
-            model_library::set_selected_model(LibModelType::Llm, &final_file)?;
-            true
-        }
-        // 配置读取失败：不动 settings，仅返回路径（前端只刷新展示，不自动加载）
-        Err(_) => false,
-    };
-    Ok(LlmDownloadResult {
-        model_path: final_file.display().to_string(),
-        applied,
-    })
-}
-
-/// 本地 LLM 引擎状态：懒创建的 worker 线程引擎。
+/// LLM 引擎状态：懒创建的 worker 线程引擎。
 struct LlmState {
     engine: Arc<Mutex<Option<Arc<LlmEngine>>>>,
-    /// 模型切换进行中（防二次切换 / 防止切换期间删除涉及的模型）
-    switch_in_progress: Arc<AtomicBool>,
-    /// 正在切换的目标模型路径（用于 `RuntimeStatus::Switching` 精确匹配）
-    switch_target_path: Arc<Mutex<Option<PathBuf>>>,
 }
 
 impl LlmState {
     fn new() -> Self {
         Self {
             engine: Arc::new(Mutex::new(None)),
-            switch_in_progress: Arc::new(AtomicBool::new(false)),
-            switch_target_path: Arc::new(Mutex::new(None)),
         }
-    }
-
-    fn is_switching(&self) -> bool {
-        self.switch_in_progress.load(Ordering::Relaxed)
-    }
-
-    fn switch_target(&self) -> Option<PathBuf> {
-        self.switch_target_path.lock().ok().and_then(|g| g.clone())
-    }
-
-    /// 当前实际加载的模型路径（RuntimeActual）。
-    fn loaded_model_path(&self) -> Option<PathBuf> {
-        self.engine
-            .lock()
-            .ok()
-            .and_then(|e| e.as_ref().and_then(|e| e.loaded_model_path()))
     }
 }
 
@@ -1566,52 +1447,20 @@ fn llm_engine_is_generating(llm: &LlmState) -> bool {
         .unwrap_or(false)
 }
 
-/// RAII：模型切换事务 guard，所有出口（成功/失败/回滚/早退/panic）都复位标志。
-struct LlmSwitchGuard {
-    in_progress: Arc<AtomicBool>,
-    target: Arc<Mutex<Option<PathBuf>>>,
-}
-
-impl LlmSwitchGuard {
-    fn begin(state: &LlmState, target: PathBuf) -> Result<Self, String> {
-        if state.switch_in_progress.swap(true, Ordering::SeqCst) {
-            return Err("模型切换正在进行中，请稍候".to_string());
-        }
-        *state
-            .switch_target_path
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(target);
-        Ok(Self {
-            in_progress: state.switch_in_progress.clone(),
-            target: state.switch_target_path.clone(),
-        })
-    }
-}
-
-impl Drop for LlmSwitchGuard {
-    fn drop(&mut self) {
-        self.in_progress.store(false, Ordering::SeqCst);
-        *self.target.lock().unwrap_or_else(|e| e.into_inner()) = None;
-    }
-}
-
 /// GUI 展示用的 LLM 配置信息。
 #[derive(Serialize)]
 struct LlmConfigInfo {
     enabled: bool,
     provider: String,
-    model_path: String,
-    models_present: bool,
     ready: bool,
-    /// RuntimeActual：当前真正加载的模型路径（None = 未加载）
-    loaded_model_path: Option<String>,
-    enable_thinking: bool,
-    auto_load: bool,
     settings_path: String,
-    /// 当前生效的角色 system prompt
     system_prompt: String,
-    /// 当前生效的采样/引擎参数（已 resolve，非 Option）
     params: GenParams,
+    base_url: Option<String>,
+    /// 完整 API Key（本机桌面应用，settings.toml 本身明文存储；
+    /// 前端默认 password 圆点展示，用户点小眼睛才显式明文）。
+    api_key: Option<String>,
+    model: Option<String>,
 }
 
 /// 加载状态事件载荷。
@@ -1624,7 +1473,7 @@ struct LlmStatusPayload {
 fn llm_resolved_config() -> Result<zapmomo::llm::config::ResolvedLlmConfig, String> {
     let settings = zapmomo::config::settings::load_settings()?;
     let llm_settings = settings.as_ref().and_then(|s| s.llm.clone());
-    zapmomo::llm::config::resolve(llm_settings.as_ref(), None)
+    zapmomo::llm::config::resolve(llm_settings.as_ref())
 }
 
 /// 把 LLM 引擎事件转发为 Tauri 事件，直到 `Finished`/`Error`（`stop_on_status` 时 `Status` 也终止）。
@@ -1632,7 +1481,7 @@ fn llm_resolved_config() -> Result<zapmomo::llm::config::ResolvedLlmConfig, Stri
 /// `stop_on_status` 时 `Status` 也终止）。**`Finished` 不退出**——同一引擎每次生成
 /// （GUI 对话 / voice 会话）都会继续产生 Token/Finished，单个转发线程持续服务，
 /// 否则第二次生成的事件无人转发，前端会一直停在「生成中」。
-/// 只持事件流 `rx`，不持引擎 Arc——引擎被替换后（set_current_model / load）无引用即
+/// 只持事件流 `rx`，不持引擎 Arc——引擎被替换后（重新连接 / load）无引用即
 /// drop，旧 forward 线程随 `Disconnected` 退出，避免旧模型内存泄漏。
 fn forward_llm_events(
     app: AppHandle,
@@ -1666,7 +1515,7 @@ fn forward_llm_events(
     }
 }
 
-/// 读取 LLM 配置信息（模型路径 / 是否就绪 / 是否已下载）。
+/// 读取 LLM 配置信息（远程连接配置 / 是否就绪）。
 #[tauri::command]
 fn get_llm_config(state: State<'_, LlmState>) -> Result<LlmConfigInfo, String> {
     let cfg = llm_resolved_config()?;
@@ -1676,44 +1525,39 @@ fn get_llm_config(state: State<'_, LlmState>) -> Result<LlmConfigInfo, String> {
         .ok()
         .and_then(|e| e.as_ref().map(|e| e.is_ready()))
         .unwrap_or(false);
-    let loaded_model_path = state
-        .engine
-        .lock()
-        .ok()
-        .and_then(|e| e.as_ref().and_then(|e| e.loaded_model_path()))
-        .map(|p| p.display().to_string());
     Ok(LlmConfigInfo {
         enabled: cfg.enabled,
         provider: cfg.provider,
-        model_path: cfg.model_path.display().to_string(),
-        models_present: cfg.model_path.is_file(),
         ready,
-        loaded_model_path,
-        enable_thinking: cfg.params.enable_thinking,
-        auto_load: cfg.auto_load,
         settings_path: zapmomo::config::settings::get_settings_path()
             .display()
             .to_string(),
         system_prompt: cfg.system_prompt,
         params: cfg.params,
+        base_url: cfg.base_url,
+        api_key: cfg.api_key,
+        model: cfg.model,
     })
 }
 
-/// 加载 LLM 模型的核心逻辑（command 与启动自动加载共用）。
+/// 创建/替换远程 LLM 引擎的核心逻辑。
 ///
-/// 加载在 worker 线程异步进行，结果经 `llm-status`/`llm-error` 事件返回。
+/// 远程 provider 无本地模型加载，只需校验 base_url / model 配置后创建引擎实例。
+/// 结果经 `llm-status`/`llm-error` 事件返回。
 fn load_llm_impl(app: AppHandle, state: &LlmState) -> Result<(), String> {
-    // 统一引擎：加载会替换共享槽引擎，voice 空闲时可加载（voice 会感知新引擎）；
     // LLM 正在生成时禁止替换（避免破坏 voice / GUI 的当前生成）。
     if app.state::<VoiceSessionState>().is_running() && llm_engine_is_generating(state) {
-        return Err("语音会话正在使用 LLM 生成回复，请稍候再加载。".to_string());
+        return Err("语音会话正在使用 LLM 生成回复，请稍候再连接。".to_string());
     }
     let cfg = llm_resolved_config()?;
-    if !cfg.model_path.is_file() {
-        return Err(format!(
-            "模型文件不存在：{}\n\n请下载 GGUF 模型（如 Qwen3-4B-Instruct-2507 Q4_K_M）并在设置中配置路径。",
-            cfg.model_path.display()
-        ));
+    if !cfg.enabled {
+        return Err("LLM 功能未启用，请先在设置中启用。".to_string());
+    }
+    if cfg.base_url.as_deref().unwrap_or("").trim().is_empty() {
+        return Err("未配置 API 地址（base_url），请先填写。".to_string());
+    }
+    if cfg.model.as_deref().unwrap_or("").trim().is_empty() {
+        return Err("未配置模型名（model），请先填写。".to_string());
     }
     let engine = Arc::new(zapmomo::llm::LlmEngine::new(cfg).map_err(|e| e.to_string())?);
     engine.load().map_err(|e| e.to_string())?;
@@ -1723,10 +1567,9 @@ fn load_llm_impl(app: AppHandle, state: &LlmState) -> Result<(), String> {
     Ok(())
 }
 
-/// 加载 LLM 模型（异步：结果经 `llm-status`/`llm-error` 事件返回）。
+/// 连接远程 LLM（异步：结果经 `llm-status`/`llm-error` 事件返回）。
 #[tauri::command]
 fn load_llm_model(app: AppHandle, state: State<'_, LlmState>) -> Result<(), String> {
-    // 统一引擎：voice 会话与 GUI 共用 LlmState 的 engine，load 幂等（已 ready 则无操作），无需拦截
     load_llm_impl(app, state.inner())
 }
 
@@ -1758,7 +1601,7 @@ fn chat_llm(state: State<'_, LlmState>, text: String) -> Result<(), String> {
         .lock()
         .expect("llm lock poisoned")
         .clone()
-        .ok_or("模型未加载，请先点击「加载模型」".to_string())?;
+        .ok_or("模型未连接，请先点击「连接」".to_string())?;
     if !engine.is_ready() {
         return Err("模型尚未就绪，请稍候".to_string());
     }
@@ -2131,11 +1974,14 @@ fn preflight_voice_models(
     if cfg.tts.model_type.requires_data_dir() && !cfg.tts.data_dir.is_dir() {
         return Err(format!("缺少 TTS 数据目录: {}", cfg.tts.data_dir.display()));
     }
-    if !cfg.llm.model_path.is_file() {
-        return Err(format!(
-            "LLM 模型文件不存在: {}",
-            cfg.llm.model_path.display()
-        ));
+    if !cfg.llm.enabled {
+        return Err("语音会话需要启用 LLM，请先在设置中启用。".to_string());
+    }
+    if cfg.llm.base_url.as_deref().unwrap_or("").trim().is_empty() {
+        return Err("语音会话需要配置 LLM API 地址（base_url），请先填写。".to_string());
+    }
+    if cfg.llm.model.as_deref().unwrap_or("").trim().is_empty() {
+        return Err("语音会话需要配置 LLM 模型名（model），请先填写。".to_string());
     }
     Ok(())
 }
@@ -2603,46 +2449,36 @@ fn clear_conversation_records() -> Result<(), String> {
     records::clear_records()
 }
 
-/// 持久化用户选择的 LLM 模型路径（GGUF 文件），写入 `[llm].model_path`。
-#[tauri::command]
-fn set_llm_model_path(path: String) -> Result<(), String> {
-    let path_buf = std::path::PathBuf::from(&path);
-    if !path_buf.is_file() {
-        return Err(format!("文件不存在：{path}"));
-    }
-    if !zapmomo::llm::local::llama::is_gguf_file(&path_buf) {
-        return Err("不是有效的 GGUF 模型文件".to_string());
-    }
-    let mut settings = settings::load_settings()?.unwrap_or_default();
-    let llm = settings.llm.get_or_insert_with(LlmSettings::default);
-    llm.model_path = Some(path);
-    settings::save_settings(&settings)?;
-    Ok(())
-}
-
-/// 持久化用户对 Qwen3 思考模式的开关，写入 `[llm].enable_thinking`。
-#[tauri::command]
-fn set_llm_thinking(enabled: bool) -> Result<(), String> {
-    let mut settings = settings::load_settings()?.unwrap_or_default();
-    let llm = settings.llm.get_or_insert_with(LlmSettings::default);
-    llm.enable_thinking = Some(enabled);
-    settings::save_settings(&settings)?;
-    Ok(())
-}
-
-/// 持久化用户对「启动自动加载模型」的开关，写入 `[llm].auto_load`。
-#[tauri::command]
-fn set_llm_auto_load(enabled: bool) -> Result<(), String> {
-    let mut settings = settings::load_settings()?.unwrap_or_default();
-    let llm = settings.llm.get_or_insert_with(LlmSettings::default);
-    llm.auto_load = Some(enabled);
-    settings::save_settings(&settings)?;
-    Ok(())
-}
-
-/// 批量持久化 LLM 采样/引擎参数（11 项），写入 `[llm]`。
+/// 持久化远程 LLM 连接配置（base_url / api_key / model），写入 `[llm]`。
 ///
-/// 载荷为 `{ params: { context_size, temperature, ... } }`（snake_case 直传）；
+/// `None` 字段保持原有配置不变；`api_key` 为空串时清空。保存后需重新连接生效。
+#[tauri::command]
+fn set_llm_connection(
+    base_url: String,
+    api_key: Option<String>,
+    model: String,
+) -> Result<(), String> {
+    let mut settings = settings::load_settings()?.unwrap_or_default();
+    let llm = settings.llm.get_or_insert_with(LlmSettings::default);
+    llm.provider = Some("openai".to_string());
+    if !base_url.trim().is_empty() {
+        llm.base_url = Some(base_url.trim().to_string());
+    }
+    match api_key {
+        Some(k) if !k.trim().is_empty() => llm.api_key = Some(k.trim().to_string()),
+        Some(_) => llm.api_key = None,
+        None => {}
+    }
+    if !model.trim().is_empty() {
+        llm.model = Some(model.trim().to_string());
+    }
+    settings::save_settings(&settings)?;
+    Ok(())
+}
+
+/// 批量持久化 LLM 采样参数，写入 `[llm]`。
+///
+/// 载荷为 `{ params: { temperature, top_p, ... } }`（snake_case 直传）；
 /// `None` 字段保持原有配置不变。值先整体校验、再写入，出错时不部分修改。
 #[tauri::command]
 fn set_llm_params(params: LlmParamsPatch) -> Result<(), String> {
@@ -2655,7 +2491,7 @@ fn set_llm_params(params: LlmParamsPatch) -> Result<(), String> {
 
 /// 持久化角色 system prompt，写入 `[llm].system_prompt`。
 ///
-/// 空串会覆盖内置默认（模型收到空 system prompt）；改动需重新加载模型/provider 才生效。
+/// 空串会覆盖内置默认（模型收到空 system prompt）；改动需重新连接 provider 才生效。
 #[tauri::command]
 fn set_llm_system_prompt(prompt: String) -> Result<(), String> {
     let mut settings = settings::load_settings()?.unwrap_or_default();
@@ -4675,7 +4511,6 @@ fn list_model_library(
     kws: State<'_, ListenState>,
     asr: State<'_, AsrListenState>,
     asr_dictate: State<'_, AsrDictateState>,
-    llm: State<'_, LlmState>,
     tts: State<'_, TtsSynthesizeState>,
 ) -> Result<Vec<LibraryModel>, String> {
     let mut models = model_library::list_models();
@@ -4684,27 +4519,19 @@ fn list_model_library(
     let asr_actual = asr
         .active_model_dir()
         .or_else(|| asr_dictate.active_model_dir());
-    // 统一 LLM 引擎：voice 与 GUI 共用 LlmState 的 engine，状态直接反映其加载路径
-    let llm_actual = llm.loaded_model_path();
-    let llm_target = llm.switch_target();
-    let llm_error_path = llm
-        .engine
-        .lock()
-        .ok()
-        .and_then(|e| e.as_ref().and_then(|e| e.last_load_error()))
-        .map(|e| e.model_path);
     // TTS 无常驻引擎：actual = 当前 selection（与 current 判定同源，写配置即切换），
     // active = 是否有合成线程在跑。
+    // LLM 已改为远程连接：无本地 runtime，llm 相关 actual 恒 None/false。
     let tts_actual = model_library::selection_path(LibModelType::Tts);
     let actuals = model_library::RuntimeActuals {
         kws: kws_actual.as_deref(),
         asr: asr_actual.as_deref(),
         tts: tts_actual.as_deref(),
         tts_active: tts.is_synthesizing(),
-        llm: llm_actual.as_deref(),
-        llm_switching: llm.is_switching(),
-        llm_switch_target: llm_target.as_deref(),
-        llm_load_error_path: llm_error_path.as_deref(),
+        llm: None,
+        llm_switching: false,
+        llm_switch_target: None,
+        llm_load_error_path: None,
     };
     model_library::enrich_runtime_status(&mut models, &actuals);
     Ok(models)
@@ -4737,7 +4564,7 @@ async fn download_library_model(
     if model.download.is_none() {
         flag.store(false, Ordering::SeqCst);
         *state.current_id.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        return Err("该模型没有内置下载源，请使用「导入 GGUF」".to_string());
+        return Err("该模型没有内置下载源".to_string());
     }
 
     let app = app.clone();
@@ -4830,12 +4657,12 @@ fn kws_keyword_compat_warning(model_dir: &std::path::Path) -> Option<String> {
 
 /// 设为当前模型（「使用」）。
 ///
-/// 只写 `model_dir` / `model_path`，**绝不写 enabled / 自动启动能力**。
-/// LLM 走完整事务：验证 → 写 selection → 卸载旧 → 加载新 → 失败回滚。
+/// 只写 `model_dir`，**绝不写 enabled / 自动启动能力**。
+/// KWS/ASR 监听中提示重启；TTS 会话中热切换（失败整表回滚）。
+/// LLM 已改为远程连接，本地模型切换不再支持。
 #[tauri::command]
 async fn set_current_model(
     app: AppHandle,
-    llm: State<'_, LlmState>,
     kws: State<'_, ListenState>,
     asr: State<'_, AsrListenState>,
     id: String,
@@ -4973,129 +4800,14 @@ async fn set_current_model(
         });
     }
 
-    // ---- LLM 事务 ----
-    if !path.is_file() {
-        return Err("模型文件不存在".to_string());
-    }
-    if !zapmomo::llm::local::llama::is_gguf_file(&path) {
-        return Err("不是有效的 GGUF 模型文件".to_string());
-    }
-    // 统一引擎：voice 会话共享引擎槽。仅当 LLM 正在生成时拒绝切换（会破坏 voice 回复）；
-    // 空闲（待唤醒）时允许切换——voice 每轮从共享槽重新绑定，能感知新引擎。
-    if app.state::<VoiceSessionState>().is_running() && llm_engine_is_generating(&llm) {
-        return Err("语音会话正在使用 LLM 生成回复，请稍候再切换模型。".to_string());
-    }
-    let _guard = LlmSwitchGuard::begin(llm.inner(), path.clone())?;
-
-    let old_path =
-        model_library::selection_path(LibModelType::Llm).map(|p| p.display().to_string());
-    let was_loaded = llm
-        .engine
-        .lock()
-        .ok()
-        .map(|e| e.as_ref().is_some())
-        .unwrap_or(false);
-
-    // 1. 写新 selection（短锁）
-    model_library::set_selected_model(LibModelType::Llm, &path)?;
-    if !was_loaded {
-        return Ok(SetCurrentResult {
-            model_type: mt,
-            model_id: model.id,
-            path: path.display().to_string(),
-            runtime_action: LibRuntimeAction::None,
-            effective_immediately: true,
-            message: format!(
-                "已将 {} 设为 LLM 当前模型，将在下次加载时生效",
-                model.display_name
-            ),
-        });
-    }
-
-    // 2. 替换引擎（旧引擎 Drop 会 join worker 并卸载旧模型），随后才加载新模型
-    let cfg = llm_resolved_config()?;
-    let new_engine = Arc::new(zapmomo::llm::LlmEngine::new(cfg).map_err(|e| e.to_string())?);
-    let old = llm
-        .engine
-        .lock()
-        .expect("llm lock poisoned")
-        .replace(new_engine.clone());
-    drop(old);
-
-    let loader = new_engine.clone();
-    let load_result = tauri::async_runtime::spawn_blocking(move || {
-        loader.load_blocking(std::time::Duration::from_secs(600))
-    })
-    .await
-    .map_err(|e| format!("加载任务异常：{e}"))?;
-
-    match load_result {
-        Ok(()) => {
-            std::thread::spawn(move || forward_llm_events(app, new_engine.subscribe(), false));
-            Ok(SetCurrentResult {
-                model_type: mt,
-                model_id: model.id,
-                path: path.display().to_string(),
-                runtime_action: LibRuntimeAction::Reloaded,
-                effective_immediately: true,
-                message: format!("已将 {} 设为 LLM 当前模型", model.display_name),
-            })
-        }
-        Err(new_err) => {
-            tracing::warn!("切换 LLM 到新模型失败：{new_err}");
-            // 3. 回滚：恢复 selection + 尽力重载旧模型
-            model_library::restore_selected_model(LibModelType::Llm, old_path)?;
-            let old_cfg = llm_resolved_config().map_err(|e| format!("恢复配置失败：{e}"))?;
-            let old_engine =
-                Arc::new(zapmomo::llm::LlmEngine::new(old_cfg).map_err(|e| e.to_string())?);
-            let _prev = llm
-                .engine
-                .lock()
-                .expect("llm lock poisoned")
-                .replace(old_engine.clone());
-            let old_loader = old_engine.clone();
-            let old_result = tauri::async_runtime::spawn_blocking(move || {
-                old_loader.load_blocking(std::time::Duration::from_secs(600))
-            })
-            .await
-            .map_err(|e| format!("恢复加载任务异常：{e}"))?;
-            match old_result {
-                Ok(()) => {
-                    std::thread::spawn(move || {
-                        forward_llm_events(app, old_engine.subscribe(), false)
-                    });
-                    Ok(SetCurrentResult {
-                        model_type: mt,
-                        model_id: model.id,
-                        path: path.display().to_string(),
-                        runtime_action: LibRuntimeAction::ReloadFailedRolledBack,
-                        effective_immediately: true,
-                        message: "模型切换失败，已恢复之前的模型".to_string(),
-                    })
-                }
-                Err(old_err) => {
-                    tracing::warn!("恢复旧 LLM 模型也失败：{old_err}");
-                    llm.engine.lock().expect("llm lock poisoned").take();
-                    Ok(SetCurrentResult {
-                        model_type: mt,
-                        model_id: model.id,
-                        path: path.display().to_string(),
-                        runtime_action: LibRuntimeAction::ReloadFailedRollbackFailed,
-                        effective_immediately: false,
-                        message: "模型切换失败，原模型也未能重新加载，请手动重新加载模型"
-                            .to_string(),
-                    })
-                }
-            }
-        }
-    }
+    // ---- LLM：本地推理已移除 ----
+    Err("本地 LLM 模型已移除：LLM 改为远程连接，请在 LLM 配置页填写 API 地址与 Key".to_string())
 }
 
 /// 删除模型：managed 删文件；external 只移除注册。后端全量安全检查。
 #[tauri::command]
 fn delete_model(
     dl: State<'_, ModelLibraryState>,
-    llm: State<'_, LlmState>,
     kws: State<'_, ListenState>,
     asr: State<'_, AsrListenState>,
     id: String,
@@ -5110,20 +4822,14 @@ fn delete_model(
     if downloading {
         return Err("该模型正在下载，请先取消下载".to_string());
     }
-    if model.model_type == LibModelType::Llm && llm.is_switching() {
-        return Err("模型切换正在进行中，请稍候".to_string());
-    }
     if model.current {
         return Err("该模型当前正在使用，请先切换到其他模型".to_string());
     }
     if let Some(lp) = &model.local_path {
         let lp = Path::new(lp);
-        let loaded = llm
-            .loaded_model_path()
-            .is_some_and(|p| model_library::paths_equal(&p, lp))
-            || kws
-                .active_model_dir()
-                .is_some_and(|d| model_library::paths_equal(&d, lp))
+        let loaded = kws
+            .active_model_dir()
+            .is_some_and(|d| model_library::paths_equal(&d, lp))
             || asr
                 .active_model_dir()
                 .is_some_and(|d| model_library::paths_equal(&d, lp));
@@ -5192,7 +4898,7 @@ impl Drop for StorageMigrateGuard {
 
 /// 检查「设置/迁移数据目录」是否被占用（下载中 / 语音会话 / 监听 / 迁移中）。
 ///
-/// 命中返回具体错误。`migrate_storage` 额外检查 LLM 已加载（mmap 持有文件句柄）。
+/// 命中返回具体错误。
 #[allow(clippy::too_many_arguments)]
 fn check_storage_busy(
     dl_kws: &DownloadState,
@@ -5301,7 +5007,6 @@ async fn migrate_storage(
     voice: State<'_, VoiceSessionState>,
     kws: State<'_, ListenState>,
     asr: State<'_, AsrListenState>,
-    llm: State<'_, LlmState>,
 ) -> Result<(), String> {
     if mig.is_running() {
         return Err("迁移已在进行中".to_string());
@@ -5316,10 +5021,6 @@ async fn migrate_storage(
         kws.inner(),
         asr.inner(),
     )?;
-    if llm.loaded_model_path().is_some() {
-        return Err("LLM 模型已加载（文件被占用），请先卸载模型后再迁移".to_string());
-    }
-
     mig.running.store(true, Ordering::SeqCst);
     mig.cancel.store(false, Ordering::SeqCst);
     let running = mig.running.clone();
@@ -5391,7 +5092,6 @@ fn open_storage_dir() -> Result<(), String> {
 /// 移除 external 模型注册（不删文件）。current / runtime-loaded / switching 时拒绝。
 #[tauri::command]
 fn remove_local_model(
-    llm: State<'_, LlmState>,
     kws: State<'_, ListenState>,
     asr: State<'_, AsrListenState>,
     id: String,
@@ -5405,15 +5105,9 @@ fn remove_local_model(
     if model_library::is_path_current(mt, lp) {
         return Err("该模型当前被设为当前模型，请先切换到其他模型".to_string());
     }
-    if mt == LibModelType::Llm && llm.is_switching() {
-        return Err("模型切换正在进行中，请稍候".to_string());
-    }
-    let running = llm
-        .loaded_model_path()
-        .is_some_and(|p| model_library::paths_equal(&p, lp))
-        || kws
-            .active_model_dir()
-            .is_some_and(|d| model_library::paths_equal(&d, lp))
+    let running = kws
+        .active_model_dir()
+        .is_some_and(|d| model_library::paths_equal(&d, lp))
         || asr
             .active_model_dir()
             .is_some_and(|d| model_library::paths_equal(&d, lp));
@@ -5423,32 +5117,13 @@ fn remove_local_model(
     model_library::remove_local_model_record(&id)
 }
 
-/// 添加本地模型（Registry 卡片「导入 GGUF」显式携带 registry_id；顶部添加为 None）。
+/// 添加本地模型（Registry 卡片显式携带 registry_id；顶部添加为 None）。
 #[tauri::command]
 fn add_local_model(
-    llm: State<'_, LlmState>,
     path: String,
     model_type: Option<String>,
     registry_id: Option<String>,
 ) -> Result<LibraryModel, String> {
-    // registry 重绑定时：旧绑定正在运行/切换中则拒绝
-    if let Some(rid) = &registry_id
-        && let Some(existing) = model_library::get_local_models()
-            .into_iter()
-            .find(|l| l.registry_id.as_deref() == Some(rid.as_str()))
-    {
-        let mt = LibModelType::from_str_value(&existing.model_type).unwrap_or(LibModelType::Llm);
-        let ep = Path::new(&existing.path);
-        if mt == LibModelType::Llm && llm.is_switching() {
-            return Err("模型切换正在进行中，请稍候".to_string());
-        }
-        if llm
-            .loaded_model_path()
-            .is_some_and(|p| model_library::paths_equal(&p, ep))
-        {
-            return Err("该模型正在运行，请先切换或卸载后再重新导入".to_string());
-        }
-    }
     model_library::add_local_model(
         Path::new(&path),
         model_type.as_deref(),
@@ -5917,18 +5592,15 @@ pub fn run() {
             stop_tts,
             is_tts_synthesizing,
             download_tts_model,
-            download_llm_model,
             get_llm_config,
             load_llm_model,
             unload_llm_model,
             chat_llm,
             stop_llm,
             is_llm_ready,
-            set_llm_model_path,
-            set_llm_thinking,
-            set_llm_auto_load,
             set_llm_params,
             set_llm_system_prompt,
+            set_llm_connection,
             set_tts_enabled,
             set_tts_params,
             set_tts_voice,
@@ -5943,7 +5615,6 @@ pub fn run() {
             get_dsh_bridge_status,
             test_dsh_announce,
             get_conversation_records,
-            clear_conversation_records,
             list_model_library,
             get_system_resources,
             download_library_model,
@@ -5970,6 +5641,7 @@ pub fn run() {
             migrate_storage,
             cancel_storage_migration,
             open_storage_dir,
+            clear_conversation_records,
             get_live2d_config,
             list_companions,
             import_companion,
@@ -6041,13 +5713,21 @@ pub fn run() {
                 false
             };
 
-            // 启动自动加载 LLM 模型（voice 未接管时，若用户开启 auto_load）：后台异步加载，
-            // 失败静默降级为手动加载。
-            if !voice_auto_started && llm_resolved_config().map(|c| c.auto_load).unwrap_or(false) {
+            // 启动时自动连接远程 LLM（voice 未接管且已配置 base_url/model 时）：后台异步连接，
+            // 失败静默降级为手动连接。
+            if !voice_auto_started
+                && llm_resolved_config()
+                    .map(|c| {
+                        c.enabled
+                            && !c.base_url.as_deref().unwrap_or("").trim().is_empty()
+                            && !c.model.as_deref().unwrap_or("").trim().is_empty()
+                    })
+                    .unwrap_or(false)
+            {
                 let handle = app.handle().clone();
                 let state = app.state::<LlmState>();
                 if let Err(e) = load_llm_impl(handle, state.inner()) {
-                    tracing::warn!("自动加载 LLM 失败: {e}");
+                    tracing::warn!("自动连接 LLM 失败: {e}");
                 }
             }
 

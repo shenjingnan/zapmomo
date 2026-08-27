@@ -169,8 +169,8 @@ impl OpenAiChatProvider {
         let mut args = CreateChatCompletionRequestArgs::default();
         args.model(&self.model)
             .messages(messages)
-            // llama.cpp 专有参数（top_k/min_p/repeat_penalty/seed/threads/gpu_layers/
-            // context_size/batch_size）在 OpenAI 兼容 API 无对应项，忽略
+            // top_k/min_p/repeat_penalty/seed 仅部分服务端支持（如 llama-server），
+            // 标准 OpenAI Chat Completions 无对应项，这里不发
             .max_tokens(params.max_tokens as u32)
             .temperature(params.temperature)
             .top_p(params.top_p);
@@ -284,8 +284,6 @@ impl LlmProvider for OpenAiChatProvider {
 mod tests {
     use super::*;
     use crate::llm::types::{ChatMessage, ChatRole, ToolResult};
-    use std::io::Read;
-    use std::path::PathBuf;
     use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
@@ -294,10 +292,8 @@ mod tests {
         ResolvedLlmConfig {
             enabled: true,
             provider: "openai".to_string(),
-            model_path: PathBuf::new(),
             system_prompt: "测试系统提示".to_string(),
             params: GenParams::default(),
-            auto_load: false,
             base_url,
             api_key: Some("test-key".to_string()),
             model,

@@ -249,8 +249,8 @@ mod tests {
         let models = all_models();
         assert_eq!(
             models.len(),
-            34,
-            "应为 7 个首批（含 2 KWS）+ 5 个 ASR + 6 个补充 LLM + 2 个新 TTS + 3 个新 ASR + 2 个流式 Paraformer + 1 个新 KWS（gigaspeech）+ 2 个 Kokoro TTS + 1 个 Qwen3-ASR + 1 个 audiocpp PocketTTS + 1 个 audiocpp OmniVoice + 1 个 audiocpp VoxCPM2 + 2 个 Qwen3-TTS"
+            25,
+            "应为 7 个首批（含 2 KWS）+ 5 个 ASR + 2 个新 TTS + 3 个新 ASR + 2 个流式 Paraformer + 1 个新 KWS（gigaspeech）+ 2 个 Kokoro TTS + 1 个 Qwen3-ASR + 1 个 audiocpp PocketTTS + 1 个 audiocpp OmniVoice + 1 个 audiocpp VoxCPM2 + 2 个 Qwen3-TTS（LLM 条目已随本地推理移除）"
         );
         assert!(
             models
@@ -262,15 +262,11 @@ mod tests {
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), models.len(), "Registry id 必须唯一");
-        // LLM 条目：绑定具体 GGUF 文件名，且支持一键下载（raw 单文件）
-        for m in models.iter().filter(|m| m.is_llm()) {
-            assert!(m.file_name.is_some(), "LLM 条目必须绑定具体 GGUF 文件名");
-            let d = m.download.as_ref().expect("LLM 应支持一键下载");
-            assert_eq!(d.kind, "raw");
-            assert_eq!(m.required_assets.len(), 1);
-            assert_eq!(m.required_assets[0], d.manifest_role);
-            assert!(m.format == "GGUF");
-        }
+        // 本地 LLM 推理已移除：registry 不应再有 LLM 条目
+        assert!(
+            !models.iter().any(|m| m.is_llm()),
+            "LLM 已改为远程连接，registry 不应包含 LLM 条目"
+        );
     }
 
     #[test]
@@ -306,9 +302,8 @@ mod tests {
 
     #[test]
     fn test_model_by_id_and_order() {
-        let m = model_by_id("qwen3-1.7b-q4-k-m").expect("按 id 查找");
-        assert_eq!(m.model_type, ModelType::Llm);
-        assert_eq!(m.file_name.as_deref(), Some("Qwen3-1.7B-Q4_K_M.gguf"));
+        let m = model_by_id("asr-sensevoice-zh-en-ja-ko-yue").expect("按 id 查找");
+        assert_eq!(m.model_type, ModelType::Asr);
         // 推荐顺序 = registry 原始顺序（首个是 KWS）
         assert_eq!(all_models()[0].model_type, ModelType::Kws);
     }
@@ -420,7 +415,7 @@ mod tests {
             Some(TtsModelKind::Qwen3Tts17)
         );
         // 非 TTS 或无 tts_kind → None
-        assert_eq!(registry_tts_kind("qwen3-1.7b-q4-k-m"), None);
+        assert_eq!(registry_tts_kind("kws-zipformer-zh-en-3m"), None);
         assert_eq!(registry_tts_kind("不存在"), None);
     }
 
@@ -507,24 +502,5 @@ mod tests {
             gs.name,
             "sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01"
         );
-    }
-
-    #[test]
-    fn test_llm_preset_ids_for_download() {
-        // LLM 配置页一键下载的预设（download_llm_model command 依赖），删除或改名会直接
-        // 破坏下载按钮；同时钉住 name/file_name（幂等预检与条件写配置依赖该安装布局）。
-        for (id, dir, file) in [
-            ("qwen3-0.6b-q4-k-m", "Qwen3-0.6B", "Qwen3-0.6B-Q4_K_M.gguf"),
-            (
-                "qwen3-4b-instruct-2507-q4-k-m",
-                "Qwen3-4B-Instruct-2507",
-                "Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
-            ),
-        ] {
-            let m = model_by_id(id).unwrap_or_else(|| panic!("LLM 预设 {id} 必须存在"));
-            assert!(m.is_llm() && m.download.is_some(), "{id} 应可一键下载");
-            assert_eq!(m.name, dir);
-            assert_eq!(m.file_name.as_deref(), Some(file));
-        }
     }
 }

@@ -587,24 +587,15 @@ pub struct Live2dSettings {
 /// 全部字段可缺省：未配置的项在解析时回退到 `llm::config` 的内置默认值。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct LlmSettings {
-    /// 是否启用 Local LLM，缺省 false
+    /// 是否启用 LLM，缺省 false
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
-    /// provider 标识，缺省 "local"（未来 ollama/openai/...）
+    /// provider 标识，缺省 "openai"（OpenAI 兼容 API）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
-    /// GGUF 模型文件路径（支持 ${env.VAR}，相对路径锚定 ~/.zapmomo/models）
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_path: Option<String>,
     /// 角色 system prompt，缺省用内置默认
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
-    /// 上下文窗口大小（token），缺省 8192
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub context_size: Option<usize>,
-    /// 单次 decode batch 大小，缺省 512
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub batch_size: Option<usize>,
     /// 最多生成 token 数，缺省 512
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<usize>,
@@ -626,25 +617,13 @@ pub struct LlmSettings {
     /// 随机种子，缺省 0（随机）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed: Option<u32>,
-    /// CPU 线程数，缺省 物理核数 - 2
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub threads: Option<i32>,
-    /// 卸载到 GPU 的层数，缺省 -1（全部，Metal）；0 表示纯 CPU
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gpu_layers: Option<i32>,
-    /// 是否开启 Qwen3 思考模式（输出 <think> 块），缺省 false
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub enable_thinking: Option<bool>,
-    /// 是否在应用启动时自动加载模型，缺省 false（懒加载）
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auto_load: Option<bool>,
-    /// HTTP provider 的 base URL（如 https://api.openai.com/v1 或 http://127.0.0.1:8080/v1）
+    /// HTTP provider 的 base URL（如 https://open.bigmodel.cn/api/paas/v4 或 Ollama 地址）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
-    /// HTTP provider 的 API key（本地 server 可留空）
+    /// HTTP provider 的 API key（本地 server / Ollama 可留空）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
-    /// HTTP provider 的模型名（如 qwen3-4b / gpt-4o-mini）
+    /// HTTP provider 的模型名（如 glm-4.7-flash / gpt-4o-mini）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
 }
@@ -1238,38 +1217,6 @@ mod tests {
             assert_eq!(loaded, config);
             // 文件确实写到了 HOME 下
             assert!(home.join(".zapmomo/settings.toml").is_file());
-        });
-    }
-
-    #[test]
-    fn test_model_library_settings_roundtrip() {
-        run_with_temp_home(|home| {
-            let config = AppConfig {
-                model_library: Some(ModelLibrarySettings {
-                    local_models: vec![LocalModel {
-                        id: "local-abcdef123456".to_string(),
-                        name: "MyModel.gguf".to_string(),
-                        model_type: "llm".to_string(),
-                        path: "/tmp/models/MyModel.gguf".to_string(),
-                        added_at: "2026-08-17T00:00:00Z".to_string(),
-                        registry_id: Some("qwen3-1.7b-q4-k-m".to_string()),
-                    }],
-                    ..Default::default()
-                }),
-                ..Default::default()
-            };
-            save_settings(&config).unwrap();
-            let loaded = load_settings().unwrap().unwrap();
-            assert_eq!(loaded, config);
-            // external 注册信息存在 settings 中，不写用户模型目录
-            assert!(home.join(".zapmomo/settings.toml").is_file());
-            // 缺省 local_models 不序列化
-            let empty = AppConfig {
-                model_library: Some(ModelLibrarySettings::default()),
-                ..Default::default()
-            };
-            let toml_str = toml::to_string(&empty).unwrap();
-            assert!(!toml_str.contains("local_models"));
         });
     }
 

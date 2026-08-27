@@ -17,7 +17,7 @@ import {
   type ListenerStatus,
 } from "@/components/models/capabilityStatus";
 import { KwsModelSwitchMenu } from "@/components/models/KwsModelSwitchMenu";
-import { LlmModelSwitchMenu } from "@/components/models/LlmModelSwitchMenu";
+import { currentModelName, isLlmConfigured } from "@/components/llm/llmMeta";
 import { TtsModelSwitchMenu } from "@/components/models/TtsModelSwitchMenu";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
@@ -55,7 +55,7 @@ interface SummaryRowData {
   accent: string;
   icon: LucideIcon;
   name: string;
-  /** 模型名（字符串）或自定义展示（LLM 行为快速切换下拉）。 */
+  /** 模型名（字符串）或自定义展示（KWS/ASR/TTS 行为快速切换下拉；LLM 行展示远程模型名）。 */
   model: ReactNode;
   statusText: string;
   statusTone: StatusTone;
@@ -149,7 +149,7 @@ export function ModelSummary() {
     }
   };
 
-  const llmConfigured = llm.config?.models_present ?? false;
+  const llmConfigured = isLlmConfigured(llm.config);
   const asrConfigured = asr.config?.config?.models_present ?? false;
   const kwsConfigured = kws.config?.config?.models_present ?? false;
   const ttsConfigured = tts.config?.models_present ?? false;
@@ -229,15 +229,15 @@ export function ModelSummary() {
       accent: "bg-emerald-100 text-emerald-600",
       icon: Brain,
       name: "AI 大脑（LLM）",
-      model: llmConfigured ? <LlmModelSwitchMenu /> : "未配置模型",
+      model: currentModelName(llm.config) ?? "未配置模型",
       statusText: llm.error
         ? "错误"
         : llm.loading
-          ? "加载中"
+          ? "连接中"
           : llm.ready
-            ? "运行中"
+            ? "已连接"
             : llmConfigured
-              ? "未启用"
+              ? "未连接"
               : "未配置模型",
       statusTone: llm.error ? "error" : llm.loading ? "loading" : llm.ready ? "good" : "idle",
       gearHref: "/models/llm",

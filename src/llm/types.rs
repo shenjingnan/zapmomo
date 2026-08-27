@@ -1,7 +1,7 @@
 /// LLM 模块的公共数据类型。
 ///
 /// 这些类型是「owned + Serialize」的，用于在 Rust Core 与 Tauri 前端之间跨线程/跨进程传递，
-/// 与 `kws::reaction::KwsResult` / `asr::reaction::AsrResult` 的约定一致——不泄漏 llama-cpp 类型。
+/// 与 `kws::reaction::KwsResult` / `asr::reaction::AsrResult` 的约定一致--不泄漏 provider 内部类型。
 use serde::{Deserialize, Serialize};
 
 use crate::config::settings::LlmSettings;
@@ -86,13 +86,11 @@ pub enum FinishReason {
 
 /// 生成采样参数。
 ///
-/// 默认值对齐方案 §9.2 的「桌面 AI 伙伴」推荐（Qwen3 官方推荐 + 微调）。
+/// OpenAI 兼容 Chat Completions 实际生效的是 `max_tokens` / `temperature` / `top_p`；
+/// `top_k` / `min_p` / `repeat_penalty` / `seed` 部分服务端支持（如 llama-server），
+/// 不支持的服务端会忽略。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenParams {
-    /// 上下文窗口大小（token）
-    pub context_size: usize,
-    /// 单次 decode 的 batch 大小
-    pub batch_size: usize,
     /// 最多生成的 token 数
     pub max_tokens: usize,
     pub temperature: f32,
@@ -102,24 +100,11 @@ pub struct GenParams {
     pub repeat_penalty: f32,
     /// 随机种子；0 表示随机
     pub seed: u32,
-    /// CPU 线程数；0 表示自动（物理核数 - 2，由 `config::resolve` 计算）
-    pub threads: i32,
-    /// 卸载到 GPU 的层数；-1 表示全部（Metal），0 表示纯 CPU。
-    ///
-    /// 默认 0（纯 CPU）：llama-cpp-2 0.1.154 内置 llama.cpp 的 Metal 后端在获取
-    /// logits 时存在 `GGML_ASSERT(buf_dst)` 崩溃，Metal 加速留待 Phase 7 升级依赖后再启用。
-    pub gpu_layers: i32,
-    /// 是否开启 Qwen3 的思考模式（输出 `<think>` 块）。
-    ///
-    /// 默认 false：桌面伙伴场景下思考过程是噪音且增加首包延迟，关闭更自然。
-    pub enable_thinking: bool,
 }
 
 impl Default for GenParams {
     fn default() -> Self {
         Self {
-            context_size: 8192,
-            batch_size: 512,
             max_tokens: 512,
             temperature: 0.7,
             top_p: 0.8,
@@ -127,23 +112,16 @@ impl Default for GenParams {
             min_p: 0.05,
             repeat_penalty: 1.05,
             seed: 0,
-            threads: 0,
-            gpu_layers: 0,
-            enable_thinking: false,
         }
     }
 }
 
-/// 采样/引擎参数的写侧 DTO：`set_llm_params` 命令载荷。
+/// 采样参数的写侧 DTO：`set_llm_params` 命令载荷。
 ///
 /// 全部字段可缺省：`None` 表示「本次不修改该项」。字段名与 `GenParams` 一致（snake_case），
-/// 前端载荷形如 `{ params: { context_size: 8192, temperature: 0.7, ... } }`。
+/// 前端载荷形如 `{ params: { max_tokens: 512, temperature: 0.7, ... } }`。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct LlmParamsPatch {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub context_size: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub batch_size: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -158,25 +136,11 @@ pub struct LlmParamsPatch {
     pub repeat_penalty: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub threads: Option<i32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gpu_layers: Option<i32>,
 }
 
 impl LlmParamsPatch {
     /// 先整体校验（任一越界立即 Err），再逐项写入 `LlmSettings`，保证出错时不部分修改。
     pub fn apply_to(&self, llm: &mut LlmSettings) -> Result<(), String> {
-        if let Some(v) = self.context_size
-            && !(256..=1_048_576).contains(&v)
-        {
-            return Err(format!("上下文大小需在 256~1048576，当前 {v}"));
-        }
-        if let Some(v) = self.batch_size
-            && !(1..=8192).contains(&v)
-        {
-            return Err(format!("批大小需在 1~8192，当前 {v}"));
-        }
         if let Some(v) = self.max_tokens
             && !(16..=262_144).contains(&v)
         {
@@ -207,24 +171,8 @@ impl LlmParamsPatch {
         {
             return Err(format!("重复惩罚需在 0~3，当前 {v}"));
         }
-        if let Some(v) = self.threads
-            && !(0..=512).contains(&v)
-        {
-            return Err(format!("线程数需在 0~512（0=自动），当前 {v}"));
-        }
-        if let Some(v) = self.gpu_layers
-            && !(-1..=1024).contains(&v)
-        {
-            return Err(format!("GPU 层数需在 -1~1024（-1=全部），当前 {v}"));
-        }
         // seed 为任意 u32，无需边界校验
 
-        if let Some(v) = self.context_size {
-            llm.context_size = Some(v);
-        }
-        if let Some(v) = self.batch_size {
-            llm.batch_size = Some(v);
-        }
         if let Some(v) = self.max_tokens {
             llm.max_tokens = Some(v);
         }
@@ -245,12 +193,6 @@ impl LlmParamsPatch {
         }
         if let Some(v) = self.seed {
             llm.seed = Some(v);
-        }
-        if let Some(v) = self.threads {
-            llm.threads = Some(v);
-        }
-        if let Some(v) = self.gpu_layers {
-            llm.gpu_layers = Some(v);
         }
         Ok(())
     }
@@ -303,8 +245,6 @@ mod tests {
 
     fn patch_with_all() -> LlmParamsPatch {
         LlmParamsPatch {
-            context_size: Some(4096),
-            batch_size: Some(256),
             max_tokens: Some(1024),
             temperature: Some(0.9),
             top_p: Some(0.95),
@@ -312,8 +252,6 @@ mod tests {
             min_p: Some(0.1),
             repeat_penalty: Some(1.2),
             seed: Some(42),
-            threads: Some(6),
-            gpu_layers: Some(10),
         }
     }
 
@@ -321,8 +259,6 @@ mod tests {
     fn test_apply_patch_sets_all_fields() {
         let mut llm = LlmSettings::default();
         patch_with_all().apply_to(&mut llm).unwrap();
-        assert_eq!(llm.context_size, Some(4096));
-        assert_eq!(llm.batch_size, Some(256));
         assert_eq!(llm.max_tokens, Some(1024));
         assert_eq!(llm.temperature, Some(0.9));
         assert_eq!(llm.top_p, Some(0.95));
@@ -330,8 +266,6 @@ mod tests {
         assert_eq!(llm.min_p, Some(0.1));
         assert_eq!(llm.repeat_penalty, Some(1.2));
         assert_eq!(llm.seed, Some(42));
-        assert_eq!(llm.threads, Some(6));
-        assert_eq!(llm.gpu_layers, Some(10));
     }
 
     #[test]
@@ -343,28 +277,13 @@ mod tests {
         };
         patch.apply_to(&mut llm).unwrap();
         assert_eq!(llm.temperature, Some(1.1));
-        assert_eq!(llm.context_size, None);
-        assert_eq!(llm.threads, None);
-        assert_eq!(llm.gpu_layers, None);
+        assert_eq!(llm.max_tokens, None);
+        assert_eq!(llm.top_k, None);
     }
 
     #[test]
     fn test_apply_patch_rejects_out_of_range() {
         let cases: Vec<(LlmParamsPatch, &str)> = vec![
-            (
-                LlmParamsPatch {
-                    context_size: Some(255),
-                    ..Default::default()
-                },
-                "上下文大小",
-            ),
-            (
-                LlmParamsPatch {
-                    batch_size: Some(0),
-                    ..Default::default()
-                },
-                "批大小",
-            ),
             (
                 LlmParamsPatch {
                     max_tokens: Some(15),
@@ -407,20 +326,6 @@ mod tests {
                 },
                 "重复惩罚",
             ),
-            (
-                LlmParamsPatch {
-                    threads: Some(-1),
-                    ..Default::default()
-                },
-                "线程数",
-            ),
-            (
-                LlmParamsPatch {
-                    gpu_layers: Some(-2),
-                    ..Default::default()
-                },
-                "GPU",
-            ),
         ];
         for (patch, label) in cases {
             let mut llm = LlmSettings::default();
@@ -441,21 +346,16 @@ mod tests {
     #[test]
     fn test_apply_patch_accepts_boundary_values() {
         let patch = LlmParamsPatch {
-            context_size: Some(256),
+            max_tokens: Some(16),
             temperature: Some(0.0),
             top_p: Some(1.0),
-            threads: Some(0),
-            gpu_layers: Some(-1),
-            max_tokens: Some(16),
             ..Default::default()
         };
         let mut llm = LlmSettings::default();
         assert!(patch.apply_to(&mut llm).is_ok());
-        assert_eq!(llm.context_size, Some(256));
+        assert_eq!(llm.max_tokens, Some(16));
         assert_eq!(llm.temperature, Some(0.0));
         assert_eq!(llm.top_p, Some(1.0));
-        assert_eq!(llm.threads, Some(0));
-        assert_eq!(llm.gpu_layers, Some(-1));
     }
 
     #[test]
@@ -465,8 +365,6 @@ mod tests {
         let obj = value.as_object().unwrap();
         // 载荷键必须与前端 snake_case 契约一致（Tauri 嵌套结构按 serde 名直传）
         for key in [
-            "context_size",
-            "batch_size",
             "max_tokens",
             "temperature",
             "top_p",
@@ -474,8 +372,6 @@ mod tests {
             "min_p",
             "repeat_penalty",
             "seed",
-            "threads",
-            "gpu_layers",
         ] {
             assert!(obj.contains_key(key), "缺失字段 {key}");
         }
@@ -488,14 +384,11 @@ mod tests {
             llm.system_prompt = Some("自定义提示词".to_string());
             patch_with_all().apply_to(&mut llm).unwrap();
 
-            let cfg = crate::llm::config::resolve(Some(&llm), None).unwrap();
+            let cfg = crate::llm::config::resolve(Some(&llm)).unwrap();
             assert_eq!(cfg.system_prompt, "自定义提示词");
-            assert_eq!(cfg.params.context_size, 4096);
             assert_eq!(cfg.params.temperature, 0.9);
             assert_eq!(cfg.params.top_p, 0.95);
             assert_eq!(cfg.params.max_tokens, 1024);
-            assert_eq!(cfg.params.threads, 6);
-            assert_eq!(cfg.params.gpu_layers, 10);
         });
     }
 }

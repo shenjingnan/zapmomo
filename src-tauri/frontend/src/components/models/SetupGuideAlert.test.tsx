@@ -55,7 +55,12 @@ function makeLlm(o?: {
   configNull?: boolean;
 }) {
   return {
-    config: o?.configNull ? null : { models_present: o?.modelsPresent ?? true },
+    // 远程连接语义：modelsPresent 映射为「已填写 API 地址 + 模型名」
+    config: o?.configNull
+      ? null
+      : o?.modelsPresent === false
+        ? { base_url: null, model: null }
+        : { base_url: "https://open.bigmodel.cn/api/paas/v4", model: "glm-4.7-flash" },
     configError: o?.configError ?? null,
     error: o?.error ?? null,
     ready: false,

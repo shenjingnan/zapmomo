@@ -754,24 +754,32 @@ mod tests {
 
     #[test]
     fn test_merge_dedup_verified_plus_hf() {
-        // curated 含 unsloth/Qwen3-4B-Instruct-2507-GGUF（Verified），HF 页也返回它 → 只留一个且 Verified
+        // curated 与 HF 页返回同一 canonical key → 只留一个且保留 Verified overlay
+        // （本地 LLM 移除后内置精选无 HF repo 映射，这里手工构造 curated 项模拟）
         let mut local = std::collections::HashMap::new();
         let mut s = LocalModelSummary::default();
         s.installed_artifact_count = 1;
         local.insert("unsloth/Qwen3-4B-Instruct-2507-GGUF".to_string(), s);
 
-        let curated = curated_unified(&CatalogQuery::default(), &local);
-        assert!(
-            curated
-                .iter()
-                .any(|i| i.model_id == "unsloth/Qwen3-4B-Instruct-2507-GGUF"),
-            "curated 应含 HF 映射的内置 LLM"
-        );
-        assert!(
-            curated
-                .iter()
-                .any(|i| i.model_id == "kws-zipformer-zh-en-3m")
-        );
+        let curated = vec![UnifiedModelItem {
+            canonical_key: CanonicalModelKey::huggingface("unsloth/Qwen3-4B-Instruct-2507-GGUF")
+                .as_str()
+                .into(),
+            model_id: "unsloth/Qwen3-4B-Instruct-2507-GGUF".into(),
+            provider: "huggingface".into(),
+            remote: None,
+            builtin: None,
+            model_type: Some("asr".into()),
+            compatibility: CompatibilityLevel::Verified,
+            compatibility_notes: None,
+            recommended_variant: Some("Q4_K_M".into()),
+            installs: Vec::new(),
+            local_summary: local
+                .get("unsloth/Qwen3-4B-Instruct-2507-GGUF")
+                .cloned()
+                .unwrap_or_default(),
+            confirmed: true,
+        }];
 
         let remote = CatalogPage {
             items: vec![RemoteModelSummary {
@@ -810,18 +818,21 @@ mod tests {
     #[test]
     fn test_curated_respects_category_and_search() {
         let local = std::collections::HashMap::new();
+        // LLM 分类已随本地推理移除：curated 不再注入任何条目
         let q = CatalogQuery {
             category: Some(ModelCategory::Llm),
             ..Default::default()
         };
         let curated = curated_unified(&q, &local);
         assert!(
+            curated.is_empty(),
+            "LLM 分类应无内置精选，实际: {:?}",
             curated
                 .iter()
-                .all(|i| i.model_type.as_deref() == Some("llm"))
+                .map(|i| i.model_id.as_str())
+                .collect::<Vec<_>>()
         );
-        assert!(curated.iter().all(|i| i.model_id.contains("unsloth")));
-        // 搜 Whisper：只注入匹配的 Whisper 离线模型，不带出无关 KWS/LLM/TTS
+        // 搜 Whisper：只注入匹配的 Whisper 离线模型，不带出无关 KWS/TTS
         let q2 = CatalogQuery {
             search: Some("whisper".into()),
             ..Default::default()
@@ -836,32 +847,23 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert_eq!(curated2.len(), 2, "应为 2 个 whisper 模型");
-        // 搜 Qwen：注入匹配的 Verified（Qwen 系列 + 描述提及 Qwen 的 llama 条目）与
-        // Qwen3-ASR 离线模型，不注入无关 KWS
+        // 搜 Qwen：注入 Qwen3-ASR 离线模型（及描述含 Qwen3 基座的 OmniVoice，仅 Metal
+        // 平台），不注入无关 KWS
         let q3 = CatalogQuery {
             search: Some("qwen".into()),
             ..Default::default()
         };
         let curated3 = curated_unified(&q3, &local);
         assert!(
-            curated3
-                .iter()
-                .any(|i| i.model_id == "unsloth/Qwen3-8B-GGUF"),
-            "应注入 Qwen 系列 HF repo"
-        );
-        assert!(
             curated3.iter().any(|i| i.model_id == "asr-qwen3-0.6b"),
             "应注入 Qwen3-ASR 离线模型"
         );
         assert!(
-            curated3
-                .iter()
-                .all(|i| i.model_type.as_deref() == Some("llm")
-                    || i.model_id == "asr-qwen3-0.6b"
-                    || i.model_id == "tts-omnivoice-q8-audiocpp"
-                    || i.model_id == "tts-qwen3-06b-base-q8-audiocpp"
-                    || i.model_id == "tts-qwen3-17b-base-q8-audiocpp"),
-            "搜索 qwen 只注入 LLM 与 Qwen3-ASR（及描述/名称含 Qwen3 的 OmniVoice、Qwen3-TTS，仅 Metal 平台）"
+            curated3.iter().all(|i| i.model_id == "asr-qwen3-0.6b"
+                || i.model_id == "tts-omnivoice-q8-audiocpp"
+                || i.model_id == "tts-qwen3-06b-base-q8-audiocpp"
+                || i.model_id == "tts-qwen3-17b-base-q8-audiocpp"),
+            "搜索 qwen 只注入 Qwen3-ASR（及描述/名称含 Qwen3 的 OmniVoice、Qwen3-TTS，仅 Metal 平台）"
         );
     }
 }

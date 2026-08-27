@@ -111,7 +111,7 @@ export function LlmTestDialog({ open, onClose }: LlmTestDialogProps) {
         <div className="flex-1 space-y-3 overflow-y-auto px-5 py-4">
           {!llm.ready && (
             <p className="text-xs text-text-muted">
-              模型未加载，无法测试。请先在基础配置中加载模型。
+              模型未连接，无法测试。请先开启顶部的连接开关。
             </p>
           )}
 

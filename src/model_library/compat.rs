@@ -568,20 +568,6 @@ mod tests {
     }
 
     #[test]
-    fn test_summary_stage_verified() {
-        // overlay 命中 → Verified（不论分类）
-        let s = RemoteModelSummary {
-            repo_id: "unsloth/Qwen3-4B-Instruct-2507-GGUF".into(),
-            ..Default::default()
-        };
-        assert_eq!(
-            assess_summary(&s, Some(ModelCategory::Llm)),
-            CompatibilityLevel::Verified
-        );
-        assert_eq!(assess_summary(&s, None), CompatibilityLevel::Verified);
-    }
-
-    #[test]
     fn test_summary_llm_gguf_signal() {
         // text-generation + gguf tag → Compatible
         let s = RemoteModelSummary {
@@ -881,15 +867,5 @@ mod tests {
         let c = r.from_files("x/y", &files);
         assert_eq!(c.level, CompatibilityLevel::Unsupported);
         assert!(c.artifacts.is_empty());
-    }
-
-    #[test]
-    fn test_verified_repo_keeps_verified_on_files() {
-        let r = CompatibilityResolver::new();
-        let files = files_of(&["Qwen3-4B-Instruct-Q4_K_M.gguf"]);
-        let c = r.from_files("unsloth/Qwen3-4B-Instruct-2507-GGUF", &files);
-        assert_eq!(c.level, CompatibilityLevel::Verified);
-        assert_eq!(c.recommended_variant.as_deref(), Some("Q4_K_M"));
-        assert_eq!(c.artifacts.len(), 1);
     }
 }

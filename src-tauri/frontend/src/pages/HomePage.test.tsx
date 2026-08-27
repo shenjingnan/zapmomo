@@ -98,7 +98,10 @@ function makeLlm(o?: {
   error?: string | null;
 }) {
   return {
-    config: { models_present: o?.modelsPresent ?? false },
+    // 远程连接语义：modelsPresent 映射为「已填写 API 地址 + 模型名」
+    config: o?.modelsPresent
+      ? { base_url: "https://open.bigmodel.cn/api/paas/v4", model: "glm-4.7-flash" }
+      : { base_url: null, model: null },
     ready: o?.ready ?? false,
     loading: o?.loading ?? false,
     generating: o?.generating ?? false,
@@ -238,13 +241,13 @@ describe("HomePage 概览", () => {
     expect(screen.queryByRole("slider")).not.toBeInTheDocument();
   });
 
-  it("LLM：模型存在但引擎未加载 → 未加载（文件存在 ≠ 可用）", async () => {
+  it("LLM：已填写连接配置但未连接 → 未连接（配置存在 ≠ 已连接）", async () => {
     library = { models: [MODEL_A], active_model_id: MODEL_A.id };
     state.runtime = makeRuntime({ llm: makeLlm({ modelsPresent: true, ready: false }) });
     renderHome();
 
     const capabilities = await screen.findByLabelText("AI 能力");
-    expect(await within(capabilities).findByText("未加载")).toBeInTheDocument();
+    expect(await within(capabilities).findByText("未连接")).toBeInTheDocument();
   });
 
   it("LLM 出错时能力卡显示异常", async () => {

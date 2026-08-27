@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useToast } from "@/components/ui/toast";
 import { api, onLlmError, onLlmFinished, onLlmStatus, onLlmToken } from "@/lib/tauri";
-import type { LlmConfigInfo, LlmParamsPatch } from "@/types/tauri";
+import type { LlmConfigInfo } from "@/types/tauri";
 
 export interface LlmState {
   config: LlmConfigInfo | null;
@@ -16,10 +16,8 @@ export interface LlmState {
   unload: () => Promise<void>;
   chat: (text: string) => Promise<void>;
   stop: () => Promise<void>;
-  setThinking: (enabled: boolean) => Promise<void>;
-  setAutoLoad: (enabled: boolean) => Promise<void>;
-  /** 批量保存采样/引擎参数；失败时 rethrow 供保存按钮内联展示错误 */
-  setParams: (params: LlmParamsPatch) => Promise<void>;
+  /** 保存远程连接配置（base_url/api_key/model）；失败时 rethrow 供表单内联展示错误 */
+  setConnection: (baseUrl: string, apiKey: string | null, model: string) => Promise<void>;
   /** 保存系统提示词；失败时 rethrow */
   setSystemPrompt: (prompt: string) => Promise<void>;
 }
@@ -134,38 +132,14 @@ export function useLlm(): LlmState {
     }
   }, [fail]);
 
-  const setThinking = useCallback(
-    async (enabled: boolean) => {
+  const setConnection = useCallback(
+    async (baseUrl: string, apiKey: string | null, model: string) => {
       try {
-        await api.setLlmThinking({ enabled });
-        await refreshConfig();
-      } catch (e) {
-        fail(e);
-      }
-    },
-    [fail, refreshConfig],
-  );
-
-  const setAutoLoad = useCallback(
-    async (enabled: boolean) => {
-      try {
-        await api.setLlmAutoLoad({ enabled });
-        await refreshConfig();
-      } catch (e) {
-        fail(e);
-      }
-    },
-    [fail, refreshConfig],
-  );
-
-  const setParams = useCallback(
-    async (params: LlmParamsPatch) => {
-      try {
-        await api.setLlmParams({ params });
+        await api.setLlmConnection({ baseUrl, apiKey, model });
         await refreshConfig();
       } catch (e) {
         setError(String(e));
-        throw e; // 保存按钮需要内联错误反馈
+        throw e; // 表单需要内联错误反馈
       }
     },
     [refreshConfig],
@@ -197,9 +171,7 @@ export function useLlm(): LlmState {
     unload,
     chat,
     stop,
-    setThinking,
-    setAutoLoad,
-    setParams,
+    setConnection,
     setSystemPrompt,
   };
 }

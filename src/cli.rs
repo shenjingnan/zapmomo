@@ -151,10 +151,6 @@ pub enum AsrCmd {
         /// 已安装也强制重新下载
         #[arg(long)]
         force: bool,
-        /// 指定 registry 模型 id（如 asr-sensevoice-zh-en-ja-ko-yue / asr-qwen3-0.6b）；
-        /// 缺省安装默认双语 + 标点（legacy 一键下载）。
-        #[arg(long)]
-        model: Option<String>,
     },
     /// 免提连续听写（离线 SenseVoice/Whisper/Qwen3-ASR + Silero VAD 分段，每段整句转写）
     Dictate {
@@ -229,30 +225,19 @@ pub enum TtsCmd {
         /// 已安装也强制重新下载
         #[arg(long)]
         force: bool,
-        /// 按模型库 registry id 安装（如 tts-pocket-english-audiocpp）；
-        /// 缺省时维持旧的 zipvoice 主包 + 声码器行为
-        #[arg(long)]
-        registry_id: Option<String>,
     },
 }
 
 /// LLM 子命令
 #[derive(Subcommand)]
 pub enum LlmCmd {
-    /// 加载模型并打印信息（验证模型可用）
-    Load {
-        /// GGUF 模型文件路径（覆盖 settings.toml 的 llm.model_path）
-        #[arg(long)]
-        model_path: Option<PathBuf>,
-    },
-    /// 单轮对话（加载 + 流式生成）
+    /// 校验 provider 配置并打印信息（验证连接可用）
+    Load,
+    /// 单轮对话（流式生成）
     Chat {
         /// 用户输入文本
         #[arg(short, long)]
         text: String,
-        /// GGUF 模型文件路径（覆盖 settings.toml 的 llm.model_path）
-        #[arg(long)]
-        model_path: Option<PathBuf>,
     },
 }
 
@@ -297,9 +282,6 @@ pub enum VoiceCmd {
         /// TTS 模型目录（覆盖 settings.toml 的 tts.model_dir）
         #[arg(long)]
         tts_model_dir: Option<PathBuf>,
-        /// LLM GGUF 模型文件路径（覆盖 settings.toml 的 llm.model_path）
-        #[arg(long)]
-        llm_model_path: Option<PathBuf>,
     },
 }
 
@@ -475,11 +457,7 @@ async fn cmd_asr(cmd: AsrCmd) -> Result<(), String> {
             }
             Ok(())
         }
-        AsrCmd::InstallModel {
-            model_dir,
-            force,
-            model,
-        } => {
+        AsrCmd::InstallModel { model_dir, force } => {
             use crate::asr::{
                 DownloadProgress, DownloadStage, install_model_to, install_punctuation_model_to,
                 punctuation_user_model_dir, user_model_dir,
@@ -494,22 +472,7 @@ async fn cmd_asr(cmd: AsrCmd) -> Result<(), String> {
                 println!("[{stage}] {}", p.message);
             };
 
-            // `--model <registry-id>`：registry 托管安装（staging 原子提交），
-            // 装到 managed 目录并设为当前，使后续 `asr test` 直接使用。
-            if let Some(id) = &model {
-                let m = crate::model_library::registry::model_by_id(id)
-                    .ok_or_else(|| format!("未知模型 id: {id}（可用 --model 值见模型库）"))?;
-                let dest = crate::model_library::install_managed_model(m, &mut progress, None)
-                    .map_err(|e| e.to_string())?;
-                crate::model_library::set_selected_model(
-                    crate::model_library::registry::ModelType::Asr,
-                    &dest,
-                )?;
-                println!("ASR 模型已就绪: {}", dest.display());
-                return Ok(());
-            }
-
-            // legacy 默认：双语 + 标点
+            // 默认：双语 + 标点
             let dest = model_dir.unwrap_or_else(user_model_dir);
             install_model_to(&dest, force, &mut progress).map_err(|e| e.to_string())?;
             println!("ASR 模型已就绪: {}", dest.display());
@@ -673,37 +636,11 @@ fn cmd_tts(cmd: TtsCmd) -> Result<(), String> {
             }
             Ok(())
         }
-        TtsCmd::InstallModel {
-            model_dir,
-            force,
-            registry_id,
-        } => {
-            use crate::tts::{DownloadProgress, DownloadStage};
-            let mut progress = |p: DownloadProgress| {
-                let stage = match p.stage {
-                    DownloadStage::Downloading => "下载",
-                    DownloadStage::Verifying => "校验",
-                    DownloadStage::Extracting => "解压",
-                    DownloadStage::Done => "完成",
-                };
-                println!("[{stage}] {}", p.message);
+        TtsCmd::InstallModel { model_dir, force } => {
+            use crate::tts::{
+                DownloadProgress, DownloadStage, install_model_to, install_vocoder_to,
+                user_model_dir,
             };
-            if let Some(id) = registry_id.as_deref() {
-                // registry 通道：staged 安装（多资产 → 整体校验 → 原子 commit）
-                let model = crate::model_library::registry::model_by_id(id)
-                    .ok_or_else(|| format!("未知的模型库 id: {id}"))?;
-                let dest = crate::model_library::install_managed_model(model, &mut progress, None)
-                    .map_err(|e| e.to_string())?;
-                println!("模型已就绪: {}", dest.display());
-                // 安装后写 selection（model_dir + model_type + backend）
-                crate::model_library::set_selected_model(
-                    crate::model_library::registry::ModelType::Tts,
-                    &dest,
-                )?;
-                println!("已设为当前 TTS 模型: {}", dest.display());
-                return Ok(());
-            }
-            use crate::tts::{install_model_to, install_vocoder_to, user_model_dir};
             let dest = model_dir.unwrap_or_else(user_model_dir);
             let mut progress = |p: DownloadProgress| {
                 let stage = match p.stage {
@@ -755,27 +692,29 @@ fn tts_config(
 
 /// LLM 命令入口
 async fn cmd_llm(cmd: LlmCmd) -> Result<(), String> {
-    use crate::llm::provider::LlmProvider;
     use crate::llm::types::{ChatMessage, ChatRole, InputItem, OutputItem};
     use std::io::Write;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
 
     match cmd {
-        LlmCmd::Load { model_path } => {
-            let cfg = llm_config(model_path.as_ref())?;
-            let mut provider = crate::llm::local::LocalLlamaProvider::new(cfg.clone())
-                .map_err(|e| e.to_string())?;
+        LlmCmd::Load => {
+            let cfg = llm_config()?;
+            let mut provider =
+                crate::llm::create_provider(cfg.clone()).map_err(|e| e.to_string())?;
             provider.load().map_err(|e| e.to_string())?;
-            println!("模型已加载: {}", cfg.model_path.display());
-            println!("架构: {}", provider.architecture());
-            println!("上下文: {} tokens", cfg.params.context_size);
+            println!("provider: {}", cfg.provider);
+            println!(
+                "base_url: {}",
+                cfg.base_url.as_deref().unwrap_or("(未配置)")
+            );
+            println!("model: {}", cfg.model.as_deref().unwrap_or("(未配置)"));
             Ok(())
         }
-        LlmCmd::Chat { text, model_path } => {
-            let cfg = llm_config(model_path.as_ref())?;
-            let mut provider = crate::llm::local::LocalLlamaProvider::new(cfg.clone())
-                .map_err(|e| e.to_string())?;
+        LlmCmd::Chat { text } => {
+            let cfg = llm_config()?;
+            let mut provider =
+                crate::llm::create_provider(cfg.clone()).map_err(|e| e.to_string())?;
             provider.load().map_err(|e| e.to_string())?;
 
             let input = vec![InputItem::Message(ChatMessage::new(ChatRole::User, text))];
@@ -797,12 +736,10 @@ async fn cmd_llm(cmd: LlmCmd) -> Result<(), String> {
 }
 
 /// 读取 settings 并解析 LLM 配置
-fn llm_config(
-    cli_model_path: Option<&PathBuf>,
-) -> Result<crate::llm::config::ResolvedLlmConfig, String> {
+fn llm_config() -> Result<crate::llm::config::ResolvedLlmConfig, String> {
     let settings = crate::config::settings::load_settings()?;
     let llm_settings = settings.as_ref().and_then(|s| s.llm.clone());
-    crate::llm::config::resolve(llm_settings.as_ref(), cli_model_path.map(|p| p.as_path()))
+    crate::llm::config::resolve(llm_settings.as_ref())
 }
 
 /// 语音会话命令入口：把 CLI 参数转成 `CliOverrides` 后交给 `voice::run_cli`。
@@ -820,7 +757,6 @@ async fn cmd_voice(cmd: VoiceCmd) -> Result<(), String> {
         kws_model_dir,
         asr_model_dir,
         tts_model_dir,
-        llm_model_path,
     } = cmd;
     let overrides = crate::voice::config::CliOverrides {
         device,
@@ -840,7 +776,6 @@ async fn cmd_voice(cmd: VoiceCmd) -> Result<(), String> {
         kws_model_dir,
         asr_model_dir,
         tts_model_dir,
-        llm_model_path,
     };
     crate::voice::run_cli(overrides).await
 }
@@ -1180,30 +1115,7 @@ mod tests {
                 AsrCmd::InstallModel {
                     force: true,
                     model_dir: None,
-                    model: None
                 }
-            )),
-            _ => panic!("Expected InstallModel command"),
-        }
-    }
-
-    #[test]
-    fn test_cli_parse_asr_install_model_with_model_id() {
-        let cli = Cli::try_parse_from(&[
-            "test",
-            "asr",
-            "install-model",
-            "--model",
-            "asr-sensevoice-zh-en-ja-ko-yue",
-        ])
-        .unwrap();
-        match cli.command.unwrap() {
-            Commands::Asr { cmd } => assert!(matches!(
-                cmd,
-                AsrCmd::InstallModel {
-                    model: Some(id),
-                    ..
-                } if id == "asr-sensevoice-zh-en-ja-ko-yue"
             )),
             _ => panic!("Expected InstallModel command"),
         }
@@ -1263,30 +1175,7 @@ mod tests {
                 TtsCmd::InstallModel {
                     force: true,
                     model_dir: None,
-                    registry_id: None
                 }
-            )),
-            _ => panic!("Expected InstallModel command"),
-        }
-    }
-
-    #[test]
-    fn test_cli_parse_tts_install_model_registry_id() {
-        let cli = Cli::try_parse_from(&[
-            "test",
-            "tts",
-            "install-model",
-            "--registry-id",
-            "tts-pocket-english-audiocpp",
-        ])
-        .unwrap();
-        match cli.command.unwrap() {
-            Commands::Tts { cmd } => assert!(matches!(
-                cmd,
-                TtsCmd::InstallModel {
-                    registry_id: Some(ref id),
-                    ..
-                } if id == "tts-pocket-english-audiocpp"
             )),
             _ => panic!("Expected InstallModel command"),
         }
@@ -1365,8 +1254,6 @@ mod tests {
             "/tmp/asr",
             "--tts-model-dir",
             "/tmp/tts",
-            "--llm-model-path",
-            "/tmp/model.gguf",
         ])
         .unwrap();
         match cli.command.unwrap() {
@@ -1384,7 +1271,6 @@ mod tests {
                     kws_model_dir,
                     asr_model_dir,
                     tts_model_dir,
-                    llm_model_path,
                 } => {
                     assert_eq!(device.as_deref(), Some("内置麦克风"));
                     assert_eq!(keywords.as_deref(), Some("你好小智"));
@@ -1406,10 +1292,6 @@ mod tests {
                     assert_eq!(
                         tts_model_dir.as_deref(),
                         Some(std::path::Path::new("/tmp/tts"))
-                    );
-                    assert_eq!(
-                        llm_model_path.as_deref(),
-                        Some(std::path::Path::new("/tmp/model.gguf"))
                     );
                 }
             },

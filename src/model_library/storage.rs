@@ -537,7 +537,7 @@ fn commit_refs(item: &MigrateItem, legacy_models: Option<&Path>, legacy_comp: Op
 /// 相对路径 / 外部路径不动。
 fn rewrite_settings_paths(old_prefix: &Path, new_prefix: &Path) -> Result<(), String> {
     model_library::update_settings(|cfg| {
-        // kws/asr/tts model_dir、asr punctuation_model、llm model_path
+        // kws/asr/tts model_dir、asr punctuation_model（LLM 已改远程连接，无本地路径）
         if let Some(k) = cfg.kws.as_mut()
             && let Some(v) = k.model_dir.as_mut()
         {
@@ -553,11 +553,6 @@ fn rewrite_settings_paths(old_prefix: &Path, new_prefix: &Path) -> Result<(), St
         }
         if let Some(t) = cfg.tts.as_mut()
             && let Some(v) = t.model_dir.as_mut()
-        {
-            *v = relocate_in(v, old_prefix, new_prefix);
-        }
-        if let Some(l) = cfg.llm.as_mut()
-            && let Some(v) = l.model_path.as_mut()
         {
             *v = relocate_in(v, old_prefix, new_prefix);
         }
@@ -626,7 +621,6 @@ fn emit_progress(
 mod tests {
     use super::*;
     use crate::config::settings::AppConfig;
-    use crate::config::settings::LlmSettings;
     use crate::test_util::{run_with_temp_home, set_custom_data_dir};
     use std::sync::atomic::AtomicBool;
 
@@ -697,11 +691,10 @@ mod tests {
             make_installed_model(&legacy_models.join("model-a"));
 
             // settings 里指向旧根的绝对路径字段（保留 data_dir）
-            let gguf_path = legacy_models.join("model-a").join("gguf.bin");
             crate::config::settings::save_settings(&AppConfig {
                 data_dir: Some(data.display().to_string()),
-                llm: Some(LlmSettings {
-                    model_path: Some(gguf_path.display().to_string()),
+                kws: Some(crate::config::settings::KwsSettings {
+                    model_dir: Some(legacy_models.join("model-a").display().to_string()),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -714,14 +707,9 @@ mod tests {
             assert!(data.join("models/model-a").is_dir());
 
             let cfg = crate::config::settings::load_settings().unwrap().unwrap();
-            let mp = cfg.llm.unwrap().model_path.unwrap();
-            let expected = data
-                .join("models")
-                .join("model-a")
-                .join("gguf.bin")
-                .display()
-                .to_string();
-            assert_eq!(mp, expected);
+            let md = cfg.kws.unwrap().model_dir.unwrap();
+            let expected = data.join("models").join("model-a").display().to_string();
+            assert_eq!(md, expected);
         });
     }
 

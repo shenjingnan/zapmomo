@@ -1,9 +1,9 @@
 import { cn } from "@/lib/utils";
 import type { ModelCategory } from "@/types/catalog";
 
+// LLM 已改为远程连接（无本地模型），模型库只服务 KWS/ASR/TTS 三类本地模型。
 const TABS: { value: ModelCategory | null; label: string }[] = [
   { value: null, label: "全部" },
-  { value: "llm", label: "LLM" },
   { value: "asr", label: "ASR" },
   { value: "tts", label: "TTS" },
   { value: "kws", label: "KWS" },
