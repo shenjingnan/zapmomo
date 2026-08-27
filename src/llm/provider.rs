@@ -25,12 +25,13 @@ pub trait LlmProvider {
     ///
     /// `input` 是有序的上下文项（消息 + 工具结果），`tools` 是可用的工具定义。
     /// `cancel` 置位后应尽快停止并返回 [`FinishReason::Cancelled`]。
+    /// `emit` 要求 `Send`：调用方身处 tokio 运行时时，生成会切换到普通线程执行。
     fn generate(
         &mut self,
         input: &[InputItem],
         tools: &[ToolDefinition],
         params: &GenParams,
-        emit: &mut dyn FnMut(OutputItem),
+        emit: &mut (dyn FnMut(OutputItem) + Send),
         cancel: Arc<AtomicBool>,
     ) -> Result<FinishReason, LlmError>;
 }
