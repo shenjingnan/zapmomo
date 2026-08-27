@@ -8,7 +8,7 @@ import { useRuntime } from "@/providers/RuntimeContext";
 
 /**
  * 系统提示词：textarea 编辑 + 保存写 backend（`set_llm_system_prompt`）。
- * 修改需重新加载模型/provider 才生效（provider 创建时拷入 system_prompt）。
+ * 修改需重新连接远程 provider 才生效（provider 创建时拷入 system_prompt）。
  */
 export function LlmSystemPrompt() {
   const { llm } = useRuntime();
@@ -87,7 +87,7 @@ export function LlmSystemPrompt() {
             )}
 
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <p className="text-xs text-text-muted">保存后会自动重新加载模型生效。</p>
+              <p className="text-xs text-text-muted">保存后会自动重新连接使其生效。</p>
               <Button
                 size="sm"
                 disabled={pristine || saving}
