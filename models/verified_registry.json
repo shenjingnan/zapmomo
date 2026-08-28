@@ -34,30 +34,6 @@
       "compatibility_notes": "内置流式 ASR 轻量（中文），sherpa-onnx 验证可用。"
     },
     {
-      "model_id": "asr-streaming-en-20m",
-      "provider": null,
-      "repo_id": null,
-      "model_type": "asr",
-      "architecture": "sherpa-asr-streaming-zipformer",
-      "compatibility_notes": "内置流式 ASR 轻量（英文），sherpa-onnx 验证可用。"
-    },
-    {
-      "model_id": "asr-streaming-en-2023-06-21",
-      "provider": null,
-      "repo_id": null,
-      "model_type": "asr",
-      "architecture": "sherpa-asr-streaming-zipformer",
-      "compatibility_notes": "内置流式 ASR（英文），sherpa-onnx 验证可用。"
-    },
-    {
-      "model_id": "asr-streaming-en-2023-02-21",
-      "provider": null,
-      "repo_id": null,
-      "model_type": "asr",
-      "architecture": "sherpa-asr-streaming-zipformer",
-      "compatibility_notes": "内置流式 ASR（英文），sherpa-onnx 验证可用。"
-    },
-    {
       "model_id": "asr-paraformer-bilingual-zh-en",
       "provider": null,
       "repo_id": null,
