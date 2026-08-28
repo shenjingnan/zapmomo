@@ -35,8 +35,16 @@ pub struct ResolvedLlmConfig {
 }
 
 /// 内置默认 system prompt（用户可在 settings 覆盖）。
+///
+/// 纯文本约束是为 TTS 朗读服务：markdown 符号/emoji 会被读出或产生异常发音。
+/// 此约束只是减负——清洗层（`voice::sanitizer`）才是必要兜底：角色包
+/// character.md 会整体覆盖本 prompt（`voice::config::apply_character_override`），
+/// 用户自定义人设的输出格式不可控。
 pub fn default_system_prompt() -> String {
-    "你是 ZapMomo，一个友好的桌面 AI 伙伴。请用简洁自然的中文回答，语气亲切，不要啰嗦。".to_string()
+    "你是 ZapMomo，一个友好的桌面 AI 伙伴。请用简洁自然的中文回答，语气亲切，不要啰嗦。\
+     回复必须是纯文本：不要用 Markdown（标题、列表、加粗、代码块、链接），不要输出 \
+     emoji 或表情符号，要点直接写成短句。"
+        .to_string()
 }
 
 /// 合并 settings 得到最终配置。默认 provider 为 "openai"。
@@ -92,6 +100,8 @@ mod tests {
             assert!(cfg.base_url.is_none());
             assert!(cfg.model.is_none());
             assert!(!cfg.system_prompt.is_empty());
+            // 纯文本约束防回退：TTS 朗读依赖它减少 markdown/emoji 清洗压力
+            assert!(cfg.system_prompt.contains("纯文本"));
         });
     }
 

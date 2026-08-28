@@ -88,7 +88,6 @@ export function BubbleRoot() {
       {layer === "front" && (
         <VoiceReplyBubble
           text={voice.pendingReply}
-          phase={voice.phase}
           announcement={announcement}
           onVisibleChange={setBubbleVisible}
         />
