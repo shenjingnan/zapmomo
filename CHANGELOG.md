@@ -1,5 +1,70 @@
 # Changelog
 
+## [0.1.19](https://github.com/shenjingnan/zapmomo/compare/v0.1.18...v0.1.19) - 2026-08-28
+
+### Added
+
+- *(companion)* 伙伴支持独立的尺寸与位置配置 ([#195](https://github.com/shenjingnan/zapmomo/pull/195))
+- *(llm)* 接入 Anthropic Messages API，新增 CLI 工具与 prompt caching/thinking ([#197](https://github.com/shenjingnan/zapmomo/pull/197))
+- *(bubble)* 聊天气泡独立窗口化——统一回复与 dsh 播报，恒高于角色层级 ([#201](https://github.com/shenjingnan/zapmomo/pull/201))
+- *(asr)* 接入 audio.cpp Qwen3-ASR 0.6B 后端（Metal 加速） ([#199](https://github.com/shenjingnan/zapmomo/pull/199))
+- *(tts)* 接入 Qwen3-TTS 0.6B/1.7B 音色克隆（audio.cpp 后端） ([#192](https://github.com/shenjingnan/zapmomo/pull/192))
+- *(companion)* 新增 galgame 风格文字输入条与回复气泡，修复角色显示问题 ([#182](https://github.com/shenjingnan/zapmomo/pull/182))
+- *(companion)* 支持角色包导入（静态立绘 + 人设覆盖 + 音色克隆） ([#181](https://github.com/shenjingnan/zapmomo/pull/181))
+- *(llm)* 远程 LLM provider 改用 OpenAI 兼容 Chat Completions ([#180](https://github.com/shenjingnan/zapmomo/pull/180))
+- *(tts)* omnivoice SSE 流式分块合成（语音会话首响优化） ([#163](https://github.com/shenjingnan/zapmomo/pull/163))
+- *(tts)* 接入 OmniVoice 声音克隆模型与 TTS 句间热切换 ([#162](https://github.com/shenjingnan/zapmomo/pull/162))
+- *(tts)* 接入 audio.cpp sidecar 引擎与 PocketTTS 英文模型 ([#160](https://github.com/shenjingnan/zapmomo/pull/160))
+- *(companion)* GIF 动图作为桌面伙伴（与 Live2D 并存） ([#159](https://github.com/shenjingnan/zapmomo/pull/159))
+- *(asr)* 接入 Qwen3-ASR 离线模型族（29 语言 + 热词） ([#157](https://github.com/shenjingnan/zapmomo/pull/157))
+- *(tts)* 支持 Kokoro TTS（103 音色，int8/fp32 双变体） ([#156](https://github.com/shenjingnan/zapmomo/pull/156))
+- *(kws)* 接入 GigaSpeech 英文唤醒词模型，补齐 sherpa-onnx 官方 KWS 全家桶 ([#155](https://github.com/shenjingnan/zapmomo/pull/155))
+- *(dsh)* 桌宠事件气泡升级为 iOS 风格堆叠 toast ([#154](https://github.com/shenjingnan/zapmomo/pull/154))
+- *(asr)* 新增流式 Paraformer ASR 模型族（中英/中粤英） ([#153](https://github.com/shenjingnan/zapmomo/pull/153))
+- *(asr)* 支持离线 ASR（SenseVoice/Whisper）与语音会话模型族自适应 ([#152](https://github.com/shenjingnan/zapmomo/pull/152))
+
+### Fixed
+
+- *(asr)* 切回 streaming zipformer 后误报「模型文件缺失」及切换后白屏 ([#203](https://github.com/shenjingnan/zapmomo/pull/203))
+- *(llm)* 修复 CLI 在 tokio 上下文调用 provider 时 panic ([#198](https://github.com/shenjingnan/zapmomo/pull/198))
+- *(scripts)* 修正 audio.cpp sidecar 构建的 tag 名与 macOS OpenMP 处理 ([#161](https://github.com/shenjingnan/zapmomo/pull/161))
+- *(dsh)* 补全 dsh-plugin repository 字段修复 npm provenance 发布 ([#150](https://github.com/shenjingnan/zapmomo/pull/150))
+
+### Other
+
+- *(deps-dev)* bump @types/node from 26.2.0 to 26.3.0 ([#208](https://github.com/shenjingnan/zapmomo/pull/208))
+- *(deps)* bump base64 from 0.22.1 to 0.23.1 ([#184](https://github.com/shenjingnan/zapmomo/pull/184))
+- *(deps)* bump futures-util from 0.3.32 to 0.3.34 ([#183](https://github.com/shenjingnan/zapmomo/pull/183))
+- *(deps-dev)* bump vite from 8.2.1 to 8.2.2 ([#175](https://github.com/shenjingnan/zapmomo/pull/175))
+- *(deps)* bump sherpa-onnx from 1.13.5 to 1.13.6 ([#207](https://github.com/shenjingnan/zapmomo/pull/207))
+- *(deps)* bump @tanstack/react-query from 5.102.1 to 5.102.3 ([#209](https://github.com/shenjingnan/zapmomo/pull/209))
+- *(deps-dev)* bump @types/react-dom from 19.2.4 to 19.2.5 ([#210](https://github.com/shenjingnan/zapmomo/pull/210))
+- *(deps)* bump lucide-react from 1.33.0 to 1.34.0 ([#211](https://github.com/shenjingnan/zapmomo/pull/211))
+- *(ci)* 屏蔽 windows crate 的 minor/major 升级 ([#205](https://github.com/shenjingnan/zapmomo/pull/205))
+- *(deps)* bump fumadocs-core from 16.15.0 to 16.15.1 ([#185](https://github.com/shenjingnan/zapmomo/pull/185))
+- *(tts)* 移除 VITS Melo / Matcha / Kokoro / PocketTTS 模型 ([#204](https://github.com/shenjingnan/zapmomo/pull/204))
+- *(deps)* bump fumadocs-ui from 16.15.0 to 16.15.1 ([#190](https://github.com/shenjingnan/zapmomo/pull/190))
+- *(deps)* bump @tanstack/react-query from 5.101.4 to 5.102.1 ([#188](https://github.com/shenjingnan/zapmomo/pull/188))
+- *(deps-dev)* bump @testing-library/user-event from 14.6.5 to 14.6.6 ([#189](https://github.com/shenjingnan/zapmomo/pull/189))
+- *(deps)* bump sysinfo from 0.33.1 to 0.39.6 ([#166](https://github.com/shenjingnan/zapmomo/pull/166))
+- *(deps)* bump fumadocs-mdx from 15.3.0 to 15.3.1 ([#191](https://github.com/shenjingnan/zapmomo/pull/191))
+- *(deps-dev)* bump @biomejs/biome from 2.5.9 to 2.5.10 ([#187](https://github.com/shenjingnan/zapmomo/pull/187))
+- *(deps)* bump next from 16.3.1 to 16.3.2 ([#186](https://github.com/shenjingnan/zapmomo/pull/186))
+- *(models)* 移除模型库页面及 HF 在线目录能力 ([#196](https://github.com/shenjingnan/zapmomo/pull/196))
+- *(kws)* 移除 wenetspeech / gigaspeech 唤醒词模型，仅保留中英双语 zh-en ([#194](https://github.com/shenjingnan/zapmomo/pull/194))
+- *(llm)* 移除 llama.cpp 本地模型，LLM 改为纯远程连接 ([#193](https://github.com/shenjingnan/zapmomo/pull/193))
+- *(deps)* bump fumadocs-core from 16.14.4 to 16.15.0 ([#171](https://github.com/shenjingnan/zapmomo/pull/171))
+- *(deps)* bump lucide-react from 1.31.0 to 1.33.0 ([#173](https://github.com/shenjingnan/zapmomo/pull/173))
+- *(deps)* bump tauri-nspanel from `a3122e8` to `c9ec213` ([#168](https://github.com/shenjingnan/zapmomo/pull/168))
+- *(deps)* bump cpal from 0.18.1 to 0.18.2 ([#169](https://github.com/shenjingnan/zapmomo/pull/169))
+- *(deps-dev)* bump @vitejs/plugin-react from 6.0.5 to 6.1.0 ([#170](https://github.com/shenjingnan/zapmomo/pull/170))
+- *(deps-dev)* bump @biomejs/biome from 2.5.8 to 2.5.9 ([#172](https://github.com/shenjingnan/zapmomo/pull/172))
+- *(deps)* bump pixi.js from 6.5.10 to 8.20.0 ([#174](https://github.com/shenjingnan/zapmomo/pull/174))
+- *(deps-dev)* bump vitest from 4.1.10 to 4.1.11 ([#176](https://github.com/shenjingnan/zapmomo/pull/176))
+- *(deps)* bump fumadocs-ui from 16.14.4 to 16.15.0 ([#177](https://github.com/shenjingnan/zapmomo/pull/177))
+- *(deps-dev)* bump @testing-library/user-event from 14.6.4 to 14.6.5 ([#178](https://github.com/shenjingnan/zapmomo/pull/178))
+- *(deps)* bump fumadocs-mdx from 15.2.3 to 15.3.0 ([#179](https://github.com/shenjingnan/zapmomo/pull/179))
+
 ## [0.1.18](https://github.com/shenjingnan/zapmomo/compare/v0.1.17...v0.1.18) - 2026-08-21
 
 ### Added
