@@ -175,6 +175,10 @@ export interface Live2dModelInfo {
   format: string | null;
   /** BongoCat 道具资源（非 BongoCat 模型为 null） */
   props: PerformancePropsInfo | null;
+  /** 该伙伴的私有缩放（null/缺字段 = 未单独配置，窗口沿用当前尺寸） */
+  window_scale?: number | null;
+  /** 该伙伴的私有窗口位置（逻辑像素；null/缺字段 = 未配置或已落屏外，窗口沿用当前位置） */
+  window_position?: { x: number; y: number } | null;
 }
 
 // ---- 表演（BongoCat 兼容模拟键鼠）----
@@ -305,6 +309,12 @@ export interface LlmParams {
   seed: number;
 }
 
+/** `set_llm_params` 载荷（参数补丁；未传字段保持不变） */
+export interface LlmParamsPatch {
+  thinking?: boolean;
+  reasoning_effort?: string;
+}
+
 /** `get_llm_config` 返回 */
 export interface LlmConfigInfo {
   enabled: boolean;
@@ -321,6 +331,10 @@ export interface LlmConfigInfo {
   api_key: string | null;
   /** 模型名（如 glm-4.7-flash） */
   model: string | null;
+  /** 是否启用思考（已 resolve 缺省推断） */
+  thinking: boolean;
+  /** 思考力度（thinking 关闭时保留原值但运行时忽略） */
+  reasoning_effort: string | null;
 }
 
 /** `llm-token` 事件载荷（对应后端 TokenDelta） */

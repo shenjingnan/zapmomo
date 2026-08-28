@@ -1022,4 +1022,50 @@ describe("AsrPage（语音识别配置）", () => {
     expect(invokeMock).not.toHaveBeenCalledWith("stop_asr_listen");
     expect(invokeMock).not.toHaveBeenCalledWith("start_asr_listen");
   });
+
+  it("模型族切换后高级参数草稿按新键集重建，不崩溃（qwen3→zipformer 回归）", async () => {
+    // 初始：qwen3 离线族 → 高级参数数字草稿仅 num_threads 一个键
+    asrConfig = { ...asrConfig, model_type: "qwen3_asr", models_present: true };
+    // zh-14m（zipformer 族）已装非当前，供「设为当前」；切换后 get_asr_config 返回
+    // zipformer → numericKeys 从 1 个扩到 6 个（补 blank_penalty/断句等）
+    modelLibrary = defaultAsrModelLibrary().map((m) =>
+      m.id === "asr-streaming-zh-14m"
+        ? {
+            ...m,
+            installState: "installed",
+            localPath:
+              "/home/user/.zapmomo/models/sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23",
+            installId: m.id,
+          }
+        : m,
+    );
+    invokeMock.mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "set_current_model") {
+        asrConfig = { ...asrConfig, model_type: "zipformer", backend: "sherpa" };
+      }
+      return defaultInvoke(cmd, args);
+    });
+    const user = userEvent.setup();
+    renderAsrPage();
+    await screen.findByText("未识别");
+
+    await user.click(screen.getByRole("button", { name: "切换识别模型" }));
+    await user.click(await screen.findByRole("button", { name: "设为当前" }));
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("set_current_model", {
+        id: "asr-streaming-zh-14m",
+      });
+    });
+
+    // 修复前：新 config 键集扩展后，hydrate 用旧草稿（1 键）跑 isPristine →
+    // parseNumericDraft 读 draft["blank_penalty"]=undefined → .trim() 崩溃白屏。
+    // 修复后：草稿按新键集整体重建；展开高级参数，6 项齐全且回读后端现值
+    await user.keyboard("{Escape}");
+    await waitFor(() => {
+      expect(screen.queryByText("选择识别模型")).not.toBeInTheDocument();
+    });
+    await user.click(screen.getByRole("button", { name: /高级参数/ }));
+    expect(await screen.findByLabelText("空白符惩罚")).toHaveValue("0");
+    expect(screen.getByLabelText("线程数")).toHaveValue("4");
+  });
 });

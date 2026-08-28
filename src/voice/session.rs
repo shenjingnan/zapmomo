@@ -1442,6 +1442,6 @@ mod tests {
         let mut gate = SentencePlayGate::default();
         assert!(gate.on_terminal());
         assert!(gate.on_stream_chunk(), "句 2 首块在句 1 补弹复位后正常触发");
-        assert!(matches!(gate.on_terminal(), false));
+        assert!(!gate.on_terminal());
     }
 }

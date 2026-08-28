@@ -907,7 +907,7 @@ mod tests {
 
     #[test]
     fn test_cli_parse_greet() {
-        let cli = Cli::try_parse_from(&["test", "greet", "--name", "World"]).unwrap();
+        let cli = Cli::try_parse_from(["test", "greet", "--name", "World"]).unwrap();
         match cli.command.unwrap() {
             Commands::Greet { name, count } => {
                 assert_eq!(name, "World");
@@ -919,7 +919,7 @@ mod tests {
 
     #[test]
     fn test_cli_parse_greet_with_count() {
-        let cli = Cli::try_parse_from(&["test", "greet", "-n", "Test", "-c", "3"]).unwrap();
+        let cli = Cli::try_parse_from(["test", "greet", "-n", "Test", "-c", "3"]).unwrap();
         match cli.command.unwrap() {
             Commands::Greet { name, count } => {
                 assert_eq!(name, "Test");
@@ -931,13 +931,13 @@ mod tests {
 
     #[test]
     fn test_cli_parse_config() {
-        let cli = Cli::try_parse_from(&["test", "config"]).unwrap();
+        let cli = Cli::try_parse_from(["test", "config"]).unwrap();
         assert!(matches!(cli.command.unwrap(), Commands::Config));
     }
 
     #[test]
     fn test_cli_parse_kws_test() {
-        let cli = Cli::try_parse_from(&["test", "kws", "test"]).unwrap();
+        let cli = Cli::try_parse_from(["test", "kws", "test"]).unwrap();
         match cli.command.unwrap() {
             Commands::Kws { cmd } => assert!(matches!(cmd, KwsCmd::Test { .. })),
             _ => panic!("Expected Kws command"),
@@ -946,7 +946,7 @@ mod tests {
 
     #[test]
     fn test_cli_parse_kws_run() {
-        let cli = Cli::try_parse_from(&["test", "kws", "run", "--duration", "10"]).unwrap();
+        let cli = Cli::try_parse_from(["test", "kws", "run", "--duration", "10"]).unwrap();
         match cli.command.unwrap() {
             Commands::Kws { cmd } => {
                 assert!(matches!(
@@ -963,7 +963,7 @@ mod tests {
 
     #[test]
     fn test_cli_parse_kws_devices() {
-        let cli = Cli::try_parse_from(&["test", "kws", "devices"]).unwrap();
+        let cli = Cli::try_parse_from(["test", "kws", "devices"]).unwrap();
         match cli.command.unwrap() {
             Commands::Kws { cmd } => assert!(matches!(cmd, KwsCmd::Devices)),
             _ => panic!("Expected Kws command"),
@@ -972,7 +972,7 @@ mod tests {
 
     #[test]
     fn test_cli_parse_kws_install_model() {
-        let cli = Cli::try_parse_from(&["test", "kws", "install-model", "--force"]).unwrap();
+        let cli = Cli::try_parse_from(["test", "kws", "install-model", "--force"]).unwrap();
         match cli.command.unwrap() {
             Commands::Kws { cmd } => assert!(matches!(
                 cmd,
@@ -987,7 +987,7 @@ mod tests {
 
     #[test]
     fn test_cli_parse_kws_install_model_with_dir() {
-        let cli = Cli::try_parse_from(&["test", "kws", "install-model", "--model-dir", "/tmp/zm"])
+        let cli = Cli::try_parse_from(["test", "kws", "install-model", "--model-dir", "/tmp/zm"])
             .unwrap();
         match cli.command.unwrap() {
             Commands::Kws { cmd } => assert!(matches!(
@@ -1003,7 +1003,7 @@ mod tests {
 
     #[test]
     fn test_cli_parse_asr_test() {
-        let cli = Cli::try_parse_from(&["test", "asr", "test"]).unwrap();
+        let cli = Cli::try_parse_from(["test", "asr", "test"]).unwrap();
         match cli.command.unwrap() {
             Commands::Asr { cmd } => assert!(matches!(cmd, AsrCmd::Test { .. })),
             _ => panic!("Expected Asr command"),
@@ -1012,7 +1012,7 @@ mod tests {
 
     #[test]
     fn test_cli_parse_asr_dictate() {
-        let cli = Cli::try_parse_from(&[
+        let cli = Cli::try_parse_from([
             "test",
             "asr",
             "dictate",
@@ -1045,7 +1045,7 @@ mod tests {
     fn test_cli_parse_asr_test_flags() {
         // 离线模型（SenseVoice/Whisper/Qwen3-ASR）转写语言与 ITN 开关
         // （Qwen3-ASR 自动识别语种，运行时提示忽略）
-        let cli = Cli::try_parse_from(&[
+        let cli = Cli::try_parse_from([
             "test",
             "asr",
             "test",
@@ -1070,7 +1070,7 @@ mod tests {
 
     #[test]
     fn test_cli_parse_asr_run() {
-        let cli = Cli::try_parse_from(&["test", "asr", "run", "--duration", "10"]).unwrap();
+        let cli = Cli::try_parse_from(["test", "asr", "run", "--duration", "10"]).unwrap();
         match cli.command.unwrap() {
             Commands::Asr { cmd } => assert!(matches!(
                 cmd,
@@ -1085,7 +1085,7 @@ mod tests {
 
     #[test]
     fn test_cli_parse_asr_devices() {
-        let cli = Cli::try_parse_from(&["test", "asr", "devices"]).unwrap();
+        let cli = Cli::try_parse_from(["test", "asr", "devices"]).unwrap();
         match cli.command.unwrap() {
             Commands::Asr { cmd } => assert!(matches!(cmd, AsrCmd::Devices)),
             _ => panic!("Expected Asr command"),
@@ -1094,7 +1094,7 @@ mod tests {
 
     #[test]
     fn test_cli_parse_asr_install_model() {
-        let cli = Cli::try_parse_from(&["test", "asr", "install-model", "--force"]).unwrap();
+        let cli = Cli::try_parse_from(["test", "asr", "install-model", "--force"]).unwrap();
         match cli.command.unwrap() {
             Commands::Asr { cmd } => assert!(matches!(
                 cmd,
@@ -1109,7 +1109,7 @@ mod tests {
 
     #[test]
     fn test_cli_parse_tts_run() {
-        let cli = Cli::try_parse_from(&["test", "tts", "run", "--text", "你好", "--speed", "1.2"])
+        let cli = Cli::try_parse_from(["test", "tts", "run", "--text", "你好", "--speed", "1.2"])
             .unwrap();
         match cli.command.unwrap() {
             Commands::Tts { cmd } => assert!(matches!(
@@ -1127,7 +1127,7 @@ mod tests {
 
     #[test]
     fn test_cli_parse_tts_run_with_voice() {
-        let cli = Cli::try_parse_from(&[
+        let cli = Cli::try_parse_from([
             "test", "tts", "run", "--text", "你好", "--voice", "leijun-1",
         ])
         .unwrap();
@@ -1145,7 +1145,7 @@ mod tests {
 
     #[test]
     fn test_cli_parse_tts_voices() {
-        let cli = Cli::try_parse_from(&["test", "tts", "voices"]).unwrap();
+        let cli = Cli::try_parse_from(["test", "tts", "voices"]).unwrap();
         match cli.command.unwrap() {
             Commands::Tts { cmd } => assert!(matches!(cmd, TtsCmd::Voices { .. })),
             _ => panic!("Expected Tts command"),
@@ -1154,7 +1154,7 @@ mod tests {
 
     #[test]
     fn test_cli_parse_tts_install_model() {
-        let cli = Cli::try_parse_from(&["test", "tts", "install-model", "--force"]).unwrap();
+        let cli = Cli::try_parse_from(["test", "tts", "install-model", "--force"]).unwrap();
         match cli.command.unwrap() {
             Commands::Tts { cmd } => assert!(matches!(
                 cmd,
@@ -1169,7 +1169,7 @@ mod tests {
 
     #[test]
     fn test_cli_parse_voice_run_minimal() {
-        let cli = Cli::try_parse_from(&["test", "voice", "run"]).unwrap();
+        let cli = Cli::try_parse_from(["test", "voice", "run"]).unwrap();
         match cli.command.unwrap() {
             Commands::Voice { cmd } => {
                 assert!(matches!(
@@ -1209,7 +1209,7 @@ mod tests {
 
     #[test]
     fn test_cli_parse_voice_run_full() {
-        let cli = Cli::try_parse_from(&[
+        let cli = Cli::try_parse_from([
             "test",
             "voice",
             "run",

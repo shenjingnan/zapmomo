@@ -237,7 +237,7 @@ mod tests {
         assert_eq!(c.model_type.as_deref(), Some("sensevoice"));
         assert_eq!(c.sense_voice.model.as_deref(), Some("/m/sense/model.onnx"));
         assert_eq!(c.sense_voice.language.as_deref(), Some("zh"));
-        assert_eq!(c.sense_voice.use_itn, false);
+        assert!(!c.sense_voice.use_itn);
         assert_eq!(c.tokens.as_deref(), Some("/m/sense/tokens.txt"));
         // 不污染其它族字段
         assert!(c.whisper.encoder.is_none());

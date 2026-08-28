@@ -527,7 +527,7 @@ mod tests {
                  Authorization: Bearer test-token\r\nContent-Length: 2000\r\n\r\n"
             );
             sock.write_all(head.as_bytes()).unwrap();
-            sock.write_all(&vec![b'x'; 50]).unwrap();
+            sock.write_all(&[b'x'; 50]).unwrap();
             // 等 serve 消费掉已发的 50 字节并阻塞在下一次 read（socket 无读超时）
             std::thread::sleep(Duration::from_millis(100));
 

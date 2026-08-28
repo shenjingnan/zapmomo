@@ -382,8 +382,10 @@ pub fn set_selected_model(mt: ModelType, path: &Path) -> Result<(), String> {
             asr.model_dir = Some(path_str);
             // 切换时同步持久化模型类型与推理后端：managed 安装目录名 == registry
             // `name`，据此推导 sensevoice/whisper/qwen3_asr 与 audiocpp（runtime
-            // 字段）；external/local 目录无 asr_kind（None），resolve 按目录内容
-            // 兜底探测（对称 TTS 分支）。
+            // 字段）。streaming zipformer 条目与 external/local 目录无权威 kind，
+            // 先复位为 None 交回 resolve 按目录内容探测——残留旧族 model_type 会
+            // 用旧探针校验新目录，误报「模型文件缺失」（qwen3 → zipformer 实测）。
+            asr.model_type = None;
             let mut matched_registry = false;
             if let Some(name) = path.file_name() {
                 let base = name.to_string_lossy().to_string();
@@ -1588,15 +1590,17 @@ mod tests {
                 Some(crate::asr::config::AsrModelKind::Whisper)
             );
 
-            // streaming zipformer：asr_kind 缺省 None → 不覆盖已推导 kind（resolve 按目录兜底）
+            // streaming zipformer：asr_kind 缺省 None → 复位 model_type，
+            // 交回 resolve 按目录内容探测（残留 whisper 的 Some 值会用旧探针
+            // 校验新目录，误报「模型文件缺失」）
             let zip =
                 home.join("models/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20");
             set_selected_model(ModelType::Asr, &zip).unwrap();
             let cfg = settings::load_settings().unwrap().unwrap();
             assert_eq!(
                 cfg.asr.as_ref().and_then(|a| a.model_type),
-                Some(crate::asr::config::AsrModelKind::Whisper),
-                "无 asr_kind 的 streaming 目录不应覆盖已推导 kind"
+                None,
+                "无 asr_kind 的 streaming 目录应复位 model_type 交回目录探测"
             );
 
             // 文件级覆盖与族专属参数全部重置
@@ -1607,6 +1611,53 @@ mod tests {
             assert_eq!(a.tokens, None);
             assert_eq!(a.language, None);
             assert_eq!(a.use_itn, None);
+        });
+    }
+
+    /// 回归：qwen3（asr_kind=Some）→ streaming zipformer（asr_kind=None）切换后，
+    /// settings 不得残留旧族 model_type——残留会让 resolve 用 qwen3 探针
+    /// 校验 zipformer 目录，误报「模型文件缺失」（2026-08-28 用户实测）。
+    /// 无权威 kind 时应复位为 None，交回 resolve 按目录内容探测。
+    #[test]
+    fn test_set_selected_asr_zipformer_from_qwen3_resets_stale_kind() {
+        run_with_temp_home(|home| {
+            // 前置：切到 audiocpp qwen3（asr_kind=Some(qwen3_asr)、backend=audiocpp 落盘）
+            let qwen3 = home.join("models/qwen3-asr-0.6b-audiocpp");
+            set_selected_model(ModelType::Asr, &qwen3).unwrap();
+            let cfg = settings::load_settings().unwrap().unwrap();
+            assert_eq!(
+                cfg.asr.as_ref().and_then(|a| a.model_type),
+                Some(crate::asr::config::AsrModelKind::Qwen3Asr),
+                "前置：qwen3 条目应持久化 model_type"
+            );
+
+            // 切到真实布局的 streaming zipformer 目录（registry 无 asr_kind）
+            let zip =
+                home.join("models/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20");
+            std::fs::create_dir_all(&zip).unwrap();
+            for name in crate::asr::config::REQUIRED_FILES {
+                std::fs::write(zip.join(name), b"x").unwrap();
+            }
+            set_selected_model(ModelType::Asr, &zip).unwrap();
+
+            let cfg = settings::load_settings().unwrap().unwrap();
+            let asr = cfg.asr.as_ref().unwrap();
+            assert_eq!(
+                asr.model_type, None,
+                "无权威 kind 应复位 model_type 交回目录探测，而非残留 qwen3_asr"
+            );
+            assert_eq!(asr.backend, None, "从 audiocpp 切回 sherpa 条目后端应归位");
+
+            // 端到端锚点：resolve 后按目录探测出 Zipformer 且 models_present=true
+            let resolved = crate::asr::config::resolve(cfg.asr.as_ref(), None).unwrap();
+            assert_eq!(
+                resolved.model_type,
+                crate::asr::config::AsrModelKind::Zipformer
+            );
+            assert!(
+                crate::asr::config::models_present(&resolved),
+                "四件套齐全的 zipformer 目录不应误报模型缺失"
+            );
         });
     }
 

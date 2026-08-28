@@ -1461,6 +1461,10 @@ struct LlmConfigInfo {
     /// 前端默认 password 圆点展示，用户点小眼睛才显式明文）。
     api_key: Option<String>,
     model: Option<String>,
+    /// 是否启用思考（已 resolve 缺省推断；仅 anthropic provider 生效）
+    thinking: bool,
+    /// 思考力度（thinking 关闭时保留原值但运行时忽略）
+    reasoning_effort: Option<String>,
 }
 
 /// 加载状态事件载荷。
@@ -1537,6 +1541,8 @@ fn get_llm_config(state: State<'_, LlmState>) -> Result<LlmConfigInfo, String> {
         base_url: cfg.base_url,
         api_key: cfg.api_key,
         model: cfg.model,
+        thinking: cfg.thinking,
+        reasoning_effort: cfg.reasoning_effort,
     })
 }
 
@@ -2434,7 +2440,11 @@ fn set_llm_connection(
 ) -> Result<(), String> {
     let mut settings = settings::load_settings()?.unwrap_or_default();
     let llm = settings.llm.get_or_insert_with(LlmSettings::default);
-    llm.provider = Some("openai".to_string());
+    // provider 仅在未设置时默认 "openai"；已配置的（如 "anthropic"）保留，
+    // 避免设置页保存连接时把其他 provider 重置回 OpenAI 兼容
+    if llm.provider.is_none() {
+        llm.provider = Some("openai".to_string());
+    }
     if !base_url.trim().is_empty() {
         llm.base_url = Some(base_url.trim().to_string());
     }
@@ -2733,6 +2743,8 @@ fn get_live2d_config(app: AppHandle) -> Result<Live2dConfigInfo, String> {
     let lib = zapmomo::companion::load_library_fast()?;
     let active =
         zapmomo::companion::active_model(&lib).filter(|m| zapmomo::companion::quick_valid(m));
+    // active 伙伴的私有布局（尺寸/位置）；None = 未单独配置，回退全局默认。
+    let active_layout = active.as_ref().and_then(|m| m.layout.clone());
     let (model_dir, model_file, format, models_present) = match active {
         Some(m) => (
             Some(m.model_dir.clone()),
@@ -2755,7 +2767,11 @@ fn get_live2d_config(app: AppHandle) -> Result<Live2dConfigInfo, String> {
         let _ = app.asset_protocol_scope().allow_directory(dir, true);
     }
 
-    let window_scale = live2d_settings.as_ref().and_then(|l| l.window_scale);
+    // 有效缩放：active 伙伴私有 layout 优先，全局 [live2d].window_scale 兜底。
+    let window_scale = active_layout
+        .as_ref()
+        .and_then(|l| l.scale)
+        .or_else(|| live2d_settings.as_ref().and_then(|l| l.window_scale));
     let window_opacity = live2d_settings.as_ref().and_then(|l| l.window_opacity);
     let click_through = live2d_settings.as_ref().and_then(|l| l.click_through);
     let window_layer = live2d_settings.as_ref().and_then(|l| l.window_layer);
@@ -2779,7 +2795,7 @@ fn get_live2d_config(app: AppHandle) -> Result<Live2dConfigInfo, String> {
 }
 
 /// `live2d-model-changed` 事件载荷（切换到某伙伴 / 清屏）。
-/// 字段为 `Option`：清屏时三字段均为 `None`。
+/// 字段为 `Option`：清屏时均为 `None`。
 #[derive(Clone, Serialize)]
 struct Live2dModelInfo {
     model_dir: Option<String>,
@@ -2787,6 +2803,10 @@ struct Live2dModelInfo {
     format: Option<String>,
     /// BongoCat 道具资源（非 BongoCat 模型为 `null`）。
     props: Option<PerformancePropsView>,
+    /// 该伙伴的私有缩放；`None` = 未单独配置，角色窗口沿用当前状态。
+    window_scale: Option<f64>,
+    /// 该伙伴的私有窗口位置（已做多屏可达校验，落屏外时降级为 `None` 沿用当前位置）。
+    window_position: Option<CompanionWindowPosition>,
 }
 
 // ---------------------------------------------------------------------------
@@ -2886,6 +2906,14 @@ fn reconcile_active(
                 model_file: Some(model.model_file.clone()),
                 format: Some(model.format.clone()),
                 props,
+                // 伙伴私有布局随切换事件下发：角色窗口据此恢复该伙伴的尺寸/位置；
+                // 位置落屏外（多屏布局已变化）时降级 None，前端沿用当前位置。
+                window_scale: model.layout.as_ref().and_then(|l| l.scale),
+                window_position: model
+                    .layout
+                    .as_ref()
+                    .and_then(|l| l.position.clone())
+                    .filter(|p| position_on_any_monitor(app, p.x as f64, p.y as f64)),
             };
             // 通知常驻角色窗口即时重载新模型（同进程事件，跨窗口同步）。
             let _ = app.emit("live2d-model-changed", &info);
@@ -2897,6 +2925,8 @@ fn reconcile_active(
                 model_file: None,
                 format: None,
                 props: None,
+                window_scale: None,
+                window_position: None,
             };
             let _ = app.emit("live2d-model-changed", &info);
         }
@@ -3078,10 +3108,14 @@ async fn save_cover_image(id: String, png: Vec<u8>) -> Result<CompanionLibraryVi
 
 /// 持久化角色窗口位置（逻辑像素），供下次启动恢复。
 ///
-/// 由前端在用户手动拖动窗口后（debounce）调用，写入 `~/.zapmomo/settings.toml`
-/// 的 `[live2d.window_position]` 段。
+/// 由前端在用户手动拖动窗口后（debounce）调用。位置是**伙伴私有**配置：
+/// 写入 `library.json` 中 active 伙伴的 `layout.position`；无 active 伙伴时
+/// （空库窗口期）回退写 `settings.toml [live2d.window_position]` 全局默认。
 #[tauri::command]
 fn save_companion_position(x: i32, y: i32) -> Result<(), String> {
+    if let Some(id) = active_companion_id() {
+        return zapmomo::companion::save_layout_position(&id, x, y);
+    }
     let mut settings = settings::load_settings()?.unwrap_or_default();
     let live2d = settings.live2d.get_or_insert_with(Live2dSettings::default);
     live2d.window_position = Some(CompanionWindowPosition { x, y });
@@ -3153,11 +3187,18 @@ fn set_chatbox_visible(app: &AppHandle, visible: bool, focus: bool) {
 }
 
 /// 保存角色窗口缩放比例并通知角色窗口（内部实现，供 command 与原生菜单事件共用）。
+///
+/// 缩放是**伙伴私有**配置：写入 `library.json` 中 active 伙伴的 `layout.scale`；
+/// 无 active 伙伴时回退写 `settings.toml [live2d.window_scale]` 全局默认。
 fn apply_companion_scale(app: &AppHandle, scale: f64) -> Result<(), String> {
-    let mut settings = settings::load_settings()?.unwrap_or_default();
-    let live2d = settings.live2d.get_or_insert_with(Live2dSettings::default);
-    live2d.window_scale = Some(scale);
-    settings::save_settings(&settings)?;
+    if let Some(id) = active_companion_id() {
+        zapmomo::companion::save_layout_scale(&id, scale)?;
+    } else {
+        let mut settings = settings::load_settings()?.unwrap_or_default();
+        let live2d = settings.live2d.get_or_insert_with(Live2dSettings::default);
+        live2d.window_scale = Some(scale);
+        settings::save_settings(&settings)?;
+    }
     let _ = app.emit("companion-scale-changed", scale);
     rebuild_tray_menu(app);
     Ok(())
@@ -3982,23 +4023,51 @@ fn rebuild_tray_menu_threadsafe(app: &AppHandle) {
     let _ = app.run_on_main_thread(move || rebuild_tray_menu(&handle));
 }
 
-/// 读当前窗口缩放与透明度（读失败或缺省回退 1.0 / 1.0）。
+/// 读当前窗口缩放与透明度（缩放：伙伴私有 layout 优先、全局兜底、缺省 1.0；透明度全局，缺省 1.0）。
 fn current_companion_metrics() -> (f64, f64) {
+    let layout = zapmomo::companion::active_layout();
     match settings::load_settings() {
-        Ok(Some(s)) => {
-            let live2d = s.live2d.as_ref();
-            (
-                live2d.and_then(|l| l.window_scale).unwrap_or(1.0),
-                live2d.and_then(|l| l.window_opacity).unwrap_or(1.0),
-            )
-        }
-        _ => (1.0, 1.0),
+        Ok(Some(s)) => (
+            resolve_scale(s.live2d.as_ref(), layout.as_ref()),
+            s.live2d
+                .as_ref()
+                .and_then(|l| l.window_opacity)
+                .unwrap_or(1.0),
+        ),
+        _ => (resolve_scale(None, layout.as_ref()), 1.0),
     }
 }
 
 /// 解析点击穿透开关：缺省（未配置 / 旧版配置）视为关闭。
 fn resolve_click_through(live2d: Option<&Live2dSettings>) -> bool {
     live2d.and_then(|l| l.click_through).unwrap_or(false)
+}
+
+/// 解析有效缩放：active 伙伴私有 layout 优先，全局 `[live2d].window_scale` 兜底，缺省 1.0。
+fn resolve_scale(
+    live2d: Option<&Live2dSettings>,
+    layout: Option<&zapmomo::companion::CompanionLayout>,
+) -> f64 {
+    layout
+        .and_then(|l| l.scale)
+        .or_else(|| live2d.and_then(|l| l.window_scale))
+        .unwrap_or(1.0)
+}
+
+/// 解析有效窗口位置：active 伙伴私有 layout 优先，全局 `[live2d].window_position` 兜底。
+fn resolve_position(
+    live2d: Option<&Live2dSettings>,
+    layout: Option<&zapmomo::companion::CompanionLayout>,
+) -> Option<CompanionWindowPosition> {
+    layout
+        .and_then(|l| l.position.clone())
+        .or_else(|| live2d.and_then(|l| l.window_position.clone()))
+}
+
+/// 当前 active 伙伴 id（无 active / 读库失败 → None）。
+fn active_companion_id() -> Option<String> {
+    let lib = zapmomo::companion::load_library_fast().ok()?;
+    zapmomo::companion::active_model(&lib).map(|m| m.id.clone())
 }
 
 /// 读当前点击穿透开关（读失败或缺省回退 false）。
@@ -5076,6 +5145,35 @@ fn open_storage_dir() -> Result<(), String> {
     open_path(&zapmomo::config::settings::get_models_dir())
 }
 
+/// 从伙伴清单定位要打开的托管资产目录：未知 id 或目录已缺失均报错。
+///
+/// 返回清单中的 `model_dir`（绝对路径字符串），打开前校验目录真实存在，
+/// 避免文件管理器弹系统级错误。
+fn resolve_companion_dir<'a>(
+    models: &'a [zapmomo::companion::CompanionModel],
+    id: &str,
+) -> Result<&'a str, String> {
+    let model = models
+        .iter()
+        .find(|m| m.id == id)
+        .ok_or_else(|| format!("未知的伙伴：{id}"))?;
+    if !Path::new(&model.model_dir).is_dir() {
+        return Err(format!(
+            "伙伴「{}」的资产目录不存在，可能已被移动或删除",
+            model.name
+        ));
+    }
+    Ok(&model.model_dir)
+}
+
+/// 在文件管理器中打开指定伙伴的托管资产目录（用户可自行调整音色参考等资产）。
+#[tauri::command]
+fn open_companion_dir(id: String) -> Result<(), String> {
+    let lib = zapmomo::companion::load_library_fast()?;
+    let dir = resolve_companion_dir(&lib.models, &id)?;
+    open_path(Path::new(dir))
+}
+
 /// 角色窗口初始尺寸（逻辑像素，与 `setup` 中的 `inner_size` 保持一致）。
 const COMPANION_INITIAL_W: f64 = 360.0;
 const COMPANION_INITIAL_H: f64 = 480.0;
@@ -5282,6 +5380,7 @@ pub fn run() {
             set_active_companion,
             rename_companion,
             remove_companion,
+            open_companion_dir,
             save_cover_image,
             save_companion_position,
             save_chatbox_position,
@@ -5421,8 +5520,10 @@ pub fn run() {
 
             // 常驻角色窗口：透明、无边框、永远置顶、不入任务栏，静态展示 Live2D。
             // 复用顶部读到的 settings：同时恢复记忆的尺寸与位置。
+            // 尺寸/位置是伙伴私有配置（library.json layout），全局 [live2d] 仅作兜底默认。
             let live2d = loaded.as_ref().and_then(|s| s.live2d.clone());
-            let scale = live2d.as_ref().and_then(|l| l.window_scale).unwrap_or(1.0);
+            let startup_layout = zapmomo::companion::active_layout();
+            let scale = resolve_scale(live2d.as_ref(), startup_layout.as_ref());
 
             // 基准高度：min(480, 主屏工作区高度 × 0.6)，另加顶部气泡预留条（与前端
             // computeSize 一致）。setup 阶段按默认 3:4 宽高比建窗，模型加载后前端按真实宽高比修正。
@@ -5464,9 +5565,7 @@ pub fn run() {
 
             // 有记忆位置 → 恢复（落在所有显示器之外时说明多屏布局已变化，回退默认右下角）；
             // 否则 → 首次定位到屏幕右下角。
-            let saved_pos = live2d
-                .as_ref()
-                .and_then(|l| l.window_position.clone())
+            let saved_pos = resolve_position(live2d.as_ref(), startup_layout.as_ref())
                 .map(|p| (p.x as f64, p.y as f64))
                 .filter(|&(x, y)| position_on_any_monitor(app.handle(), x, y));
             if let Some((x, y)) = saved_pos.or_else(|| default_bottom_right_position(app.handle()))
@@ -5868,6 +5967,69 @@ mod companion_opacity_tests {
 }
 
 #[cfg(test)]
+mod companion_layout_merge_tests {
+    use super::{resolve_position, resolve_scale};
+    use zapmomo::companion::CompanionLayout;
+    use zapmomo::config::settings::{CompanionWindowPosition, Live2dSettings};
+
+    fn global(scale: Option<f64>, pos: Option<(i32, i32)>) -> Live2dSettings {
+        Live2dSettings {
+            window_scale: scale,
+            window_position: pos.map(|(x, y)| CompanionWindowPosition { x, y }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_resolve_scale_private_overrides_global() {
+        let layout = CompanionLayout {
+            scale: Some(1.5),
+            ..Default::default()
+        };
+        let g = global(Some(0.8), None);
+        assert_eq!(resolve_scale(Some(&g), Some(&layout)), 1.5);
+    }
+
+    #[test]
+    fn test_resolve_scale_falls_back_to_global_then_default() {
+        let g = global(Some(0.8), None);
+        // 无私有 layout → 全局；全局也缺省 → 1.0。
+        assert_eq!(resolve_scale(Some(&g), None), 0.8);
+        let empty_layout = CompanionLayout::default();
+        assert_eq!(resolve_scale(Some(&g), Some(&empty_layout)), 0.8);
+        assert_eq!(resolve_scale(None, None), 1.0);
+        assert_eq!(resolve_scale(Some(&Live2dSettings::default()), None), 1.0);
+    }
+
+    #[test]
+    fn test_resolve_position_private_overrides_global() {
+        let layout = CompanionLayout {
+            position: Some(CompanionWindowPosition { x: 10, y: 20 }),
+            ..Default::default()
+        };
+        let g = global(None, Some((1, 2)));
+        assert_eq!(
+            resolve_position(Some(&g), Some(&layout)),
+            Some(CompanionWindowPosition { x: 10, y: 20 })
+        );
+    }
+
+    #[test]
+    fn test_resolve_position_falls_back_to_global_then_none() {
+        let g = global(None, Some((1, 2)));
+        assert_eq!(
+            resolve_position(Some(&g), None),
+            Some(CompanionWindowPosition { x: 1, y: 2 })
+        );
+        assert_eq!(resolve_position(None, None), None);
+        assert_eq!(
+            resolve_position(Some(&Live2dSettings::default()), None),
+            None
+        );
+    }
+}
+
+#[cfg(test)]
 mod companion_layer_tests {
     use super::{CompanionWindowLayer, layer_from_id};
 
@@ -5923,6 +6085,7 @@ mod companion_menu_tests {
             model_file: format!("{model_dir}/{name}.model3.json"),
             format: "cubism3".to_string(),
             imported_at: "2026-01-01T00:00:00Z".to_string(),
+            layout: None,
         }
     }
 
@@ -5971,6 +6134,58 @@ mod companion_menu_tests {
         assert_eq!(entries[0].label, "mochi");
         assert!(!entries[0].checked);
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod companion_open_dir_tests {
+    use super::resolve_companion_dir;
+    use std::path::Path;
+    use zapmomo::companion::CompanionModel;
+
+    fn model(id: &str, name: &str, model_dir: &Path) -> CompanionModel {
+        let manifest = model_dir.join(format!("{name}.model3.json"));
+        CompanionModel {
+            id: id.to_string(),
+            name: name.to_string(),
+            source_path: None,
+            model_dir: model_dir.display().to_string(),
+            model_file: manifest.display().to_string(),
+            format: "cubism3".to_string(),
+            imported_at: "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_resolve_companion_dir_returns_managed_dir() {
+        // 托管目录真实存在 → 返回目录路径（交给 open_path 打开）。
+        let dir = std::env::temp_dir().join("zapmomo-companion-open-dir-hit");
+        std::fs::create_dir_all(&dir).unwrap();
+        let m = model("companion-aaa", "大月下", &dir);
+        assert_eq!(
+            resolve_companion_dir(&[m], "companion-aaa").unwrap(),
+            dir.display().to_string()
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_resolve_companion_dir_unknown_id_errors() {
+        let dir = std::env::temp_dir().join("zapmomo-companion-open-dir-miss");
+        std::fs::create_dir_all(&dir).unwrap();
+        let m = model("companion-aaa", "大月下", &dir);
+        let err = resolve_companion_dir(&[m], "companion-bbb").unwrap_err();
+        assert!(err.contains("companion-bbb"), "错误需包含未知 id：{err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_resolve_companion_dir_missing_dir_errors() {
+        // 托管目录被用户删掉/移动 → 报错而非让文件管理器弹错。
+        let missing = Path::new("/nonexistent/zapmomo/aaa");
+        let m = model("companion-aaa", "大月下", missing);
+        let err = resolve_companion_dir(&[m], "companion-aaa").unwrap_err();
+        assert!(err.contains("不存在"), "错误需说明目录缺失：{err}");
     }
 }
 

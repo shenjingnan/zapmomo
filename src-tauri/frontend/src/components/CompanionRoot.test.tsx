@@ -3,12 +3,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { CompanionDragMode } from "@/types/tauri";
 import { CompanionRoot } from "./CompanionRoot";
 
-const { invokeMock, startDraggingMock, setSizeMock, configState, listenHandlers } = vi.hoisted(
-  () => ({
+const { invokeMock, startDraggingMock, setSizeMock, setPositionMock, configState, listenHandlers } =
+  vi.hoisted(() => ({
     invokeMock: vi.fn(),
     startDraggingMock: vi.fn(),
     /** resizeTo 的 setSize 是 config 完全应用（含 setLocked）后的最后一步，作等待信号。 */
     setSizeMock: vi.fn(async () => undefined),
+    /** 布局恢复/中心锚定的 setPosition（代码链式 .catch，必须返回 Promise）。 */
+    setPositionMock: vi.fn(() => Promise.resolve()),
     /** get_live2d_config 的 locked / drag_mode / 模型字段覆盖值（null = 后端未返回该字段）。 */
     configState: {
       locked: null as boolean | null,
@@ -18,8 +20,7 @@ const { invokeMock, startDraggingMock, setSizeMock, configState, listenHandlers 
     },
     /** 按事件名捕获 listen 回调，供测试主动推送后端事件。 */
     listenHandlers: {} as Record<string, (payload: unknown) => void>,
-  }),
-);
+  }));
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: invokeMock,
@@ -43,7 +44,7 @@ vi.mock("@tauri-apps/api/window", () => ({
     outerPosition: vi.fn(async () => ({ x: 0, y: 0 })),
     outerSize: vi.fn(async () => ({ width: 360, height: 480 })),
     setSize: setSizeMock,
-    setPosition: vi.fn(() => Promise.resolve()),
+    setPosition: setPositionMock,
   })),
   LogicalPosition: class {
     constructor(
@@ -59,10 +60,27 @@ vi.mock("@tauri-apps/api/window", () => ({
   },
 }));
 
-// Live2dStage 依赖 pixi / WebGL，jsdom 无法运行。
-vi.mock("@/components/live2d/Live2dStage", () => ({
-  Live2dStage: () => <div data-testid="live2d-stage" />,
-}));
+// Live2dStage 依赖 pixi / WebGL，jsdom 无法运行。桩在 modelUrl 从某个旧模型切到
+// 新模型时以 3:4 宽高比回调 onModelMetrics，模拟模型加载完成后的尺寸上报；
+// 首次挂载与初次赋 url 不上报（避免与 config 恢复效应竞争 setSize 等待信号）。
+vi.mock("@/components/live2d/Live2dStage", async () => {
+  const { useEffect, useRef } = await import("react");
+  return {
+    Live2dStage: (props: {
+      modelUrl: string | null;
+      onModelMetrics?: (m: { aspectRatio: number }) => void;
+    }) => {
+      const prevUrl = useRef<string | null>(null);
+      useEffect(() => {
+        if (prevUrl.current !== null && prevUrl.current !== props.modelUrl) {
+          props.onModelMetrics?.({ aspectRatio: 0.75 });
+        }
+        prevUrl.current = props.modelUrl;
+      }, [props.modelUrl]);
+      return <div data-testid="live2d-stage" />;
+    },
+  };
+});
 
 /** 等 config 读取并完全应用：resizeTo 的 setSize 是 config useEffect（含 setLocked）之后的异步动作。 */
 async function waitForConfigApplied() {
@@ -73,6 +91,7 @@ beforeEach(() => {
   invokeMock.mockReset();
   startDraggingMock.mockReset();
   setSizeMock.mockReset();
+  setPositionMock.mockReset();
   configState.locked = null;
   configState.dragMode = null;
   configState.modelFile = null;
@@ -337,5 +356,90 @@ describe("CompanionRoot（GIF 伙伴分发）", () => {
       }),
     );
     expect(screen.queryByTestId("gif-stage")).not.toBeInTheDocument();
+  });
+});
+
+/** 与组件 computeSize 同公式：由宽高比与 scale 推导期望窗口尺寸。 */
+function expectedSize(ratio: number, scale: number) {
+  const availW = window.screen.availWidth;
+  const availH = window.screen.availHeight;
+  const baseH = Math.min(480, availH * 0.6);
+  const modelH = Math.round(baseH * scale);
+  let height = modelH + 72;
+  let width = Math.round(modelH * ratio);
+  height = Math.max(120, Math.min(height, Math.floor(availH * 0.9)));
+  width = Math.max(120, Math.min(width, Math.floor(availW * 0.9)));
+  return { width, height };
+}
+
+describe("CompanionRoot（伙伴私有布局）", () => {
+  beforeEach(() => {
+    // jsdom screen 默认 0×0，computeSize 会全部 clamp 到 120 下限；钉住屏幕尺寸
+    // 让不同 scale 推导出可区分的期望尺寸（1280×800 下 1.0 → 360×552，0.5 → 180×312）。
+    Object.defineProperty(window.screen, "availWidth", { value: 1280, configurable: true });
+    Object.defineProperty(window.screen, "availHeight", { value: 800, configurable: true });
+  });
+
+  function pushModelChanged(payload: Record<string, unknown>) {
+    act(() => listenHandlers["live2d-model-changed"](payload));
+  }
+
+  it("切换到有私有布局的伙伴：按其 scale 调整尺寸并恢复其位置", async () => {
+    configState.modelFile = "/zap/companions/a/a.model3.json";
+    configState.format = "cubism3";
+    render(<CompanionRoot />);
+    await waitForConfigApplied();
+
+    setSizeMock.mockClear();
+    setPositionMock.mockClear();
+    pushModelChanged({
+      model_dir: "/zap/companions/b",
+      model_file: "/zap/companions/b/b.model3.json",
+      format: "cubism3",
+      props: null,
+      window_scale: 0.5,
+      window_position: { x: 100, y: 200 },
+    });
+
+    const { width, height } = expectedSize(0.75, 0.5);
+    await waitFor(() =>
+      expect(setSizeMock).toHaveBeenCalledWith(expect.objectContaining({ width, height })),
+    );
+    await waitFor(() =>
+      expect(setPositionMock).toHaveBeenCalledWith(expect.objectContaining({ x: 100, y: 200 })),
+    );
+  });
+
+  it("切换到无私有布局的伙伴：沿用当前窗口尺寸，不回退全局默认", async () => {
+    configState.modelFile = "/zap/companions/a/a.model3.json";
+    configState.format = "cubism3";
+    render(<CompanionRoot />);
+    await waitForConfigApplied();
+
+    // 先切到有私有 scale（0.5）的伙伴 B，让当前窗口处于 0.5 状态。
+    pushModelChanged({
+      model_dir: "/zap/companions/b",
+      model_file: "/zap/companions/b/b.model3.json",
+      format: "cubism3",
+      props: null,
+      window_scale: 0.5,
+      window_position: { x: 100, y: 200 },
+    });
+    const sizeB = expectedSize(0.75, 0.5);
+    await waitFor(() => expect(setSizeMock).toHaveBeenCalledWith(expect.objectContaining(sizeB)));
+
+    // 再切到从未配置的伙伴 C：沿用当前状态（尺寸仍是 0.5 推导值），不回退全局 1.0。
+    setSizeMock.mockClear();
+    pushModelChanged({
+      model_dir: "/zap/companions/c",
+      model_file: "/zap/companions/c/c.model3.json",
+      format: "cubism3",
+      props: null,
+      window_scale: null,
+      window_position: null,
+    });
+    await waitFor(() => expect(setSizeMock).toHaveBeenCalledWith(expect.objectContaining(sizeB)));
+    const sizeGlobal = expectedSize(0.75, 1.0);
+    expect(setSizeMock).not.toHaveBeenCalledWith(expect.objectContaining(sizeGlobal));
   });
 });
