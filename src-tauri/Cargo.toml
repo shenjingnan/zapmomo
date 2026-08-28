@@ -52,4 +52,4 @@ tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", branch = "v2.
 [target.'cfg(windows)'.dependencies]
 # 置底：SetWindowPos(HWND_BOTTOM) 把角色窗口沉到 Z 序底部
 #（windows crate 已是 tauri 的传递依赖，此处显式声明为直接依赖并启用所需 feature）
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
