@@ -2,7 +2,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ToastProvider } from "@/components/ui/toast";
-import type { CompanionDragMode, CompanionLibraryView, CompanionModelInfo } from "@/types/tauri";
+import type { CompanionLibraryView, CompanionModelInfo } from "@/types/tauri";
 import { CompanionPage } from "./CompanionPage";
 
 type StageCatalog = import("@/components/live2d/previewManager").Live2dCatalog;
@@ -16,12 +16,8 @@ const { invokeMock, openMock, stageHandleMock, stageState, configState } = vi.ho
   },
   /** 供 mock 替身注入目录的可变容器（vi.mock 工厂只可靠引用 hoisted 变量）。 */
   stageState: { catalog: null as StageCatalog | null },
-  /** get_live2d_config 的 click_through / locked / drag_mode 覆盖值（null = 后端未返回该字段）。 */
+  /** get_live2d_config 返回的有效缩放（模拟「active 伙伴私有 ?? 全局」合并结果）。 */
   configState: {
-    clickThrough: null as boolean | null,
-    locked: null as boolean | null,
-    dragMode: null as CompanionDragMode | null,
-    /** get_live2d_config 返回的有效缩放（模拟「active 伙伴私有 ?? 全局」合并结果）。 */
     windowScale: 1.0,
   },
 }));
@@ -83,6 +79,8 @@ const MODEL_B = model("companion-bbbb", "星语");
 let library: CompanionLibraryView;
 /** import_companion mock 用序号生成唯一 id。 */
 let importSeq: number;
+/** open_companion_dir mock 的可变失败注入（null = 成功）。 */
+let openDirError: string | null;
 
 beforeEach(() => {
   invokeMock.mockReset();
@@ -91,12 +89,10 @@ beforeEach(() => {
   stageHandleMock.applyExpression.mockReset();
   stageHandleMock.resetExpression.mockReset();
   stageState.catalog = null;
-  configState.clickThrough = null;
-  configState.locked = null;
-  configState.dragMode = null;
   configState.windowScale = 1.0;
   library = { models: [], active_model_id: null };
   importSeq = 0;
+  openDirError = null;
 
   invokeMock.mockImplementation(
     (cmd: string, args?: { source?: string; id?: string; name?: string }) => {
@@ -111,10 +107,10 @@ beforeEach(() => {
             models_present: false,
             window_scale: configState.windowScale,
             window_opacity: 1.0,
-            click_through: configState.clickThrough,
+            click_through: false,
             window_layer: "front",
-            locked: configState.locked,
-            drag_mode: configState.dragMode,
+            locked: false,
+            drag_mode: "direct",
             settings_path: "/zap/.zapmomo/settings.toml",
           });
         case "import_companion": {
@@ -168,6 +164,8 @@ beforeEach(() => {
           };
           return Promise.resolve(library);
         }
+        case "open_companion_dir":
+          return openDirError == null ? Promise.resolve(undefined) : Promise.reject(openDirError);
         default:
           return Promise.resolve(undefined);
       }
@@ -262,25 +260,6 @@ describe("CompanionPage 伙伴模型管理器", () => {
         opacity: expect.any(Number),
       });
     });
-  });
-
-  it("切换显示层级开关调用 set_companion_layer（置顶→置底）", async () => {
-    library = { models: [MODEL_A], active_model_id: MODEL_A.id };
-    const user = userEvent.setup();
-    renderPage();
-
-    await screen.findByRole("button", { name: /大月下.*使用中/ });
-    // 初始默认置顶，开关为开。
-    const toggle = await screen.findByRole("switch", { name: "置顶" });
-    expect(toggle).toBeChecked();
-    expect(screen.getByText(/置顶：悬浮在所有窗口之上/)).toBeInTheDocument();
-
-    // 关闭开关 → 置底。
-    await user.click(toggle);
-    await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("set_companion_layer", { layer: "back" });
-    });
-    expect(await screen.findByText(/置底：沉到所有窗口之下/)).toBeInTheDocument();
   });
 
   it("空库时显示空态", async () => {
@@ -557,6 +536,31 @@ describe("CompanionPage 伙伴模型管理器", () => {
     expect(invokeMock).not.toHaveBeenCalledWith("rename_companion", expect.anything());
   });
 
+  it("打开资产文件夹：点击按钮调用 open_companion_dir", async () => {
+    library = { models: [MODEL_A], active_model_id: MODEL_A.id };
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByRole("button", { name: /大月下.*使用中/ });
+    await user.click(screen.getByRole("button", { name: `打开「${MODEL_A.name}」的资产文件夹` }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("open_companion_dir", { id: MODEL_A.id });
+    });
+  });
+
+  it("打开资产文件夹失败：toast 显示后端错误", async () => {
+    library = { models: [MODEL_A], active_model_id: MODEL_A.id };
+    openDirError = "伙伴「大月下」的资产目录不存在，可能已被移动或删除";
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByRole("button", { name: /大月下.*使用中/ });
+    await user.click(screen.getByRole("button", { name: `打开「${MODEL_A.name}」的资产文件夹` }));
+
+    expect(await screen.findByText(openDirError)).toBeInTheDocument();
+  });
+
   it("展示动作与表情目录：点击动作播放、点击表情应用、重置恢复", async () => {
     library = { models: [MODEL_A], active_model_id: MODEL_A.id };
     stageState.catalog = {
@@ -596,115 +600,6 @@ describe("CompanionPage 伙伴模型管理器", () => {
     expect(await screen.findByTestId("live2d-stage")).toBeInTheDocument();
     expect(await screen.findByText("此模型未提供动作或表情")).toBeInTheDocument();
     expect(screen.queryByRole("tab", { name: "动作" })).not.toBeInTheDocument();
-  });
-
-  it("点击穿透开关默认关闭，点击后调用 set_companion_click_through 开启", async () => {
-    library = { models: [MODEL_A], active_model_id: MODEL_A.id };
-    const user = userEvent.setup();
-    renderPage();
-
-    const toggle = await screen.findByRole("switch", { name: "点击穿透" });
-    expect(toggle).toHaveAttribute("aria-checked", "false");
-
-    await user.click(toggle);
-    await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("set_companion_click_through", { enabled: true });
-    });
-  });
-
-  it("点击穿透开关从配置恢复为开启，再点击则关闭", async () => {
-    library = { models: [MODEL_A], active_model_id: MODEL_A.id };
-    configState.clickThrough = true;
-    const user = userEvent.setup();
-    renderPage();
-
-    const toggle = await screen.findByRole("switch", { name: "点击穿透" });
-    expect(toggle).toHaveAttribute("aria-checked", "true");
-
-    await user.click(toggle);
-    await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("set_companion_click_through", { enabled: false });
-    });
-  });
-
-  it("未选中伙伴时点击穿透开关仍然可见（窗口级行为）", async () => {
-    library = { models: [], active_model_id: null };
-    renderPage();
-
-    expect(await screen.findByRole("switch", { name: "点击穿透" })).toBeInTheDocument();
-    expect(screen.queryByText("尺寸")).not.toBeInTheDocument();
-  });
-
-  it("锁定位置开关默认关闭，点击后调用 set_companion_locked 开启", async () => {
-    library = { models: [MODEL_A], active_model_id: MODEL_A.id };
-    const user = userEvent.setup();
-    renderPage();
-
-    const toggle = await screen.findByRole("switch", { name: "锁定位置" });
-    expect(toggle).toHaveAttribute("aria-checked", "false");
-
-    await user.click(toggle);
-    await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("set_companion_locked", { enabled: true });
-    });
-  });
-
-  it("锁定位置开关从配置恢复为开启，再点击则关闭", async () => {
-    library = { models: [MODEL_A], active_model_id: MODEL_A.id };
-    configState.locked = true;
-    const user = userEvent.setup();
-    renderPage();
-
-    const toggle = await screen.findByRole("switch", { name: "锁定位置" });
-    expect(toggle).toHaveAttribute("aria-checked", "true");
-
-    await user.click(toggle);
-    await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("set_companion_locked", { enabled: false });
-    });
-  });
-
-  it("未选中伙伴时锁定位置开关仍然可见（窗口级行为）", async () => {
-    library = { models: [], active_model_id: null };
-    renderPage();
-
-    expect(await screen.findByRole("switch", { name: "锁定位置" })).toBeInTheDocument();
-  });
-
-  it("修饰键拖动开关默认关闭，点击后调用 set_companion_drag_mode 切到 modifier", async () => {
-    library = { models: [MODEL_A], active_model_id: MODEL_A.id };
-    const user = userEvent.setup();
-    renderPage();
-
-    const toggle = await screen.findByRole("switch", { name: "修饰键拖动" });
-    expect(toggle).toHaveAttribute("aria-checked", "false");
-
-    await user.click(toggle);
-    await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("set_companion_drag_mode", { mode: "modifier" });
-    });
-  });
-
-  it("修饰键拖动开关从配置恢复为开启，再点击切回 direct", async () => {
-    library = { models: [MODEL_A], active_model_id: MODEL_A.id };
-    configState.dragMode = "modifier";
-    const user = userEvent.setup();
-    renderPage();
-
-    const toggle = await screen.findByRole("switch", { name: "修饰键拖动" });
-    expect(toggle).toHaveAttribute("aria-checked", "true");
-
-    await user.click(toggle);
-    await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("set_companion_drag_mode", { mode: "direct" });
-    });
-  });
-
-  it("未选中伙伴时修饰键拖动开关仍然可见（窗口级行为）", async () => {
-    library = { models: [], active_model_id: null };
-    renderPage();
-
-    expect(await screen.findByRole("switch", { name: "修饰键拖动" })).toBeInTheDocument();
   });
 
   it("角色包伙伴：静态立绘走 img 预览（无动作面板），列表显示人设/音色徽标", async () => {

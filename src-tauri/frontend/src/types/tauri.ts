@@ -14,8 +14,6 @@ export interface KwsConfigInfo {
   /** 持久化的会话级自定义唤醒词（原始字符串，多个用 / 分隔；空 = 模型内置） */
   custom_keywords: string;
   model_dir: string;
-  /** 当前模型支持的自定义唤醒词语言（gigaspeech 仅 ["en"]；缺省按 ["zh"] 兜底） */
-  keyword_languages?: string[];
   provider: string;
   num_threads: number;
   sample_rate: number;
@@ -70,6 +68,8 @@ export interface AsrConfigInfo {
   enabled: boolean;
   /** 模型类型（zipformer/sensevoice/whisper），决定是否展示流式专属参数 */
   model_type: string;
+  /** 推理后端（sherpa/audiocpp）：audiocpp 时显示 audio.cpp 标识并隐藏热词参数 */
+  backend: string;
   model_dir: string;
   provider: string;
   num_threads: number;
@@ -313,6 +313,12 @@ export interface LlmParams {
   seed: number;
 }
 
+/** `set_llm_params` 载荷（参数补丁；未传字段保持不变） */
+export interface LlmParamsPatch {
+  thinking?: boolean;
+  reasoning_effort?: string;
+}
+
 /** `get_llm_config` 返回 */
 export interface LlmConfigInfo {
   enabled: boolean;
@@ -329,6 +335,10 @@ export interface LlmConfigInfo {
   api_key: string | null;
   /** 模型名（如 glm-4.7-flash） */
   model: string | null;
+  /** 是否启用思考（已 resolve 缺省推断） */
+  thinking: boolean;
+  /** 思考力度（thinking 关闭时保留原值但运行时忽略） */
+  reasoning_effort: string | null;
 }
 
 /** `llm-token` 事件载荷（对应后端 TokenDelta） */

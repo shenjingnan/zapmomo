@@ -24,7 +24,7 @@ use tauri_plugin_global_shortcut::GlobalShortcutExt;
 use zapmomo::asr::config::AsrParamsPatch;
 use zapmomo::asr::{AsrReaction, AsrResult};
 use zapmomo::config::settings::{
-    self, AsrSettings, ChatboxSettings, CompanionDragMode, CompanionWindowLayer,
+    self, AsrSettings, BubbleSettings, ChatboxSettings, CompanionDragMode, CompanionWindowLayer,
     CompanionWindowPosition, KwsSettings, Live2dSettings, LlmSettings, TtsSettings,
 };
 use zapmomo::datetime::iso_timestamp_now;
@@ -32,12 +32,6 @@ use zapmomo::kws::{KwsResult, Reaction, ReactionOutcome};
 use zapmomo::llm::types::{ChatMessage, ChatRole, GenParams, InputItem, LlmParamsPatch};
 use zapmomo::llm::{LlmEngine, LlmEvent};
 use zapmomo::model_library;
-use zapmomo::model_library::catalog::{CatalogPage, CatalogQuery, RemoteModelDetail};
-use zapmomo::model_library::download::{
-    DownloadArtifactRequest, DownloadConfig, DownloadEventSink, DownloadManager, DownloadTaskView,
-    UreqFileDownloader,
-};
-use zapmomo::model_library::huggingface::HfApiClient;
 use zapmomo::model_library::{
     InstallState as LibInstallState, LibraryModel, RuntimeAction as LibRuntimeAction,
     SetCurrentResult, SystemResources, registry::ModelType as LibModelType,
@@ -91,6 +85,27 @@ mod chatbox_panel {
 }
 #[cfg(target_os = "macos")]
 use chatbox_panel::ChatboxPanel;
+
+// 语音回复气泡窗口的 macOS 非激活面板：纯展示 + 拖动，无需键盘输入，
+// 与角色窗口一样彻底不抢焦点（can_become_key_window: false）。
+// 宏展开含 use 声明，须包在独立模块内避免与上方 panel 冲突。
+#[cfg(target_os = "macos")]
+mod bubble_panel {
+    // 宏生成代码需调用 WebviewWindow::app_handle()（Manager trait 方法）
+    use tauri::Manager as _;
+
+    tauri_nspanel::tauri_panel! {
+        panel!(BubblePanel {
+            config: {
+                is_floating_panel: true,
+                can_become_key_window: false,
+                can_become_main_window: false,
+            }
+        })
+    }
+}
+#[cfg(target_os = "macos")]
+use bubble_panel::BubblePanel;
 
 /// 监听线程状态：共享停止标志 + 线程句柄 + 运行时实际模型目录（RuntimeActual）。
 struct ListenState {
@@ -304,9 +319,6 @@ struct KwsConfigInfo {
     enabled: bool,
     custom_keywords: String,
     model_dir: String,
-    /// 当前模型支持的自定义唤醒词语言（如 `["zh","en"]`；gigaspeech 为 `["en"]`），
-    /// 供前端在输入唤醒词时提前给出兼容性提示。
-    keyword_languages: Vec<&'static str>,
     provider: String,
     num_threads: i32,
     sample_rate: i32,
@@ -405,7 +417,6 @@ fn get_kws_config(state: State<'_, DownloadState>) -> Result<KwsConfigInfo, Stri
             .and_then(|s| s.custom_keywords.clone())
             .unwrap_or_default(),
         model_dir: cfg.model_dir.display().to_string(),
-        keyword_languages: zapmomo::kws::token::keyword_languages(&cfg.tokens),
         provider: cfg.provider.clone(),
         num_threads: cfg.num_threads,
         sample_rate: cfg.sample_rate,
@@ -670,6 +681,8 @@ struct AsrConfigInfo {
     enabled: bool,
     /// 模型类型（zipformer/paraformer/sensevoice/whisper），前端据此隐藏流式专属参数
     model_type: String,
+    /// 推理后端（sherpa/audiocpp），前端据此显示 audio.cpp 标识与隐藏热词参数
+    backend: String,
     model_dir: String,
     provider: String,
     num_threads: i32,
@@ -699,12 +712,13 @@ fn get_asr_config(state: State<'_, AsrDownloadState>) -> Result<AsrConfigInfo, S
     let asr_settings = settings.as_ref().and_then(|s| s.asr.clone());
     let cfg = zapmomo::asr::config::resolve(asr_settings.as_ref(), None)?;
 
-    // 族感知：SenseVoice/Whisper/Qwen3-ASR/zipformer 各有自己的文件布局，交给 asr::is_installed 探测
-    let models_present = zapmomo::asr::is_installed(&cfg.model_dir);
+    // 族 + 后端感知：sherpa 按模型类型清单探测；audiocpp 按族表 GGUF 单文件探测
+    let models_present = zapmomo::asr::config::models_present(&cfg);
     let punctuation_present = cfg.punctuation_model.is_file();
     tracing::info!(
-        "get_asr_config: model_type={} settings.asr.enabled={:?} resolve.enabled={} models_present={}",
+        "get_asr_config: model_type={} backend={} settings.asr.enabled={:?} resolve.enabled={} models_present={}",
         cfg.model_type.as_str(),
+        cfg.backend.as_str(),
         asr_settings.as_ref().and_then(|a| a.enabled),
         cfg.enabled,
         models_present
@@ -713,6 +727,7 @@ fn get_asr_config(state: State<'_, AsrDownloadState>) -> Result<AsrConfigInfo, S
     Ok(AsrConfigInfo {
         enabled: cfg.enabled,
         model_type: cfg.model_type.as_str().to_string(),
+        backend: cfg.backend.as_str().to_string(),
         model_dir: cfg.model_dir.display().to_string(),
         provider: cfg.provider.clone(),
         num_threads: cfg.num_threads,
@@ -1461,6 +1476,10 @@ struct LlmConfigInfo {
     /// 前端默认 password 圆点展示，用户点小眼睛才显式明文）。
     api_key: Option<String>,
     model: Option<String>,
+    /// 是否启用思考（已 resolve 缺省推断；仅 anthropic provider 生效）
+    thinking: bool,
+    /// 思考力度（thinking 关闭时保留原值但运行时忽略）
+    reasoning_effort: Option<String>,
 }
 
 /// 加载状态事件载荷。
@@ -1537,6 +1556,8 @@ fn get_llm_config(state: State<'_, LlmState>) -> Result<LlmConfigInfo, String> {
         base_url: cfg.base_url,
         api_key: cfg.api_key,
         model: cfg.model,
+        thinking: cfg.thinking,
+        reasoning_effort: cfg.reasoning_effort,
     })
 }
 
@@ -1941,9 +1962,11 @@ fn collect_tts_preflight_files(
 
 /// 预检语音会话所需模型文件（KWS / ASR / TTS / LLM）。缺任一返回带安装提示的错误。
 ///
-/// ASR 按 `model_type` 族感知（zipformer 四件套 / paraformer encoder+decoder+tokens /
-/// SenseVoice model+tokens / Whisper encoder+decoder+tokens / Qwen3-ASR
-/// conv_frontend+encoder+decoder，tokenizer 目录单独校验），不再硬编码 zipformer 专属文件名。
+/// ASR 按 backend 分派：sherpa 走 `model_type` 族感知逐文件收集（zipformer 四件套 /
+/// paraformer encoder+decoder+tokens / SenseVoice model+tokens / Whisper
+/// encoder+decoder+tokens / Qwen3-ASR conv_frontend+encoder+decoder，tokenizer 目录
+/// 单独校验）；audiocpp 走 `asr::config::preflight` 按族清单校验（单 GGUF 包，不查
+/// sherpa 的 ONNX 清单，否则 Qwen3Asr 会误报缺 conv_frontend）。
 /// TTS 按 backend 分派：sherpa 走逐文件收集（含 Kokoro 主模型/voices）；audiocpp 走
 /// `tts::config::preflight`（固定两文件，不查 sherpa 清单）。
 fn preflight_voice_models(
@@ -1965,7 +1988,16 @@ fn preflight_voice_models(
             files.extend(collect_tts_preflight_files(&cfg.tts)?);
         }
     }
-    files.extend(collect_asr_preflight_files(&cfg.asr)?);
+    match cfg.asr.backend {
+        zapmomo::asr::config::AsrBackendKind::Audiocpp => {
+            // audiocpp：单 GGUF 包，`preflight` 按族清单校验（缺失时带 registry 安装提示）
+            zapmomo::asr::config::preflight(&cfg.asr)
+                .map_err(|e| format!("{e}\n（语音会话 ASR 预检失败）"))?;
+        }
+        zapmomo::asr::config::AsrBackendKind::Sherpa => {
+            files.extend(collect_asr_preflight_files(&cfg.asr)?);
+        }
+    }
     for (name, path) in files {
         if !path.is_file() {
             return Err(format!("缺少模型文件 {name}: {}", path.display()));
@@ -2460,7 +2492,11 @@ fn set_llm_connection(
 ) -> Result<(), String> {
     let mut settings = settings::load_settings()?.unwrap_or_default();
     let llm = settings.llm.get_or_insert_with(LlmSettings::default);
-    llm.provider = Some("openai".to_string());
+    // provider 仅在未设置时默认 "openai"；已配置的（如 "anthropic"）保留，
+    // 避免设置页保存连接时把其他 provider 重置回 OpenAI 兼容
+    if llm.provider.is_none() {
+        llm.provider = Some("openai".to_string());
+    }
     if !base_url.trim().is_empty() {
         llm.base_url = Some(base_url.trim().to_string());
     }
@@ -3152,6 +3188,25 @@ fn save_chatbox_position(x: i32, y: i32) -> Result<(), String> {
     settings::save_settings(&settings)
 }
 
+/// 持久化语音回复气泡窗口位置（逻辑像素），供下次启动恢复。
+///
+/// 由前端在用户手动拖动窗口后（debounce）调用，写入 `~/.zapmomo/settings.toml`
+/// 的 `[bubble.window_position]` 段。
+#[tauri::command]
+fn save_bubble_position(x: i32, y: i32) -> Result<(), String> {
+    let mut settings = settings::load_settings()?.unwrap_or_default();
+    let bubble = settings.bubble.get_or_insert_with(BubbleSettings::default);
+    bubble.window_position = Some(CompanionWindowPosition { x, y });
+    settings::save_settings(&settings)
+}
+
+/// （临时调试）气泡窗口前端状态日志：排查「气泡无法拖动」——确认点穿切换与
+/// 拖动事件是否到达。验收通过后删除。
+#[tauri::command]
+fn bubble_debug_log(message: String) {
+    tracing::info!(target: "bubble_debug", "{message}");
+}
+
 /// 隐藏文字输入条窗口并持久化开关（前端 Esc 关闭时调用，保持菜单勾选态一致）。
 #[tauri::command]
 fn hide_chatbox(app: AppHandle) {
@@ -3472,6 +3527,14 @@ fn apply_active_companion(app: &AppHandle, id: &str) {
 #[cfg(target_os = "macos")]
 const MACOS_COMPANION_BACK_LEVEL: i64 = -1;
 
+/// 气泡/输入条面板的 macOS 层级：Floating(4) 之上 1 级，建窗时常置、不随角色层级切换。
+/// 角色前置 = Floating(4)、置底 = -1（见 `apply_companion_layer_platform`），层级 5
+/// 保证聊天气泡与文字输入条恒高于角色，角色任何层级下都不会遮挡它们。
+/// （Tauri `always_on_top` 只设 NSFloatingWindowLevel=3，低于角色前置的 4，
+/// 曾导致角色前置时角色反而盖住气泡/输入条、无法操作。）
+#[cfg(target_os = "macos")]
+const MACOS_OVERLAY_PANEL_LEVEL: i64 = 5;
+
 /// 按层级即时调整角色窗口的 z-order 与鼠标穿透（平台相关；启动与运行时共用）。
 ///
 /// macOS 走 NSPanel（set_level + set_ignores_mouse_events），不混用 tauri 的
@@ -3495,6 +3558,20 @@ fn apply_companion_layer_platform(app: &AppHandle, layer: CompanionWindowLayer) 
             // z-order 完全由 set_level 控制（浮层属性不参与层级），运行时切换 floating 会破坏存活 WebView 渲染。
             panel.set_level(MACOS_COMPANION_BACK_LEVEL);
             panel.set_ignores_mouse_events(true); // 完全点穿
+        }
+    }
+}
+
+/// 把气泡/输入条窗口重断到 TOPMOST band 顶部（Windows）。
+///
+/// topmost band 内无层级之分，Z 序由插入顺序决定：角色置顶后再断一次气泡/输入条
+/// 的 always_on_top（SetWindowPos HWND_TOPMOST 即移到 band 顶），保证二者恒在角色
+/// 之上；角色置底时已退出 topmost band，本调用无副作用（仅重复置顶）。
+#[cfg(windows)]
+fn raise_overlay_windows(app: &AppHandle) {
+    for label in ["bubble", "chatbox"] {
+        if let Some(w) = app.get_webview_window(label) {
+            let _ = w.set_always_on_top(true);
         }
     }
 }
@@ -3527,6 +3604,7 @@ fn apply_companion_layer_platform(app: &AppHandle, layer: CompanionWindowLayer) 
             );
         }
     }
+    raise_overlay_windows(app);
 }
 
 /// 按层级即时调整角色窗口的 z-order 与鼠标穿透（平台相关；启动与运行时共用）。
@@ -4286,6 +4364,25 @@ fn toggle_companion_window(app: &AppHandle) {
         // 非激活面板，聚焦不激活 App，不会把开着的设置窗带到最前。
         set_chatbox_visible(app, true, true);
     }
+    sync_bubble_visibility(app);
+}
+
+/// 气泡窗口显隐与角色窗口保持一致（气泡无独立开关，显隐不持久化）。
+///
+/// 所有改变角色显隐的路径（快捷键切换 / 右键隐藏 / 单实例恢复 / 启动）都应调用，
+/// 否则气泡会成为孤儿窗口（角色已隐藏，气泡还漂在屏幕上）。
+fn sync_bubble_visibility(app: &AppHandle) {
+    let visible = app
+        .get_webview_window("companion")
+        .map(|w| w.is_visible().unwrap_or(true))
+        .unwrap_or(false);
+    if let Some(bubble) = app.get_webview_window("bubble") {
+        let _ = if visible {
+            bubble.show()
+        } else {
+            bubble.hide()
+        };
+    }
 }
 
 /// 打开设置窗口（供角色窗口右键菜单调用）。
@@ -4459,6 +4556,7 @@ fn hide_companion_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("companion") {
         let _ = window.hide();
     }
+    sync_bubble_visibility(app);
 }
 
 /// 隐藏角色窗口（供角色窗口右键菜单调用）。
@@ -4537,15 +4635,6 @@ fn download_stage_str(stage: zapmomo::kws::model::DownloadStage) -> &'static str
 /// 从模型库列表解析模型（按 `id` 或 `install_id`；Current/Delete 可唯一定位具体安装实例）。
 fn resolve_library_model(id: &str) -> Result<LibraryModel, String> {
     model_library::resolve_model(id).ok_or_else(|| format!("未知的模型：{id}"))
-}
-
-/// 打开外部链接（仅供 "在 Hugging Face 查看"；只允许 http(s)）。
-#[tauri::command]
-fn open_external(url: String) -> Result<(), String> {
-    if !(url.starts_with("https://") || url.starts_with("http://")) {
-        return Err("仅支持 http(s) 链接".to_string());
-    }
-    open_path(Path::new(&url))
 }
 
 /// 平台化打开目录（macOS `open` / Linux `xdg-open` / Windows `explorer`）。
@@ -4693,27 +4782,6 @@ fn cancel_model_download(state: State<'_, ModelLibraryState>) -> Result<(), Stri
     Ok(())
 }
 
-/// KWS 切换后的唤醒词兼容性警告：新模型英文专用而已保存的自定义唤醒词含中文。
-///
-/// 只提示不阻止（切换本身有效；启动监听时的编码校验仍是最终兜底）。
-fn kws_keyword_compat_warning(model_dir: &std::path::Path) -> Option<String> {
-    let langs = zapmomo::kws::token::keyword_languages(&model_dir.join("tokens.txt"));
-    if langs.as_slice() != ["en"] {
-        return None;
-    }
-    let settings = zapmomo::config::settings::load_settings().ok()?;
-    let kw = settings
-        .as_ref()
-        .and_then(|s| s.kws.as_ref())
-        .and_then(|k| k.custom_keywords.clone())?;
-    if zapmomo::kws::token::contains_cjk(&kw) {
-        return Some(format!(
-            "\n注意：该模型仅支持英文唤醒词，当前已保存的自定义唤醒词「{kw}」含中文，请先在配置中修改。"
-        ));
-    }
-    None
-}
-
 /// 设为当前模型（「使用」）。
 ///
 /// 只写 `model_dir`，**绝不写 enabled / 自动启动能力**。
@@ -4754,7 +4822,7 @@ async fn set_current_model(
                 .unwrap_or_else(|e| e.into_inner()) = None;
         }
 
-        let (action, effective, mut message) = match mt {
+        let (action, effective, message) = match mt {
             LibModelType::Kws if kws.is_listening() => (
                 LibRuntimeAction::RestartRequired,
                 false,
@@ -4843,12 +4911,6 @@ async fn set_current_model(
                 format!("已将 {} 设为当前模型", model.display_name),
             ),
         };
-        // KWS 切换：新模型英文专用而已存唤醒词含中文 → 追加警告（toast 即时可见）
-        if mt == LibModelType::Kws
-            && let Some(warn) = kws_keyword_compat_warning(&path)
-        {
-            message.push_str(&warn);
-        }
         return Ok(SetCurrentResult {
             model_type: mt,
             model_id: model.id,
@@ -4958,13 +5020,11 @@ impl Drop for StorageMigrateGuard {
 /// 检查「设置/迁移数据目录」是否被占用（下载中 / 语音会话 / 监听 / 迁移中）。
 ///
 /// 命中返回具体错误。
-#[allow(clippy::too_many_arguments)]
 fn check_storage_busy(
     dl_kws: &DownloadState,
     dl_asr: &AsrDownloadState,
     dl_tts: &TtsDownloadState,
     lib_dl: &ModelLibraryState,
-    dl_mgr: &DownloadManager,
     voice: &VoiceSessionState,
     kws: &ListenState,
     asr: &AsrListenState,
@@ -4973,13 +5033,6 @@ fn check_storage_busy(
         || dl_asr.in_progress.load(Ordering::Relaxed)
         || dl_tts.in_progress.load(Ordering::Relaxed)
         || lib_dl.in_progress.load(Ordering::Relaxed)
-    {
-        return Err("有模型正在下载，请先等待下载完成或取消后再操作".to_string());
-    }
-    if dl_mgr
-        .snapshot()
-        .iter()
-        .any(|t| matches!(t.state.as_str(), "queued" | "downloading" | "verifying"))
     {
         return Err("有模型正在下载，请先等待下载完成或取消后再操作".to_string());
     }
@@ -5013,7 +5066,6 @@ async fn set_data_dir(
     dl_asr: State<'_, AsrDownloadState>,
     dl_tts: State<'_, TtsDownloadState>,
     lib_dl: State<'_, ModelLibraryState>,
-    dl_mgr: State<'_, Arc<DownloadManager>>,
     voice: State<'_, VoiceSessionState>,
     kws: State<'_, ListenState>,
     asr: State<'_, AsrListenState>,
@@ -5027,7 +5079,6 @@ async fn set_data_dir(
         dl_asr.inner(),
         dl_tts.inner(),
         lib_dl.inner(),
-        &dl_mgr,
         voice.inner(),
         kws.inner(),
         asr.inner(),
@@ -5062,7 +5113,6 @@ async fn migrate_storage(
     dl_asr: State<'_, AsrDownloadState>,
     dl_tts: State<'_, TtsDownloadState>,
     lib_dl: State<'_, ModelLibraryState>,
-    dl_mgr: State<'_, Arc<DownloadManager>>,
     voice: State<'_, VoiceSessionState>,
     kws: State<'_, ListenState>,
     asr: State<'_, AsrListenState>,
@@ -5075,7 +5125,6 @@ async fn migrate_storage(
         dl_asr.inner(),
         dl_tts.inner(),
         lib_dl.inner(),
-        &dl_mgr,
         voice.inner(),
         kws.inner(),
         asr.inner(),
@@ -5148,364 +5197,33 @@ fn open_storage_dir() -> Result<(), String> {
     open_path(&zapmomo::config::settings::get_models_dir())
 }
 
-/// 移除 external 模型注册（不删文件）。current / runtime-loaded / switching 时拒绝。
-#[tauri::command]
-fn remove_local_model(
-    kws: State<'_, ListenState>,
-    asr: State<'_, AsrListenState>,
-    id: String,
-) -> Result<(), String> {
-    let rec = model_library::get_local_models()
-        .into_iter()
-        .find(|l| l.id == id)
-        .ok_or("未找到该本地模型")?;
-    let mt = LibModelType::from_str_value(&rec.model_type).unwrap_or(LibModelType::Llm);
-    let lp = Path::new(&rec.path);
-    if model_library::is_path_current(mt, lp) {
-        return Err("该模型当前被设为当前模型，请先切换到其他模型".to_string());
+/// 从伙伴清单定位要打开的托管资产目录：未知 id 或目录已缺失均报错。
+///
+/// 返回清单中的 `model_dir`（绝对路径字符串），打开前校验目录真实存在，
+/// 避免文件管理器弹系统级错误。
+fn resolve_companion_dir<'a>(
+    models: &'a [zapmomo::companion::CompanionModel],
+    id: &str,
+) -> Result<&'a str, String> {
+    let model = models
+        .iter()
+        .find(|m| m.id == id)
+        .ok_or_else(|| format!("未知的伙伴：{id}"))?;
+    if !Path::new(&model.model_dir).is_dir() {
+        return Err(format!(
+            "伙伴「{}」的资产目录不存在，可能已被移动或删除",
+            model.name
+        ));
     }
-    let running = kws
-        .active_model_dir()
-        .is_some_and(|d| model_library::paths_equal(&d, lp))
-        || asr
-            .active_model_dir()
-            .is_some_and(|d| model_library::paths_equal(&d, lp));
-    if running {
-        return Err("该模型当前仍在运行，请先切换或卸载模型".to_string());
-    }
-    model_library::remove_local_model_record(&id)
+    Ok(&model.model_dir)
 }
 
-/// 添加本地模型（Registry 卡片显式携带 registry_id；顶部添加为 None）。
+/// 在文件管理器中打开指定伙伴的托管资产目录（用户可自行调整音色参考等资产）。
 #[tauri::command]
-fn add_local_model(
-    path: String,
-    model_type: Option<String>,
-    registry_id: Option<String>,
-) -> Result<LibraryModel, String> {
-    model_library::add_local_model(
-        Path::new(&path),
-        model_type.as_deref(),
-        registry_id.as_deref(),
-    )
-}
-
-/// 打开模型目录（后端按 id 解析真实路径，不接收任意 path）。
-#[tauri::command]
-fn open_model_directory(id: String) -> Result<(), String> {
-    let model = resolve_library_model(&id)?;
-    let path = model.local_path.ok_or("该模型没有安装路径")?;
-    let p = PathBuf::from(&path);
-    let dir = if p.is_dir() {
-        p
-    } else {
-        p.parent().map(Path::to_path_buf).unwrap_or(p)
-    };
-    open_path(&dir)
-}
-
-// ===========================================================================
-// 模型目录（Catalog）—— Provider-Neutral 在线目录
-// ===========================================================================
-
-/// 目录服务状态：持有 HF 客户端（缓存线程安全）。token/端点变更时整体重建。
-struct CatalogState {
-    client: Mutex<Arc<HfApiClient>>,
-}
-
-impl CatalogState {
-    /// 从 settings 构建（base_url / token / 下载源）。
-    fn from_settings() -> Self {
-        let ml = zapmomo::config::settings::load_settings()
-            .ok()
-            .flatten()
-            .and_then(|s| s.model_library)
-            .unwrap_or_default();
-        Self {
-            client: Mutex::new(Arc::new(HfApiClient::from_settings(&ml))),
-        }
-    }
-
-    /// 重建客户端（token / 端点变化后调用）。
-    #[allow(dead_code)] // 由 Phase 3 的 catalog_set_token / catalog_set_endpoint 使用
-    fn rebuild(&self) {
-        let ml = zapmomo::config::settings::load_settings()
-            .ok()
-            .flatten()
-            .and_then(|s| s.model_library)
-            .unwrap_or_default();
-        *self.client.lock().unwrap_or_else(|e| e.into_inner()) =
-            Arc::new(HfApiClient::from_settings(&ml));
-    }
-
-    /// 取当前客户端引用（Arc clone，锁只保护 Arc 指针本身）。
-    fn current(&self) -> Result<Arc<HfApiClient>, String> {
-        self.client
-            .lock()
-            .map(|g| g.clone())
-            .map_err(|e| format!("目录服务锁失效：{e}"))
-    }
-}
-
-/// 解析 provider 参数（第一版仅支持 huggingface）。
-fn require_hf_provider(provider: Option<&str>) -> Result<(), String> {
-    match provider {
-        None | Some("huggingface") => Ok(()),
-        Some(other) => Err(format!("暂不支持的模型目录来源：{other}")),
-    }
-}
-
-/// 搜索在线模型目录（分页）+ canonical merge（Verified 精选 + HF + 本地状态）。
-/// `provider` 预留 ModelScope 等。
-#[tauri::command]
-async fn catalog_search_models(
-    state: State<'_, CatalogState>,
-    provider: Option<String>,
-    query: CatalogQuery,
-) -> Result<CatalogPage<zapmomo::model_library::catalog::UnifiedModelItem>, String> {
-    use zapmomo::model_library::catalog::{curated_unified, merge_catalog};
-    require_hf_provider(provider.as_deref())?;
-    let client = state.current()?;
-    let query_for_remote = query.clone();
-    let remote = tauri::async_runtime::spawn_blocking(move || {
-        client.search(&query_for_remote).map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| format!("目录请求异常：{e}"))??;
-    let local_summary = model_library::local_install_summary();
-    let curated = curated_unified(&query, &local_summary);
-    Ok(merge_catalog(
-        remote,
-        curated,
-        &local_summary,
-        query.category,
-    ))
-}
-
-/// 获取模型详情（仅元数据，不含完整文件树）。
-#[tauri::command]
-async fn catalog_get_model_detail(
-    state: State<'_, CatalogState>,
-    provider: Option<String>,
-    model_id: String,
-    revision: Option<String>,
-) -> Result<RemoteModelDetail, String> {
-    require_hf_provider(provider.as_deref())?;
-    let client = state.current()?;
-    tauri::async_runtime::spawn_blocking(move || {
-        client
-            .model_detail(&model_id, revision.as_deref())
-            .map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| format!("目录请求异常：{e}"))?
-}
-
-/// 获取模型文件树（懒加载；Variant/Files/Compatibility 共用同一缓存）。
-#[tauri::command]
-async fn catalog_get_model_files(
-    state: State<'_, CatalogState>,
-    provider: Option<String>,
-    model_id: String,
-    revision: Option<String>,
-) -> Result<Vec<zapmomo::model_library::catalog::RemoteModelFile>, String> {
-    require_hf_provider(provider.as_deref())?;
-    let client = state.current()?;
-    tauri::async_runtime::spawn_blocking(move || {
-        client
-            .model_files(&model_id, revision.as_deref())
-            .map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| format!("目录请求异常：{e}"))?
-}
-
-/// 兼容性判定（两阶段 Stage2：加载 files → ArchitectureDetector → Resolver → Artifacts）。
-/// files 走共享缓存（Variant/Files/Compatibility 不重复请求）。
-#[tauri::command]
-async fn catalog_get_compatibility(
-    state: State<'_, CatalogState>,
-    provider: Option<String>,
-    model_id: String,
-    revision: Option<String>,
-) -> Result<zapmomo::model_library::compat::Compatibility, String> {
-    use zapmomo::model_library::compat::CompatibilityResolver;
-    require_hf_provider(provider.as_deref())?;
-    let client = state.current()?;
-    tauri::async_runtime::spawn_blocking(move || {
-        let files = client
-            .model_files(&model_id, revision.as_deref())
-            .map_err(|e| e.to_string())?;
-        let compat = CompatibilityResolver::new().from_files(&model_id, &files);
-        Ok(compat)
-    })
-    .await
-    .map_err(|e| format!("目录请求异常：{e}"))?
-}
-
-/// 获取模型 README（懒加载）。
-#[tauri::command]
-async fn catalog_get_model_readme(
-    state: State<'_, CatalogState>,
-    provider: Option<String>,
-    model_id: String,
-    revision: Option<String>,
-) -> Result<Option<String>, String> {
-    require_hf_provider(provider.as_deref())?;
-    let client = state.current()?;
-    tauri::async_runtime::spawn_blocking(move || {
-        client
-            .model_readme(&model_id, revision.as_deref())
-            .map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| format!("目录请求异常：{e}"))?
-}
-
-/// 当前下载配置（来自 settings；token 不经此结构传给前端）。
-fn current_download_config() -> DownloadConfig {
-    let ml = zapmomo::config::settings::load_settings()
-        .ok()
-        .flatten()
-        .and_then(|s| s.model_library)
-        .unwrap_or_default();
-    DownloadConfig {
-        catalog_base: ml.hf_catalog_base_url,
-        download_source: ml.hf_download_source,
-        mirror_url: ml.hf_mirror_url,
-    }
-}
-
-/// 当前下载器（带 token；token 只进 Authorization header，不落日志）。
-fn current_downloader() -> Arc<dyn zapmomo::model_library::download::FileDownloader> {
-    let ml = zapmomo::config::settings::load_settings()
-        .ok()
-        .flatten()
-        .and_then(|s| s.model_library)
-        .unwrap_or_default();
-    Arc::new(UreqFileDownloader::new(ml.hf_token, ml.hf_catalog_base_url))
-}
-
-/// 下载进度事件 sink：把任务视图推给前端（`download-progress`）。
-struct TauriDownloadSink {
-    app: AppHandle,
-}
-
-impl DownloadEventSink for TauriDownloadSink {
-    fn on_update(&self, view: &DownloadTaskView) {
-        let _ = self.app.emit("download-progress", view);
-    }
-}
-
-/// 入队下载（顺序队列；独立 taskId，同 repo 多 variant 可并行排队）。
-#[tauri::command]
-fn download_enqueue(
-    app: AppHandle,
-    state: State<'_, Arc<DownloadManager>>,
-    request: DownloadArtifactRequest,
-) -> Result<DownloadTaskView, String> {
-    let mgr = state.inner().clone();
-    // 设置事件 sink（需要 AppHandle；幂等，每次覆盖）
-    mgr.set_sink(Arc::new(TauriDownloadSink { app }));
-    let cfg = current_download_config();
-    mgr.enqueue(&request, &cfg)
-}
-
-/// 取消下载任务（Queued 直接移除；Downloading 置取消标志）。
-#[tauri::command]
-fn download_cancel(state: State<'_, Arc<DownloadManager>>, task_id: String) -> Result<(), String> {
-    state.inner().cancel(&task_id)
-}
-
-/// 下载队列快照。
-#[tauri::command]
-fn download_snapshot(state: State<'_, Arc<DownloadManager>>) -> Vec<DownloadTaskView> {
-    state.inner().snapshot()
-}
-
-/// 下载源视图（不含 token）。
-#[tauri::command]
-fn catalog_get_endpoint() -> EndpointConfigView {
-    let ml = zapmomo::config::settings::load_settings()
-        .ok()
-        .flatten()
-        .and_then(|s| s.model_library)
-        .unwrap_or_default();
-    EndpointConfigView {
-        catalog_base: ml.hf_catalog_base_url,
-        download_source: ml.hf_download_source,
-        mirror_url: ml.hf_mirror_url,
-    }
-}
-
-/// 设置下载源（写 settings + 重建客户端/下载器；token 不经此命令）。
-#[tauri::command]
-fn catalog_set_endpoint(
-    state: State<'_, CatalogState>,
-    dl: State<'_, Arc<DownloadManager>>,
-    catalog_base: String,
-    download_source: String,
-    mirror_url: String,
-) -> Result<(), String> {
-    if !(download_source == "auto"
-        || download_source == "huggingface"
-        || download_source == "mirror"
-        || download_source == "hf-mirror")
-    {
-        return Err("download_source 必须是 auto / huggingface / mirror".to_string());
-    }
-    if !(catalog_base.starts_with("https://") || catalog_base.starts_with("http://")) {
-        return Err("catalog_base 必须是 http(s) 链接".to_string());
-    }
-    if !(mirror_url.is_empty()
-        || mirror_url.starts_with("https://")
-        || mirror_url.starts_with("http://"))
-    {
-        return Err("mirror_url 必须是 http(s) 链接".to_string());
-    }
-    let mirror_url = if mirror_url.trim().is_empty() {
-        default_mirror_url()
-    } else {
-        mirror_url.trim().to_string()
-    };
-    model_library::update_settings(|cfg| {
-        let lib = cfg.model_library.get_or_insert_with(Default::default);
-        lib.hf_catalog_base_url = catalog_base;
-        lib.hf_download_source = download_source;
-        lib.hf_mirror_url = mirror_url;
-    })?;
-    state.rebuild();
-    dl.inner().set_downloader(current_downloader());
-    Ok(())
-}
-
-fn default_mirror_url() -> String {
-    "https://hf-mirror.com".to_string()
-}
-
-/// 设置 Hugging Face token（明文 settings.toml；只进 Authorization header，不落日志/不出现在 View）。
-#[tauri::command]
-fn catalog_set_token(
-    state: State<'_, CatalogState>,
-    dl: State<'_, Arc<DownloadManager>>,
-    token: Option<String>,
-) -> Result<(), String> {
-    model_library::update_settings(|cfg| {
-        let lib = cfg.model_library.get_or_insert_with(Default::default);
-        lib.hf_token = token;
-    })?;
-    state.rebuild();
-    dl.inner().set_downloader(current_downloader());
-    Ok(())
-}
-
-/// 下载源视图载荷（不含 token）。
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct EndpointConfigView {
-    catalog_base: String,
-    download_source: String,
-    mirror_url: String,
+fn open_companion_dir(id: String) -> Result<(), String> {
+    let lib = zapmomo::companion::load_library_fast()?;
+    let dir = resolve_companion_dir(&lib.models, &id)?;
+    open_path(Path::new(dir))
 }
 
 /// 角色窗口初始尺寸（逻辑像素，与 `setup` 中的 `inner_size` 保持一致）。
@@ -5524,6 +5242,13 @@ const CHATBOX_W: f64 = 520.0;
 const CHATBOX_H: f64 = 96.0;
 /// 输入条默认位置距屏幕工作区底边的留白（逻辑像素）：galgame 对话框位，明显高于贴边。
 const CHATBOX_BOTTOM_MARGIN: f64 = 120.0;
+/// 语音回复气泡窗口尺寸（逻辑像素，与 `setup` 中的 `inner_size` 保持一致）。
+/// 内容上限为 4 行文本（max-h-32）+ 内边距，底部 26px 透明外边距给 CSS 阴影留扩散空间。
+const BUBBLE_W: f64 = 480.0;
+const BUBBLE_H: f64 = 180.0;
+/// 气泡默认位置距屏幕工作区底边的留白（逻辑像素）：输入条默认位正上方
+///（输入条底边距 + 输入条高度 + 16px 间距）。
+const BUBBLE_BOTTOM_MARGIN: f64 = CHATBOX_BOTTOM_MARGIN + CHATBOX_H + 16.0;
 
 /// 计算角色窗口首次出现的右下角位置（逻辑像素）。
 ///
@@ -5554,6 +5279,22 @@ fn default_chatbox_position(app: &AppHandle) -> Option<(f64, f64)> {
     Some((
         left + (w - CHATBOX_W) / 2.0,
         top + h - CHATBOX_H - CHATBOX_BOTTOM_MARGIN,
+    ))
+}
+
+/// 计算气泡窗口首次出现的位置（逻辑像素）：主屏工作区底部居中、输入条默认位
+/// 正上方（排除 Dock / 任务栏）。拖动后由配置记忆接管。
+fn default_bubble_position(app: &AppHandle) -> Option<(f64, f64)> {
+    let monitor = app.primary_monitor().ok().flatten()?;
+    let work = monitor.work_area();
+    let scale = monitor.scale_factor();
+    let left = work.position.x as f64 / scale;
+    let top = work.position.y as f64 / scale;
+    let w = work.size.width as f64 / scale;
+    let h = work.size.height as f64 / scale;
+    Some((
+        left + (w - BUBBLE_W) / 2.0,
+        top + h - BUBBLE_H - BUBBLE_BOTTOM_MARGIN,
     ))
 }
 
@@ -5592,6 +5333,7 @@ pub fn run() {
                     apply_companion_layer_platform(app, CompanionWindowLayer::Back);
                 }
             }
+            sync_bubble_visibility(app);
             show_settings_window(app);
         }))
         .plugin(tauri_plugin_dialog::init())
@@ -5613,8 +5355,6 @@ pub fn run() {
         .manage(VoiceSessionState::new())
         .manage(DshBridgeState::new())
         .manage(ModelLibraryState::default())
-        .manage(CatalogState::from_settings())
-        .manage(Arc::new(DownloadManager::new(current_downloader())))
         .manage(StorageMigrateState::default())
         .invoke_handler(tauri::generate_handler![
             get_app_info,
@@ -5680,21 +5420,6 @@ pub fn run() {
             cancel_model_download,
             set_current_model,
             delete_model,
-            remove_local_model,
-            add_local_model,
-            open_model_directory,
-            catalog_search_models,
-            catalog_get_model_detail,
-            catalog_get_model_files,
-            catalog_get_compatibility,
-            catalog_get_model_readme,
-            open_external,
-            download_enqueue,
-            download_cancel,
-            download_snapshot,
-            catalog_get_endpoint,
-            catalog_set_endpoint,
-            catalog_set_token,
             get_storage_info,
             set_data_dir,
             migrate_storage,
@@ -5707,9 +5432,12 @@ pub fn run() {
             set_active_companion,
             rename_companion,
             remove_companion,
+            open_companion_dir,
             save_cover_image,
             save_companion_position,
             save_chatbox_position,
+            save_bubble_position,
+            bubble_debug_log,
             hide_chatbox,
             set_companion_scale,
             set_companion_opacity,
@@ -6026,6 +5754,9 @@ pub fn run() {
                             .full_screen_auxiliary()
                             .into(),
                     );
+                    // 层级常置 Floating 之上 1 级：恒高于角色（前置 4 / 置底 -1），
+                    // 角色永不遮挡输入条。
+                    panel.set_level(MACOS_OVERLAY_PANEL_LEVEL);
                 }
             }
             // 恢复持久化的可见性（缺省隐藏）
@@ -6037,6 +5768,70 @@ pub fn run() {
             {
                 let _ = window.show();
             }
+
+            // 语音回复气泡窗口：纯展示（流式回复打字机），显隐跟随角色窗口
+            // （无独立开关、不持久化）；无文本时完全透明且点击穿透（前端按
+            // 内容切换 setIgnoreCursorEvents），有文本时整面可拖动。
+            // macOS 建窗后转为非激活面板（can_become_key_window: false），
+            // 拖动不抢焦点。
+            let bubble_cfg = loaded.as_ref().and_then(|s| s.bubble.clone());
+            let mut bubble =
+                WebviewWindowBuilder::new(app, "bubble", WebviewUrl::App("bubble.html".into()))
+                    .title("ZapMomo 气泡")
+                    .inner_size(BUBBLE_W, BUBBLE_H)
+                    .resizable(false)
+                    .decorations(false)
+                    .transparent(true)
+                    .always_on_top(true)
+                    .skip_taskbar(true)
+                    // 与 chatbox 一致：透明窗口原生阴影按整个矩形绘制，关闭，CSS 自绘
+                    .shadow(false)
+                    .visible(false);
+            #[cfg(target_os = "macos")]
+            {
+                bubble = bubble.accept_first_mouse(true);
+            }
+            // 定位：配置记忆（落在所有显示器之外时视为多屏布局已变化，回退默认）> 输入条正上方
+            let saved_pos = bubble_cfg
+                .as_ref()
+                .and_then(|c| c.window_position.clone())
+                .map(|p| (p.x as f64, p.y as f64))
+                .filter(|&(x, y)| position_on_any_monitor(app.handle(), x, y));
+            if let Some((x, y)) = saved_pos.or_else(|| default_bubble_position(app.handle())) {
+                bubble = bubble.position(x, y);
+            }
+            bubble.build()?;
+            // 空闲点穿：初始忽略光标事件，前端有文本时恢复（builder 无此选项，建窗后设置）
+            if let Some(window) = app.get_webview_window("bubble") {
+                let _ = window.set_ignore_cursor_events(true);
+            }
+            // macOS：转成非激活面板——拖动/悬停不激活应用、不抢键盘焦点。
+            #[cfg(target_os = "macos")]
+            {
+                use tauri_nspanel::{CollectionBehavior, StyleMask, WebviewWindowExt};
+
+                if let Some(window) = app.get_webview_window("bubble")
+                    && let Ok(panel) = window.to_panel::<BubblePanel>()
+                {
+                    panel.set_style_mask(StyleMask::empty().nonactivating_panel().into());
+                    panel.set_collection_behavior(
+                        CollectionBehavior::new()
+                            .stationary()
+                            .move_to_active_space()
+                            .full_screen_auxiliary()
+                            .into(),
+                    );
+                    // 层级常置 Floating 之上 1 级：恒高于角色（前置 4 / 置底 -1），
+                    // 角色永不遮挡气泡。
+                    panel.set_level(MACOS_OVERLAY_PANEL_LEVEL);
+                }
+            }
+            // 显隐跟随角色（companion 默认可见 → 气泡随之显示；内容为空时仍点穿）
+            sync_bubble_visibility(app.handle());
+            // Windows：启动时的层级应用先于 chatbox/bubble 建窗（重断为 no-op），
+            // 这里补一次，保证角色前置 topmost 时二者在其上。
+            #[cfg(windows)]
+            raise_overlay_windows(app.handle());
 
             // 自动打开设置窗口：仅用于「无全局菜单栏」的场景（macOS Accessory 模式或非 macOS），
             // 否则 Cmd+, 快捷键不可靠，自动打开可避免「找不到设置」；普通模式有菜单栏，无需自动弹出。
@@ -6391,6 +6186,58 @@ mod companion_menu_tests {
         assert_eq!(entries[0].label, "mochi");
         assert!(!entries[0].checked);
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod companion_open_dir_tests {
+    use super::resolve_companion_dir;
+    use std::path::Path;
+    use zapmomo::companion::CompanionModel;
+
+    fn model(id: &str, name: &str, model_dir: &Path) -> CompanionModel {
+        let manifest = model_dir.join(format!("{name}.model3.json"));
+        CompanionModel {
+            id: id.to_string(),
+            name: name.to_string(),
+            source_path: None,
+            model_dir: model_dir.display().to_string(),
+            model_file: manifest.display().to_string(),
+            format: "cubism3".to_string(),
+            imported_at: "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_resolve_companion_dir_returns_managed_dir() {
+        // 托管目录真实存在 → 返回目录路径（交给 open_path 打开）。
+        let dir = std::env::temp_dir().join("zapmomo-companion-open-dir-hit");
+        std::fs::create_dir_all(&dir).unwrap();
+        let m = model("companion-aaa", "大月下", &dir);
+        assert_eq!(
+            resolve_companion_dir(&[m], "companion-aaa").unwrap(),
+            dir.display().to_string()
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_resolve_companion_dir_unknown_id_errors() {
+        let dir = std::env::temp_dir().join("zapmomo-companion-open-dir-miss");
+        std::fs::create_dir_all(&dir).unwrap();
+        let m = model("companion-aaa", "大月下", &dir);
+        let err = resolve_companion_dir(&[m], "companion-bbb").unwrap_err();
+        assert!(err.contains("companion-bbb"), "错误需包含未知 id：{err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_resolve_companion_dir_missing_dir_errors() {
+        // 托管目录被用户删掉/移动 → 报错而非让文件管理器弹错。
+        let missing = Path::new("/nonexistent/zapmomo/aaa");
+        let m = model("companion-aaa", "大月下", missing);
+        let err = resolve_companion_dir(&[m], "companion-aaa").unwrap_err();
+        assert!(err.contains("不存在"), "错误需说明目录缺失：{err}");
     }
 }
 

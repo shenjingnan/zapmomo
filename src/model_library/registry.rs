@@ -192,8 +192,6 @@ pub fn asset_for(model: &RegistryModel) -> Option<&'static ModelAsset> {
 pub fn required_files_for_role(role: &str) -> &'static [&'static str] {
     match role {
         "wake-word" => &crate::kws::model::KWS_REQUIRED_FILES,
-        "wake-word-wenetspeech" => &crate::kws::model::KWS_WENETSPEECH_REQUIRED_FILES,
-        "wake-word-gigaspeech" => &crate::kws::model::KWS_GIGASPEECH_REQUIRED_FILES,
         // 离线 ASR：精确 role 必须在 asr-* 通配之前，否则被通配吞掉返回错误 4 件套
         "asr-sensevoice" => &crate::asr::config::SENSEVOICE_REQUIRED_FILES,
         "asr-whisper-tiny" => &crate::asr::config::WHISPER_TINY_REQUIRED_FILES,
@@ -205,6 +203,8 @@ pub fn required_files_for_role(role: &str) -> &'static [&'static str] {
         // 离线 Qwen3-ASR：conv_frontend + 裸名 int8 二件 + tokenizer 三文件
         // （has_required_files 是 is_file 语义，tokenizer 目录不能作条目），先于通配
         "asr-qwen3" => &crate::asr::config::QWEN3_REQUIRED_FILES,
+        // audiocpp Qwen3-ASR：单文件 GGUF，先于 asr-* 通配
+        "asr-audiocpp-qwen3-06b" => &[crate::audiocpp::asr_families::QWEN3_ASR_06B.gguf_file],
         // 所有 streaming zipformer ASR（含每个 ASR 的唯一 role）共用同一组 4 文件
         r if r == "asr" || r.starts_with("asr-") => &crate::asr::config::REQUIRED_FILES,
         "punctuation" => &crate::asr::config::PUNCT_REQUIRED_FILES,
@@ -249,8 +249,8 @@ mod tests {
         let models = all_models();
         assert_eq!(
             models.len(),
-            25,
-            "应为 7 个首批（含 2 KWS）+ 5 个 ASR + 2 个新 TTS + 3 个新 ASR + 2 个流式 Paraformer + 1 个新 KWS（gigaspeech）+ 2 个 Kokoro TTS + 1 个 Qwen3-ASR + 1 个 audiocpp PocketTTS + 1 个 audiocpp OmniVoice + 1 个 audiocpp VoxCPM2 + 2 个 Qwen3-TTS（LLM 条目已随本地推理移除）"
+            24,
+            "应为 7 个首批（含 1 KWS）+ 5 个 ASR + 2 个新 TTS + 3 个新 ASR + 2 个流式 Paraformer + 2 个 Kokoro TTS + 1 个 Qwen3-ASR + 1 个 audiocpp PocketTTS + 1 个 audiocpp OmniVoice + 1 个 audiocpp VoxCPM2 + 2 个 Qwen3-TTS + 1 个 audiocpp Qwen3-ASR（LLM 条目已随本地推理移除）"
         );
         assert!(
             models
@@ -326,16 +326,6 @@ mod tests {
         assert_eq!(ki.len(), 4);
         assert!(ki.contains(&"model.int8.onnx"));
         assert_eq!(required_files_for_role("wake-word").len(), 5);
-        // wenetspeech：epoch-12 三件套 + tokens + test_wavs/test_keywords.txt
-        let ws = required_files_for_role("wake-word-wenetspeech");
-        assert_eq!(ws.len(), 5);
-        assert!(ws.contains(&"encoder-epoch-12-avg-2-chunk-16-left-64.onnx"));
-        assert!(ws.contains(&"test_wavs/test_keywords.txt"));
-        // gigaspeech：同款三件套 + tokens + 关键词文件 + bpe.model（BPE 编码依据）
-        let gs = required_files_for_role("wake-word-gigaspeech");
-        assert_eq!(gs.len(), 6);
-        assert!(gs.contains(&"bpe.model"));
-        assert!(gs.contains(&"test_wavs/test_keywords.txt"));
         // 新离线 ASR：精确 role 优先于 asr-* 通配
         assert_eq!(required_files_for_role("asr-sensevoice").len(), 2);
         assert!(required_files_for_role("asr-sensevoice").contains(&"model.int8.onnx"));
@@ -364,6 +354,11 @@ mod tests {
         assert!(!q3.contains(&"tokenizer"), "目录不能作完整性条目");
         // 回归：既有 streaming zipformer role 仍为 4 件套（不被新精确 arm 吞掉）
         assert_eq!(required_files_for_role("asr-zh-14m").len(), 4);
+        // audiocpp Qwen3-ASR：单文件 GGUF（families 常量单源），先于 asr-* 通配
+        assert_eq!(
+            required_files_for_role("asr-audiocpp-qwen3-06b"),
+            &[crate::audiocpp::asr_families::QWEN3_ASR_06B.gguf_file]
+        );
         // Qwen3-TTS 两尺寸：钉死各自 gguf 主文件名（families 常量单源）
         assert_eq!(
             required_files_for_role("tts-audiocpp-qwen3-06b"),
@@ -486,21 +481,9 @@ mod tests {
 
     #[test]
     fn test_default_asset_stays_zh_en() {
-        // manifest 中第一个 role=="wake-word" 资产必须保持 zh-en（default_asset 语义），
-        // wenetspeech 用独立 role，不得排到 zh-en 之前。
+        // manifest 中第一个 role=="wake-word" 资产必须保持 zh-en（default_asset 语义）。
         let d = crate::kws::model::default_asset();
         assert_eq!(d.role, "wake-word");
         assert_eq!(d.name, "sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20");
-        let ws =
-            crate::kws::model::asset_by_role("wake-word-wenetspeech").expect("wenetspeech 资产");
-        assert_eq!(
-            ws.name,
-            "sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01"
-        );
-        let gs = crate::kws::model::asset_by_role("wake-word-gigaspeech").expect("gigaspeech 资产");
-        assert_eq!(
-            gs.name,
-            "sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01"
-        );
     }
 }

@@ -8,8 +8,9 @@
 /// （智谱实测 404），因此这里走生态通用的 Chat Completions。
 ///
 /// 同步/异步桥接：provider 内部持有 current_thread tokio runtime，`generate` 里
-/// `block_on` 驱动流式请求；runtime 与 provider 同生命周期、不跨线程移动，
-/// 不违反 `LlmProvider` 不加 `Send` 的约定。
+/// `block_on` 驱动流式请求。调用方已身处 tokio 运行时（如 CLI 的 `#[tokio::main]`）时，
+/// 就地 `block_on` / drop runtime 都会 panic，故 `generate` 切普通线程执行、
+/// `Drop` 把 runtime 移交普通线程析构（相应地 `emit` 要求 `Send`）。
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -35,7 +36,8 @@ pub struct OpenAiChatProvider {
     client: Client<OpenAIConfig>,
     model: String,
     system_prompt: String,
-    runtime: tokio::runtime::Runtime,
+    /// 自建单线程 runtime；Drop 时 take 成 None，以便在 async 上下文中移交普通线程析构。
+    runtime: Option<tokio::runtime::Runtime>,
 }
 
 impl OpenAiChatProvider {
@@ -60,7 +62,7 @@ impl OpenAiChatProvider {
             client: Client::with_config(openai_config),
             model,
             system_prompt: config.system_prompt.clone(),
-            runtime,
+            runtime: Some(runtime),
         })
     }
 
@@ -163,7 +165,7 @@ impl OpenAiChatProvider {
         messages: Vec<ChatCompletionRequestMessage>,
         tools: &[ToolDefinition],
         params: &GenParams,
-        emit: &mut dyn FnMut(OutputItem),
+        emit: &mut (dyn FnMut(OutputItem) + Send),
         cancel: &AtomicBool,
     ) -> Result<FinishReason, LlmError> {
         let mut args = CreateChatCompletionRequestArgs::default();
@@ -268,15 +270,52 @@ impl LlmProvider for OpenAiChatProvider {
         input: &[InputItem],
         tools: &[ToolDefinition],
         params: &GenParams,
-        emit: &mut dyn FnMut(OutputItem),
+        emit: &mut (dyn FnMut(OutputItem) + Send),
         cancel: Arc<AtomicBool>,
     ) -> Result<FinishReason, LlmError> {
         if cancel.load(Ordering::Relaxed) {
             return Ok(FinishReason::Cancelled);
         }
         let messages = self.build_messages(input)?;
+        // 调用方可能已身处 tokio 运行时（如 CLI 的 `#[tokio::main]`），此时对自建 runtime
+        // 就地 block_on 会 panic；换普通线程执行。GUI worker 本就是普通线程，走原路径。
+        if tokio::runtime::Handle::try_current().is_ok() {
+            let this = &*self;
+            let fut = this.generate_stream(messages, tools, params, emit, &cancel);
+            return std::thread::scope(|s| {
+                s.spawn(move || {
+                    this.runtime
+                        .as_ref()
+                        .expect("runtime 存在于正常生命周期内")
+                        .block_on(fut)
+                })
+                .join()
+                .unwrap_or_else(|_| {
+                    Err(LlmError::BackendUnavailable(
+                        "generate 线程 panic".to_string(),
+                    ))
+                })
+            });
+        }
         self.runtime
+            .as_ref()
+            .expect("runtime 存在于正常生命周期内")
             .block_on(self.generate_stream(messages, tools, params, emit, &cancel))
+    }
+}
+
+impl Drop for OpenAiChatProvider {
+    fn drop(&mut self) {
+        let Some(runtime) = self.runtime.take() else {
+            return;
+        };
+        // tokio 运行时不能在 async 上下文中 drop（Cannot drop a runtime ...），
+        // 移交普通线程收尾，兼容 CLI 类调用方。
+        if tokio::runtime::Handle::try_current().is_ok() {
+            let _ = std::thread::spawn(move || drop(runtime)).join();
+        } else {
+            drop(runtime);
+        }
     }
 }
 
@@ -291,6 +330,10 @@ mod tests {
     fn test_config(base_url: Option<String>, model: Option<String>) -> ResolvedLlmConfig {
         ResolvedLlmConfig {
             enabled: true,
+            cli_tools: false,
+            prompt_cache: true,
+            thinking: false,
+            reasoning_effort: None,
             provider: "openai".to_string(),
             system_prompt: "测试系统提示".to_string(),
             params: GenParams::default(),
@@ -494,6 +537,52 @@ mod tests {
         assert_eq!(req["messages"][1]["content"], "打个招呼");
         assert_eq!(req["max_tokens"], 512);
         assert!((req["temperature"].as_f64().unwrap() - 0.7).abs() < 1e-6);
+    }
+
+    /// 回归：CLI（`#[tokio::main]`）在 tokio 运行时上下文里调用 generate 时，
+    /// provider 自建的 runtime 不得 panic（Cannot start a runtime from within a runtime）。
+    #[tokio::test]
+    async fn test_generate_inside_tokio_runtime() {
+        let (port, _rx) = spawn_mock(SSE_TEXT, 200);
+        let cfg = test_config(
+            Some(format!("http://127.0.0.1:{port}")),
+            Some("glm-4.7-flash".to_string()),
+        );
+        let mut p = OpenAiChatProvider::new(&cfg).unwrap();
+
+        let mut out: Vec<OutputItem> = Vec::new();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let reason = p
+            .generate(
+                &user_input("打个招呼"),
+                &[],
+                &GenParams::default(),
+                &mut |item| out.push(item),
+                cancel,
+            )
+            .unwrap();
+
+        assert_eq!(reason, FinishReason::Eos);
+        let texts: Vec<&str> = out
+            .iter()
+            .map(|item| match item {
+                OutputItem::MessageDelta(d) => d.text.as_str(),
+                other => panic!("期望 MessageDelta，实际 {other:?}"),
+            })
+            .collect();
+        assert_eq!(texts, ["你好", "世界"]);
+    }
+
+    /// 回归：tokio 运行时上下文里 drop provider 时，自建 runtime 不得 panic
+    /// （Cannot drop a runtime in a context where blocking is not allowed）。
+    #[tokio::test]
+    async fn test_drop_inside_tokio_runtime() {
+        let cfg = test_config(
+            Some("http://127.0.0.1:1".to_string()),
+            Some("glm-4.7-flash".to_string()),
+        );
+        let _p = OpenAiChatProvider::new(&cfg).unwrap();
+        // drop 发生在 tokio 上下文：修复前此处 panic
     }
 
     #[test]

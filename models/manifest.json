@@ -12,26 +12,6 @@
       "license": "Apache-2.0"
     },
     {
-      "name": "sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01",
-      "role": "wake-word-wenetspeech",
-      "version": "2024-01-01",
-      "archive": "sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2",
-      "source": "https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2",
-      "sha256": "b2f7c89690dc8ce4c6ed6afeab7cd800c36ad1421fb6b6302b4a4b194cf7f35f",
-      "size_bytes": 32654866,
-      "license": "Apache-2.0"
-    },
-    {
-      "name": "sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01",
-      "role": "wake-word-gigaspeech",
-      "version": "2024-01-01",
-      "archive": "sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01.tar.bz2",
-      "source": "https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01.tar.bz2",
-      "sha256": "f170013b4716e41b62b9bfd809687c207cef798ef9bc6534d524e17af9b6561a",
-      "size_bytes": 17626723,
-      "license": "Apache-2.0"
-    },
-    {
       "name": "sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20",
       "role": "asr",
       "version": "2023-02-20",
@@ -313,6 +293,17 @@
       "source": "https://huggingface.co/audio-cpp/audio.cpp-gguf/resolve/main/Qwen3-TTS-12Hz-1.7B-Base-GGUF/qwen3-tts-12hz-1.7b-base-q8_0_v2.gguf",
       "sha256": "b55e06c7890d43c208d15aed8b4ed3f18215f295e47d5960e061b15bff338ab0",
       "size_bytes": 2695175104,
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "qwen3-asr-0.6b-audiocpp",
+      "role": "asr-audiocpp-qwen3-06b",
+      "version": "q8_0",
+      "kind": "raw",
+      "archive": "qwen3-asr-0.6b-q8_0.gguf",
+      "source": "https://huggingface.co/audio-cpp/audio.cpp-gguf/resolve/main/Qwen3-ASR-0.6B-GGUF/qwen3-asr-0.6b-q8_0.gguf",
+      "sha256": "6c44ec2fb4cee513892d7863c1fcc3ea6b699ffa4d899b0ef4ab19956d9544f7",
+      "size_bytes": 1151272416,
       "license": "Apache-2.0"
     }
   ]

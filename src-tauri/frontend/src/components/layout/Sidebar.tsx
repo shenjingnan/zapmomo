@@ -1,4 +1,4 @@
-import { Home, Layers, MessageCircle, Package, Settings, Users } from "lucide-react";
+import { Home, Layers, MessageCircle, Settings, Users } from "lucide-react";
 import { isMacOs } from "@/lib/platform";
 import { NavItem } from "./NavItem";
 
@@ -6,8 +6,7 @@ const PRIMARY_NAV = [
   { to: "/home", icon: Home, label: "概览", end: true },
   { to: "/chat", icon: MessageCircle, label: "对话记录", end: true },
   { to: "/companion", icon: Users, label: "伙伴" },
-  { to: "/models", icon: Layers, label: "模型", exclude: ["/models/library"] },
-  { to: "/models/library", icon: Package, label: "模型库", end: true },
+  { to: "/models", icon: Layers, label: "模型" },
   { to: "/settings", icon: Settings, label: "设置", end: true },
 ];
 
@@ -33,14 +32,7 @@ export function Sidebar() {
 
       <nav className="mt-5 flex flex-col gap-1.5 px-4">
         {PRIMARY_NAV.map((item) => (
-          <NavItem
-            key={item.to}
-            to={item.to}
-            icon={item.icon}
-            label={item.label}
-            end={item.end}
-            exclude={item.exclude}
-          />
+          <NavItem key={item.to} to={item.to} icon={item.icon} label={item.label} end={item.end} />
         ))}
       </nav>
     </aside>

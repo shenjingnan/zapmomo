@@ -67,8 +67,6 @@ beforeEach(() => {
         return Promise.resolve(false);
       case "get_shortcuts":
         return Promise.resolve({});
-      case "catalog_get_endpoint":
-        return Promise.resolve({ downloadSource: "auto", mirrorUrl: "" });
       case "get_storage_info":
         return Promise.resolve(storageInfo());
       default:
@@ -166,8 +164,6 @@ describe("SettingsPage 存储位置", () => {
       switch (cmd) {
         case "get_storage_info":
           return Promise.resolve(storageInfo({ migrationAvailable: false }));
-        case "catalog_get_endpoint":
-          return Promise.resolve({ downloadSource: "auto", mirrorUrl: "" });
         default:
           return Promise.resolve();
       }
@@ -198,8 +194,6 @@ describe("SettingsPage 开机自启动", () => {
           return Promise.resolve(true);
         case "get_hide_dock_icon":
           return Promise.resolve(false);
-        case "catalog_get_endpoint":
-          return Promise.resolve({ downloadSource: "auto", mirrorUrl: "" });
         case "get_storage_info":
           return Promise.resolve(storageInfo());
         default:
@@ -226,8 +220,6 @@ describe("SettingsPage 开机自启动", () => {
           return Promise.resolve(false);
         case "get_autostart":
           return Promise.resolve(false);
-        case "catalog_get_endpoint":
-          return Promise.resolve({ downloadSource: "auto", mirrorUrl: "" });
         case "get_storage_info":
           return Promise.resolve(storageInfo());
         default:

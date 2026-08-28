@@ -3,7 +3,9 @@ use std::io::{BufRead, BufReader};
 use std::time::Duration;
 
 use super::AudiocppError;
+use super::asr_families::{AudiocppAsrFamilyDesc, asr_family_desc};
 use super::families::{AudiocppFamilyDesc, VoiceSemantics, family_desc};
+use crate::asr::config::ResolvedAsrConfig;
 use crate::tts::TtsVoiceParams;
 use crate::tts::config::ResolvedTtsConfig;
 use base64::Engine as _;
@@ -41,7 +43,8 @@ impl AudiocppTts {
     /// 生产构造：查模型族表 → 定位引擎 → lease server（含 spawn + 健康检查）。
     pub fn new(cfg: ResolvedTtsConfig) -> Result<Self, String> {
         let desc = lookup_desc(&cfg)?;
-        let lease = super::server::lease(&cfg).map_err(|e| e.to_user_message())?;
+        let spec = super::server_config::ServerInstanceSpec::from_tts(&cfg)?;
+        let lease = super::server::lease(&spec).map_err(|e| e.to_user_message())?;
         let base_url = lease.base_url();
         Ok(Self {
             cfg,
@@ -204,6 +207,132 @@ impl AudiocppTts {
         }
         Ok(())
     }
+}
+
+/// audio.cpp ASR 后端：经 sidecar HTTP 整段转写（`/v1/audio/transcriptions`）。
+///
+/// 生产构造（[`Self::new`]）preflight 前置（GGUF 缺失在 lease/spawn 之前报错，
+/// 文案含安装提示，比 server 启动超时友好）并持有 server 租约；测试构造
+/// （[`Self::new_with_base_url`]）直连 stub server，绕过进程管理与 preflight。
+pub struct AudiocppAsr {
+    cfg: ResolvedAsrConfig,
+    /// 模型族描述（构造时查表一次；请求体 `model` 来自它）
+    desc: &'static AudiocppAsrFamilyDesc,
+    base_url: String,
+    /// 持有租约（保活 server）；Drop 释放。测试构造（直连 stub）为 None。
+    _lease: Option<super::server::ServerLease>,
+    client: reqwest::blocking::Client,
+}
+
+impl AudiocppAsr {
+    /// 生产构造：preflight（GGUF 校验）→ 查族表 → lease server（含 spawn + 健康检查）。
+    pub fn new(cfg: ResolvedAsrConfig) -> Result<Self, String> {
+        crate::asr::config::preflight(&cfg)?;
+        let desc = lookup_asr_desc(&cfg)?;
+        let spec = super::server_config::ServerInstanceSpec::from_asr(&cfg)?;
+        let lease = super::server::lease(&spec).map_err(|e| e.to_user_message())?;
+        Ok(Self {
+            base_url: lease.base_url(),
+            cfg,
+            desc,
+            _lease: Some(lease),
+            client: build_client()?,
+        })
+    }
+
+    /// 测试构造：直连指定 base_url 的 stub server（不 preflight、不 spawn、不持租约）。
+    pub fn new_with_base_url(cfg: ResolvedAsrConfig, base_url: &str) -> Self {
+        let desc = lookup_asr_desc(&cfg).expect("测试构造要求合法 audiocpp ASR 模型族");
+        Self {
+            cfg,
+            desc,
+            base_url: base_url.to_string(),
+            _lease: None,
+            client: build_client().expect("构建 HTTP 客户端"),
+        }
+    }
+
+    /// 整段转写：f32 采样 → wav 编码 → multipart POST → 文本（trim 后返回）。
+    ///
+    /// multipart 形状对齐上游 OpenAI Whisper API 兼容实现（`file` + `model`，
+    /// 文件名必须 `.wav` 结尾——上游校验 `is_wav_upload_filename`）。
+    /// `cfg.language` 非空时透传 `language` 字段（量化下 auto 语种识别不可靠时
+    /// 的显式兜底，上游文档明示）；缺省由 server 自动检测。
+    pub fn transcribe(&self, samples: &[f32], sample_rate: i32) -> Result<String, AudiocppError> {
+        let wav = encode_wav(samples, sample_rate)?;
+        let part = reqwest::blocking::multipart::Part::bytes(wav)
+            .file_name("audio.wav")
+            .mime_str("audio/wav")
+            .map_err(|e| AudiocppError::EncodeWav(format!("构造 multipart 失败: {e}")))?;
+        let mut form = reqwest::blocking::multipart::Form::new()
+            .part("file", part)
+            .text("model", self.desc.model_id.to_string());
+        if let Some(lang) = self
+            .cfg
+            .language
+            .as_deref()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+        {
+            form = form.text("language", lang.to_string());
+        }
+        let resp = self
+            .client
+            .post(format!("{}/v1/audio/transcriptions", self.base_url))
+            .multipart(form)
+            .send()
+            .map_err(|e| AudiocppError::Connection(e.to_string()))?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body_text = resp.text().unwrap_or_default();
+            return Err(AudiocppError::HttpStatus {
+                status: status.as_u16(),
+                body: truncate(&body_text, ERROR_BODY_MAX),
+            });
+        }
+        let json: serde_json::Value = resp
+            .json()
+            .map_err(|e| AudiocppError::Connection(format!("解析转写响应失败: {e}")))?;
+        Ok(json["text"].as_str().unwrap_or_default().trim().to_string())
+    }
+}
+
+/// 查 ASR 模型族描述；sherpa-only kind 配 audiocpp 后端的非法组合报错。
+fn lookup_asr_desc(cfg: &ResolvedAsrConfig) -> Result<&'static AudiocppAsrFamilyDesc, String> {
+    asr_family_desc(cfg.model_type).ok_or_else(|| {
+        format!(
+            "模型类型 {} 不支持 audiocpp 后端（请检查 [asr].model_type 与 backend 组合）",
+            cfg.model_type.as_str()
+        )
+    })
+}
+
+/// 编码 f32 mono 采样为 wav bytes（16-bit PCM）。
+///
+/// 与 [`decode_wav`] 互为往返（16-bit 量化误差 ≤ 1/32767）；供 ASR 客户端上传。
+/// 样本裁剪到 [-1, 1] 防溢出。
+pub(crate) fn encode_wav(samples: &[f32], sample_rate: i32) -> Result<Vec<u8>, AudiocppError> {
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: sample_rate as u32,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::new(&mut cursor, spec)
+            .map_err(|e| AudiocppError::EncodeWav(format!("创建 wav 编码器失败: {e}")))?;
+        for &s in samples {
+            let v = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
+            writer
+                .write_sample(v)
+                .map_err(|e| AudiocppError::EncodeWav(format!("写入采样失败: {e}")))?;
+        }
+        writer
+            .finalize()
+            .map_err(|e| AudiocppError::EncodeWav(format!("收尾 wav 失败: {e}")))?;
+    }
+    Ok(cursor.into_inner())
 }
 
 /// 把音色参数按族语义映射进请求体（整段与流式两条路径共用）。
@@ -906,5 +1035,134 @@ mod tests {
             .synthesize("x", 1.0, &TtsVoiceParams::Named("demo".into()))
             .unwrap_err();
         assert!(err.contains("仅支持参考音频克隆"), "err: {err}");
+    }
+
+    // ---------- ASR：AudiocppAsr /v1/audio/transcriptions ----------
+
+    fn qwen3_asr_cfg() -> ResolvedAsrConfig {
+        ResolvedAsrConfig {
+            backend: crate::asr::config::AsrBackendKind::Audiocpp,
+            model_type: crate::asr::config::AsrModelKind::Qwen3Asr,
+            ..ResolvedAsrConfig::default()
+        }
+    }
+
+    /// 起转写 stub：/v1/audio/transcriptions 返回固定 JSON；记录原始请求体
+    /// （multipart，lossy 转字符串供字段断言）。返回 (base_url, 请求体列表, 句柄)。
+    fn spawn_stub_transcribe() -> (
+        String,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let port = match server.server_addr() {
+            tiny_http::ListenAddr::IP(addr) => addr.port(),
+            #[cfg(unix)]
+            tiny_http::ListenAddr::Unix(_) => unreachable!("显式绑定 127.0.0.1"),
+        };
+        let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let received_clone = received.clone();
+        let handle = std::thread::spawn(move || {
+            for mut request in server.incoming_requests() {
+                let mut body = Vec::new();
+                let _ = std::io::Read::read_to_end(request.as_reader(), &mut body);
+                received_clone
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&body).to_string());
+                let response = if request.url() == "/v1/audio/transcriptions" {
+                    tiny_http::Response::from_string(
+                        r#"{"text":" 你好世界 ","timing":{"wall_ms":12}}"#,
+                    )
+                } else {
+                    tiny_http::Response::from_string("Not Found").with_status_code(404)
+                };
+                let _ = request.respond(response);
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), received, handle)
+    }
+
+    /// 全链路：wav 编码 → multipart POST → JSON text 解析（trim）；请求体含
+    /// model 字段与 .wav 文件名（上游 is_wav_upload_filename 校验）。
+    #[test]
+    fn test_transcribe_against_stub_full_flow() {
+        let (base_url, received, _handle) = spawn_stub_transcribe();
+        let asr = AudiocppAsr::new_with_base_url(qwen3_asr_cfg(), &base_url);
+        let text = asr.transcribe(&[0.0, 0.5, -0.5, 1.0], 16000).unwrap();
+        assert_eq!(text, "你好世界", "text 应 trim");
+        let body = received.lock().unwrap().last().unwrap().clone();
+        assert!(body.contains("name=\"model\""), "应含 model 字段");
+        assert!(body.contains("qwen3-asr-0.6b"), "model 值按族");
+        assert!(
+            body.contains("filename=\"audio.wav\""),
+            "上游要求 .wav 文件名"
+        );
+        assert!(body.contains("RIFF"), "载荷应为 wav");
+        assert!(!body.contains("name=\"language\""), "language 缺省不带");
+    }
+
+    /// language 显式配置时透传（量化下 auto 语种识别不可靠的兜底）。
+    #[test]
+    fn test_transcribe_passes_language_when_set() {
+        let (base_url, received, _handle) = spawn_stub_transcribe();
+        let mut cfg = qwen3_asr_cfg();
+        cfg.language = Some("zh".to_string());
+        let asr = AudiocppAsr::new_with_base_url(cfg, &base_url);
+        asr.transcribe(&[0.0; 4], 16000).unwrap();
+        let body = received.lock().unwrap().last().unwrap().clone();
+        assert!(body.contains("name=\"language\""), "应透传 language");
+        assert!(body.contains("\r\nzh\r\n"), "language 值: {body}");
+    }
+
+    /// 转写 HTTP 500 → HttpStatus；连接拒绝 → Connection 文案。
+    #[test]
+    fn test_transcribe_error_branches() {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let port = match server.server_addr() {
+            tiny_http::ListenAddr::IP(addr) => addr.port(),
+            #[cfg(unix)]
+            tiny_http::ListenAddr::Unix(_) => unreachable!("显式绑定 127.0.0.1"),
+        };
+        std::thread::spawn(move || {
+            for request in server.incoming_requests() {
+                let _ =
+                    request.respond(tiny_http::Response::from_string("boom").with_status_code(500));
+            }
+        });
+        let asr =
+            AudiocppAsr::new_with_base_url(qwen3_asr_cfg(), &format!("http://127.0.0.1:{port}"));
+        let err = asr.transcribe(&[0.0; 4], 16000).unwrap_err();
+        assert!(matches!(err, AudiocppError::HttpStatus { status: 500, .. }));
+
+        let asr = AudiocppAsr::new_with_base_url(qwen3_asr_cfg(), "http://127.0.0.1:1");
+        let err = asr.transcribe(&[0.0; 4], 16000).unwrap_err();
+        assert!(matches!(err, AudiocppError::Connection(_)));
+
+        // sherpa kind + audiocpp 后端 → 构造期报错
+        let bad = ResolvedAsrConfig {
+            backend: crate::asr::config::AsrBackendKind::Audiocpp,
+            model_type: crate::asr::config::AsrModelKind::Zipformer,
+            ..ResolvedAsrConfig::default()
+        };
+        let err = lookup_asr_desc(&bad).unwrap_err();
+        assert!(err.contains("不支持 audiocpp 后端"), "err: {err}");
+    }
+
+    /// wav 编码/解码往返：f32 → 16-bit wav → f32（量化误差 ≤ 1/32767 + 裁剪）。
+    #[test]
+    fn test_encode_decode_wav_roundtrip() {
+        let samples: Vec<f32> = vec![0.0, 0.25, -0.25, 0.5, -0.5, 1.0, -1.0, 0.123];
+        let bytes = encode_wav(&samples, 16000).unwrap();
+        let (out, rate) = decode_wav(&bytes).unwrap();
+        assert_eq!(rate, 16000);
+        assert_eq!(out.len(), samples.len());
+        for (a, b) in out.iter().zip(&samples) {
+            assert!((a - b).abs() < 1e-3, "{a} vs {b}");
+        }
+        // 溢出样本被裁剪
+        let bytes = encode_wav(&[2.0, -2.0], 16000).unwrap();
+        let (out, _) = decode_wav(&bytes).unwrap();
+        assert!(out.iter().all(|v| v.abs() <= 1.0), "裁剪到 [-1,1]: {out:?}");
     }
 }

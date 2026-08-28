@@ -41,12 +41,17 @@ hound = "3.5"
 # base64 解码（audio.cpp SSE 流式 delta 载荷；纯 Rust 零传递依赖）
 base64 = "0.22"
 
-# HTTP 客户端（OpenAI 兼容 Responses / llama.cpp-server）
-reqwest = { version = "0.13", features = ["blocking", "json"] }
+# HTTP 客户端（OpenAI 兼容 Responses / llama.cpp-server / audio.cpp sidecar；
+# multipart 供 ASR 转写上传 wav）
+reqwest = { version = "0.13", features = ["blocking", "json", "multipart"] }
 
 # 远程 LLM（OpenAI 兼容 Chat Completions：智谱 GLM / DeepSeek / OpenRouter / llama-server 等）
 # 0.41 起 API 域按 feature 拆分，default 仅 rustls；只需 chat-completion
 async-openai = { version = "0.41", features = ["chat-completion"] }
+
+# Anthropic 原生 Messages API provider（消息/流式/tool use 原语；agent 编排为自研，
+# 只用 genai 的传输层能力，不用其 agent 抽象）
+genai = "0.6"
 
 # 汉字 → 带声调拼音（把用户输入的原始中文关键词转成模型可编码的 ppinyin token）
 pinyin = "0.11"

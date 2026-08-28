@@ -10,7 +10,18 @@ use serde::{Deserialize, Serialize};
 use crate::config::settings::get_models_dir;
 
 use super::catalog::ModelCategory;
-use super::download::ArtifactSource;
+
+/// Artifact 的安装规格/文件从哪里来。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactSource {
+    /// 内置精选（manifest.json 下载源）。
+    RegistryManifest,
+    /// Hugging Face。
+    HuggingFace,
+    /// 本地导入。
+    LocalImport,
+}
 
 /// 元数据 schema 版本（v2：新增 source/model_id/artifact_id/variant 等）。
 pub const META_SCHEMA_VERSION: u32 = 2;

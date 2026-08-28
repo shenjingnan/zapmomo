@@ -60,10 +60,12 @@ export function AsrTechnicalInfo() {
         <CollapsibleContent className="border-t border-divider">
           {config && (
             <dl>
-              {/* 固定运行时：ASR 在 ZapMomo 中始终使用 sherpa-onnx */}
+              {/* 运行时按后端分派：sherpa-onnx（进程内）/ audio.cpp（sidecar 进程） */}
               <div className="flex items-center justify-between gap-3.5 px-3.5 py-2.5">
                 <dt className="text-sm text-text-primary">运行时</dt>
-                <dd className="truncate text-sm text-text-secondary">sherpa-onnx</dd>
+                <dd className="truncate text-sm text-text-secondary">
+                  {config.backend === "audiocpp" ? "audio.cpp" : "sherpa-onnx"}
+                </dd>
               </div>
               <div className="flex items-center justify-between gap-3.5 px-3.5 py-2.5">
                 <dt className="text-sm text-text-primary">执行 Provider</dt>

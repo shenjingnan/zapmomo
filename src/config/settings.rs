@@ -252,6 +252,9 @@ pub struct AppConfig {
     /// 文字输入条窗口配置
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chatbox: Option<ChatboxSettings>,
+    /// 语音回复气泡窗口配置
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bubble: Option<BubbleSettings>,
 }
 
 /// 用户「添加本地模型」注册的模型（external）。
@@ -276,49 +279,12 @@ pub struct LocalModel {
 
 /// 模型库配置段。
 ///
-/// 只保存**用户配置**（本地注册 + 目录/下载源），不保存 installed inventory。
+/// 只保存**用户配置**（本地注册），不保存 installed inventory。
 /// "电脑上装了哪些模型" 的唯一事实来源是 `~/.zapmomo/models/**/.zapmomo-lib.json` 扫描。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct ModelLibrarySettings {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub local_models: Vec<LocalModel>,
-    /// 在线目录 base URL（默认 huggingface.co，预留 ModelScope 等）。
-    #[serde(default = "default_hf_catalog_base_url")]
-    pub hf_catalog_base_url: String,
-    /// 下载源：auto（HF 失败 fallback 镜像）| huggingface | mirror。
-    #[serde(default = "default_hf_download_source")]
-    pub hf_download_source: String,
-    /// 自定义镜像 base URL（默认 https://hf-mirror.com，可改为任意镜像）。
-    #[serde(default = "default_hf_mirror_url")]
-    pub hf_mirror_url: String,
-    /// Hugging Face token（明文 settings.toml；**不是安全存储**）。
-    /// 只进 Authorization header；绝不进 log / error message / cache key / 前端配置 View。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hf_token: Option<String>,
-}
-
-fn default_hf_catalog_base_url() -> String {
-    "https://huggingface.co".to_string()
-}
-
-fn default_hf_download_source() -> String {
-    "auto".to_string()
-}
-
-fn default_hf_mirror_url() -> String {
-    "https://hf-mirror.com".to_string()
-}
-
-impl Default for ModelLibrarySettings {
-    fn default() -> Self {
-        Self {
-            local_models: Vec::new(),
-            hf_catalog_base_url: default_hf_catalog_base_url(),
-            hf_download_source: default_hf_download_source(),
-            hf_mirror_url: default_hf_mirror_url(),
-            hf_token: None,
-        }
-    }
 }
 
 /// 唤醒词检测（KWS）配置。
@@ -451,6 +417,12 @@ pub struct AsrSettings {
     /// 调试输出，缺省 false
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub debug: Option<bool>,
+    /// ASR 引擎后端：sherpa（进程内，缺省）| audiocpp（audio.cpp sidecar 进程）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    /// audiocpp 引擎二进制覆盖路径（开发/调试用；缺省由 locator 自动定位）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_path: Option<String>,
 }
 
 /// 文本转语音（TTS）配置。
@@ -595,7 +567,25 @@ pub struct LlmSettings {
     /// 是否启用 LLM，缺省 false
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
-    /// provider 标识，缺省 "openai"（OpenAI 兼容 API）
+    /// 是否启用 CLI 工具（run_command，允许模型执行 shell 命令），缺省 false。
+    /// 开启前请知悉风险：模型产出的命令会在本机真实执行（有危险命令拦截、
+    /// 超时与输出截断等兜底，但不是安全沙箱）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli_tools: Option<bool>,
+    /// 是否启用 prompt caching（缓存对话前缀降延迟/成本），缺省 true；
+    /// 仅 provider = "anthropic" 时生效
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache: Option<bool>,
+    /// 是否启用思考（extended thinking 开关），缺省按「是否配置了推理强度」推断：
+    /// 未显式配置时，配过 reasoning_effort 视为 true，否则 false（最快响应）。
+    /// 仅 provider = "anthropic" 时生效
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<bool>,
+    /// 思考力度（"low" / "medium" / "high" / "max"），仅 thinking 生效时发送。
+    /// 开关关闭时该值仍持久化，但运行时忽略；仅 provider = "anthropic" 时生效
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    /// provider 标识，缺省 "openai"（OpenAI 兼容 API）；可选 "anthropic"（原生 Messages API）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     /// 角色 system prompt，缺省用内置默认
@@ -628,7 +618,7 @@ pub struct LlmSettings {
     /// HTTP provider 的 API key（本地 server / Ollama 可留空）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
-    /// HTTP provider 的模型名（如 glm-4.7-flash / gpt-4o-mini）
+    /// HTTP provider 的模型名（如 glm-4.7-flash / gpt-4o-mini / claude-haiku-4-5）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
 }
@@ -715,6 +705,16 @@ pub struct ChatboxSettings {
     pub window_position: Option<CompanionWindowPosition>,
 }
 
+/// 语音回复气泡窗口配置。
+///
+/// 显隐不持久化：气泡窗口跟随角色窗口显隐（无独立开关）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct BubbleSettings {
+    /// 气泡窗口位置（逻辑像素；缺省表示未记录 → 定位到输入条默认位正上方）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_position: Option<CompanionWindowPosition>,
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -734,6 +734,7 @@ impl Default for AppConfig {
             shortcuts: None,
             dsh: None,
             chatbox: None,
+            bubble: None,
         }
     }
 }
@@ -925,6 +926,7 @@ mod tests {
             shortcuts: None,
             dsh: None,
             chatbox: None,
+            bubble: None,
         };
         let toml_str = toml::to_string(&config).unwrap();
         let deserialized: AppConfig = toml::from_str(&toml_str).unwrap();
@@ -1185,6 +1187,36 @@ mod tests {
     }
 
     #[test]
+    fn test_bubble_settings_serde_roundtrip() {
+        let bubble = BubbleSettings {
+            window_position: Some(CompanionWindowPosition { x: 200, y: 600 }),
+        };
+        let toml_str = toml::to_string(&bubble).unwrap();
+        assert!(toml_str.contains("window_position"));
+        let deserialized: BubbleSettings = toml::from_str(&toml_str).unwrap();
+        assert_eq!(bubble, deserialized);
+        // 未记录位置时字段应被 skip_serializing_if 忽略
+        let none_pos = BubbleSettings {
+            window_position: None,
+        };
+        let none_toml = toml::to_string(&none_pos).unwrap();
+        assert!(!none_toml.contains("window_position"));
+    }
+
+    #[test]
+    fn test_load_settings_with_bubble_table() {
+        run_with_temp_home(|home| {
+            write_toml_settings(home, "[bubble.window_position]\nx = 200\ny = 600\n");
+            let result = load_settings().unwrap().unwrap();
+            let bubble = result.bubble.unwrap();
+            assert_eq!(
+                bubble.window_position,
+                Some(CompanionWindowPosition { x: 200, y: 600 })
+            );
+        });
+    }
+
+    #[test]
     fn test_live2d_drag_mode_invalid_value_rejected() {
         run_with_temp_home(|home| {
             write_toml_settings(home, "[live2d]\ndrag_mode = \"bogus\"\n");
@@ -1216,6 +1248,7 @@ mod tests {
                 shortcuts: None,
                 dsh: None,
                 chatbox: None,
+                bubble: None,
             };
             save_settings(&config).unwrap();
             let loaded = load_settings().unwrap().unwrap();

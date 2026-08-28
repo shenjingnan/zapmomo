@@ -90,6 +90,13 @@ export const ASR_PRESETS = [
     sizeBytes: 878_702_423,
     kind: "qwen3_asr",
   },
+  {
+    id: "asr-qwen3-0.6b-audiocpp",
+    name: "Qwen3-ASR 0.6B (audio.cpp)",
+    tagline: "29 语言自动识别 · Metal 加速 · 不支持热词 · 包体约 1.1GB",
+    sizeBytes: 1_151_272_416,
+    kind: "qwen3_asr",
+  },
 ] as const;
 
 export interface AsrModelSwitchState {
@@ -109,8 +116,8 @@ export interface AsrModelSwitchState {
 }
 
 /**
- * ASR 模型切换状态：从模型库列表过滤 ASR 条目，提供下载 / 设为当前 / 卸载。
- * 数据用 `list_model_library`（与模型库页同一后端真相源，含 install_state + current）。
+ * ASR 模型切换状态：从后端模型列表过滤 ASR 条目，提供下载 / 设为当前 / 卸载。
+ * 数据用 `list_model_library`（后端模型列表真相源，含 install_state + current）。
  */
 export function useAsrModelSwitch(): AsrModelSwitchState {
   const runtime = useRuntime();
