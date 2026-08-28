@@ -188,15 +188,15 @@ export function VoiceReplyBubble({
         pressRef.current = null;
       }}
     >
-      <div className="max-h-44 w-full space-y-1 overflow-hidden rounded-xl border border-border bg-popover px-4 py-2.5 text-sm text-text-primary shadow-lg">
+      {/* 内容完整展示不截断（静置常驻的前提是看得全）；超高兜底：约 20 行起内部滚动。
+          两段轮次视图沿用「不截断」语义：用户句/回复均不做行数钳制 */}
+      <div className="max-h-[400px] w-full space-y-1 overflow-y-auto rounded-xl border border-border bg-popover px-4 py-2.5 text-sm text-text-primary shadow-lg">
         {visibleUser && (
-          <p className="line-clamp-2 whitespace-pre-wrap break-words text-xs text-muted-foreground">
+          <p className="whitespace-pre-wrap break-words text-xs text-muted-foreground">
             我：{visibleUser}
           </p>
         )}
-        {visibleText && (
-          <p className="line-clamp-4 whitespace-pre-wrap break-words">{visibleText}</p>
-        )}
+        {visibleText && <p className="whitespace-pre-wrap break-words">{visibleText}</p>}
       </div>
     </div>
   );

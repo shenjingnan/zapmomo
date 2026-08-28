@@ -62,6 +62,8 @@ vi.mock("@tauri-apps/api/window", () => ({
 
 // Live2dStage 依赖 pixi / WebGL，jsdom 无法运行。桩在 modelUrl 从某个旧模型切到
 // 新模型时以 3:4 宽高比回调 onModelMetrics，模拟模型加载完成后的尺寸上报；
+// 同时回调 onLayout/onModelLoaded（智能穿透命中区域的数据源，fake 模型含 1 个
+// drawable (0,0,10,10)、局部缩放因子 2 → 命中 rect (0,0,20,20)）；
 // 首次挂载与初次赋 url 不上报（避免与 config 恢复效应竞争 setSize 等待信号）。
 vi.mock("@/components/live2d/Live2dStage", async () => {
   const { useEffect, useRef } = await import("react");
@@ -69,11 +71,25 @@ vi.mock("@/components/live2d/Live2dStage", async () => {
     Live2dStage: (props: {
       modelUrl: string | null;
       onModelMetrics?: (m: { aspectRatio: number }) => void;
+      onLayout?: (l: unknown) => void;
+      onModelLoaded?: (m: unknown) => void;
     }) => {
       const prevUrl = useRef<string | null>(null);
       useEffect(() => {
         if (prevUrl.current !== null && prevUrl.current !== props.modelUrl) {
           props.onModelMetrics?.({ aspectRatio: 0.75 });
+          props.onLayout?.({ x: 5, y: 6, scale: 2, canvasWidth: 100, canvasHeight: 200 });
+          props.onModelLoaded?.({
+            internalModel: {
+              width: 200,
+              height: 400,
+              originalWidth: 100,
+              originalHeight: 200,
+              getDrawableIDs: () => ["a"],
+              getDrawableIndex: () => 0,
+              getDrawableBounds: () => ({ x: 0, y: 0, width: 10, height: 10 }),
+            },
+          });
         }
         prevUrl.current = props.modelUrl;
       }, [props.modelUrl]);
@@ -441,5 +457,86 @@ describe("CompanionRoot（伙伴私有布局）", () => {
     await waitFor(() => expect(setSizeMock).toHaveBeenCalledWith(expect.objectContaining(sizeB)));
     const sizeGlobal = expectedSize(0.75, 1.0);
     expect(setSizeMock).not.toHaveBeenCalledWith(expect.objectContaining(sizeGlobal));
+  });
+});
+
+describe("CompanionRoot（智能穿透上报）", () => {
+  beforeEach(() => {
+    Object.defineProperty(window.screen, "availWidth", { value: 1280, configurable: true });
+    Object.defineProperty(window.screen, "availHeight", { value: 800, configurable: true });
+  });
+
+  function pushModelChanged(payload: Record<string, unknown>) {
+    act(() => listenHandlers["live2d-model-changed"](payload));
+  }
+
+  function hitRegionCalls() {
+    return invokeMock.mock.calls.filter((c) => c[0] === "set_companion_hit_region");
+  }
+
+  it("模型加载后上报逐 drawable 命中区域（窗口逻辑坐标，含顶部预留条偏移）", async () => {
+    configState.modelFile = "/zap/companions/a/a.model3.json";
+    configState.format = "cubism3";
+    render(<CompanionRoot />);
+    await waitForConfigApplied();
+    pushModelChanged({
+      model_dir: "/zap/companions/b",
+      model_file: "/zap/companions/b/b.model3.json",
+      format: "cubism3",
+      props: null,
+    });
+    // 桩在 url 变化时回调 onLayout/onModelLoaded：fake 命中 rect (0,0,20,20)（局部 ×2），
+    // 经 layout {x:5,y:6,scale:2} + 顶部预留条 72 → 窗口坐标 (5, 78, 40, 40)。
+    await waitFor(() => expect(hitRegionCalls()).not.toHaveLength(0));
+    const [, payload] = hitRegionCalls().at(-1) ?? [];
+    expect(payload).toEqual({
+      rects: [{ x: 5, y: 78, width: 40, height: 40 }],
+    });
+  });
+
+  it("启动未加载不上报（后端 fail-open 判可交互，加载失败仍可拖动/右键）", async () => {
+    render(<CompanionRoot />);
+    await waitForConfigApplied();
+    // 越过 150ms 上报去抖窗口。
+    await act(() => new Promise((r) => setTimeout(r, 220)));
+    expect(hitRegionCalls()).toHaveLength(0);
+  });
+
+  it("曾加载后清屏上报空数组（空窗口明确穿透）", async () => {
+    configState.modelFile = "/zap/companions/a/a.model3.json";
+    configState.format = "cubism3";
+    render(<CompanionRoot />);
+    await waitForConfigApplied();
+    pushModelChanged({
+      model_dir: "/zap/companions/b",
+      model_file: "/zap/companions/b/b.model3.json",
+      format: "cubism3",
+      props: null,
+    });
+    await waitFor(() => expect(hitRegionCalls()).not.toHaveLength(0));
+    pushModelChanged({ model_dir: null, model_file: null, format: null, props: null });
+    await waitFor(() => {
+      const [, payload] = hitRegionCalls().at(-1) ?? [];
+      expect(payload).toEqual({ rects: [] });
+    });
+  });
+
+  it("GIF 伙伴上报 object-contain 实际显示区（等比时铺满，y 含预留条偏移）", async () => {
+    configState.modelFile = "/zap/companions/a/a.model3.json";
+    configState.format = "cubism3";
+    render(<CompanionRoot />);
+    await waitForConfigApplied();
+    pushModelChanged({
+      model_dir: "/zap/companions/g",
+      model_file: "/zap/companions/g/g.gif",
+      format: "gif",
+      props: null,
+    });
+    // jsdom 不触发 img onLoad：宽高比保持默认 3:4，与 360×480 舞台盒等比 → 铺满。
+    await waitFor(() => expect(hitRegionCalls()).not.toHaveLength(0));
+    const [, gifPayload] = hitRegionCalls().at(-1) ?? [];
+    expect(gifPayload).toEqual({
+      rects: [{ x: 0, y: 72, width: 360, height: 480 }],
+    });
   });
 });

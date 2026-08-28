@@ -9,12 +9,14 @@ const { apiMock, configState } = vi.hoisted(() => ({
     getLive2dConfig: vi.fn(),
     setCompanionLayer: vi.fn(async () => undefined),
     setCompanionClickThrough: vi.fn(async () => undefined),
+    setCompanionSmartClickThrough: vi.fn(async () => undefined),
     setCompanionLocked: vi.fn(async () => undefined),
     setCompanionDragMode: vi.fn(async () => undefined),
   },
   /** get_live2d_config 的窗口级字段覆盖值（null = 后端未返回该字段，兜底为关/置顶/direct）。 */
   configState: {
     clickThrough: null as boolean | null,
+    smartClickThrough: null as boolean | null,
     locked: null as boolean | null,
     dragMode: null as CompanionDragMode | null,
     layer: "front" as CompanionWindowLayer | null,
@@ -27,12 +29,14 @@ vi.mock("@/lib/tauri", () => ({
 
 beforeEach(() => {
   configState.clickThrough = null;
+  configState.smartClickThrough = null;
   configState.locked = null;
   configState.dragMode = null;
   configState.layer = "front";
   for (const fn of Object.values(apiMock)) fn.mockClear();
   apiMock.getLive2dConfig.mockImplementation(async () => ({
     click_through: configState.clickThrough,
+    smart_click_through: configState.smartClickThrough,
     window_layer: configState.layer,
     locked: configState.locked,
     drag_mode: configState.dragMode,
@@ -70,12 +74,12 @@ describe("CompanionWindowSection（显示层级）", () => {
   });
 });
 
-describe("CompanionWindowSection（点击穿透）", () => {
+describe("CompanionWindowSection（强制穿透）", () => {
   it("默认关闭，点击后调用 setCompanionClickThrough 开启", async () => {
     const user = userEvent.setup();
     render(<CompanionWindowSection />);
 
-    const toggle = await screen.findByRole("switch", { name: "点击穿透" });
+    const toggle = await screen.findByRole("switch", { name: "强制穿透" });
     expect(toggle).toHaveAttribute("aria-checked", "false");
 
     await user.click(toggle);
@@ -89,12 +93,41 @@ describe("CompanionWindowSection（点击穿透）", () => {
     const user = userEvent.setup();
     render(<CompanionWindowSection />);
 
-    const toggle = await screen.findByRole("switch", { name: "点击穿透" });
+    const toggle = await screen.findByRole("switch", { name: "强制穿透" });
     expect(toggle).toHaveAttribute("aria-checked", "true");
 
     await user.click(toggle);
     await waitFor(() => {
       expect(apiMock.setCompanionClickThrough).toHaveBeenCalledWith({ enabled: false });
+    });
+  });
+});
+
+describe("CompanionWindowSection（智能穿透）", () => {
+  it("默认开启（缺省值），点击后调用 setCompanionSmartClickThrough 关闭", async () => {
+    const user = userEvent.setup();
+    render(<CompanionWindowSection />);
+
+    const toggle = await screen.findByRole("switch", { name: "智能穿透" });
+    expect(toggle).toHaveAttribute("aria-checked", "true");
+
+    await user.click(toggle);
+    await waitFor(() => {
+      expect(apiMock.setCompanionSmartClickThrough).toHaveBeenCalledWith({ enabled: false });
+    });
+  });
+
+  it("从配置恢复为关闭，再点击则开启", async () => {
+    configState.smartClickThrough = false;
+    const user = userEvent.setup();
+    render(<CompanionWindowSection />);
+
+    const toggle = await screen.findByRole("switch", { name: "智能穿透" });
+    expect(toggle).toHaveAttribute("aria-checked", "false");
+
+    await user.click(toggle);
+    await waitFor(() => {
+      expect(apiMock.setCompanionSmartClickThrough).toHaveBeenCalledWith({ enabled: true });
     });
   });
 });

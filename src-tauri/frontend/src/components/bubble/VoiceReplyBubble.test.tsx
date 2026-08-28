@@ -51,6 +51,17 @@ describe("VoiceReplyBubble（回复气泡）", () => {
     expect(container.firstChild).toBeNull();
   });
 
+  it("长回复完整展示：不做行数/高度钳制，仅超高时内部滚动兜底", () => {
+    // jsdom 不做真实布局，行数截断是纯 CSS（line-clamp/max-h）：只能钉住类名防回归
+    const longText = "这是一段很长的回复，".repeat(200);
+    render(<VoiceReplyBubble text={longText} />);
+    const p = screen.getByText(longText);
+    expect(p.className).not.toMatch(/line-clamp/);
+    const box = p.parentElement as HTMLElement;
+    expect(box.className).not.toMatch(/max-h-32/);
+    expect(box.className).toMatch(/overflow-y-auto/);
+  });
+
   it("回复完结（text 清空）后静置不自动消失，等用户点击", () => {
     const { rerender } = render(<VoiceReplyBubble text="完整回复" />);
     rerender(<VoiceReplyBubble text="" />);

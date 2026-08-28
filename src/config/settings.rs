@@ -546,9 +546,16 @@ pub struct Live2dSettings {
     /// 角色窗口透明度（1.0 = 不透明；缺省视为 1.0）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_opacity: Option<f64>,
-    /// 角色窗口点击穿透（true = 鼠标事件全部穿透到身后窗口；缺省视为 false）
+    /// 角色窗口点击穿透（true = 鼠标事件全部穿透到身后窗口；缺省视为 false）。
+    ///
+    /// 语义为**强制穿透**：优先级最高，开启后无视智能穿透的光标判定，
+    /// 整窗对所有鼠标事件透明（入口只剩设置页与托盘菜单）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub click_through: Option<bool>,
+    /// 角色窗口智能穿透（true = 光标落在角色不透明区域才接收鼠标，其余区域穿透；
+    /// 缺省视为 true）。与 `click_through`（强制穿透）互斥时后者优先。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub smart_click_through: Option<bool>,
     /// 角色窗口显示层级（置顶/置底；缺省视为置顶）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_layer: Option<CompanionWindowLayer>,
@@ -695,10 +702,10 @@ fn default_log_level() -> String {
 
 /// 文字输入条窗口配置。
 ///
-/// 字段可缺省：未配置时回退内置默认（隐藏 + 桌宠正上方/屏幕底部居中）。
+/// 字段可缺省：未配置时回退内置默认（显示 + 桌宠正上方/屏幕底部居中）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct ChatboxSettings {
-    /// 输入条是否显示（缺省视为 false）
+    /// 输入条是否显示（缺省视为 true：未配置时默认显示）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visible: Option<bool>,
     /// 输入条窗口位置（逻辑像素；缺省表示未记录 → 定位到桌宠正上方）
@@ -1135,6 +1142,7 @@ mod tests {
             window_scale: Some(1.5),
             window_opacity: Some(0.6),
             click_through: Some(true),
+            smart_click_through: Some(false),
             window_layer: Some(CompanionWindowLayer::Back),
             locked: Some(true),
             drag_mode: Some(CompanionDragMode::Modifier),
@@ -1155,6 +1163,7 @@ mod tests {
             window_scale: None,
             window_opacity: None,
             click_through: None,
+            smart_click_through: None,
             window_layer: None,
             locked: None,
             drag_mode: None,
@@ -1164,6 +1173,7 @@ mod tests {
         assert!(!none_toml.contains("window_scale"));
         assert!(!none_toml.contains("window_opacity"));
         assert!(!none_toml.contains("click_through"));
+        assert!(!none_toml.contains("smart_click_through"));
         assert!(!none_toml.contains("window_layer"));
         assert!(!none_toml.contains("locked"));
         assert!(!none_toml.contains("drag_mode"));
