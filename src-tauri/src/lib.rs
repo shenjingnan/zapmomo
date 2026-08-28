@@ -6063,12 +6063,13 @@ mod companion_open_dir_tests {
     use zapmomo::companion::CompanionModel;
 
     fn model(id: &str, name: &str, model_dir: &Path) -> CompanionModel {
+        let manifest = model_dir.join(format!("{name}.model3.json"));
         CompanionModel {
             id: id.to_string(),
             name: name.to_string(),
             source_path: None,
             model_dir: model_dir.display().to_string(),
-            model_file: model_dir.join(format!("{name}.model3.json")).display().to_string(),
+            model_file: manifest.display().to_string(),
             format: "cubism3".to_string(),
             imported_at: "2026-01-01T00:00:00Z".to_string(),
         }
@@ -6100,7 +6101,8 @@ mod companion_open_dir_tests {
     #[test]
     fn test_resolve_companion_dir_missing_dir_errors() {
         // 托管目录被用户删掉/移动 → 报错而非让文件管理器弹错。
-        let m = model("companion-aaa", "大月下", Path::new("/nonexistent/zapmomo/aaa"));
+        let missing = Path::new("/nonexistent/zapmomo/aaa");
+        let m = model("companion-aaa", "大月下", missing);
         let err = resolve_companion_dir(&[m], "companion-aaa").unwrap_err();
         assert!(err.contains("不存在"), "错误需说明目录缺失：{err}");
     }
