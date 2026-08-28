@@ -472,3 +472,8 @@ git commit -m "feat(bubble): BubbleRoot 接通 turnUserText，气泡呈现一轮
   否则「窗口内暂存的插播」在回复始终未始时永不展示（质量评审 Important，已修）。
 - 勘误版第 5 个用例中 `advanceTimersByTime(0)` + 多余一次 rerender 属冗余（依赖
   announcement prop 变化触发 effect 即可），实现时已删，行为等价。
+- 新轮判定初版为 `userText` 值比较，同文本连发（「继续」「嗯」等高频短句）判不出新
+  轮，新一轮用户句不显示（终评 Important）；补 hook `turnSeq` 单调序号 + 组件
+  `turnSeq` prop 判新，设计文档 §3.2/§3.3 已同步。
+- BubbleRoot 接线补集成用例钉住（`userText` 为可选 prop，删行不报编译错，原 433 用例
+  零红可静默回退；终评 Important）。

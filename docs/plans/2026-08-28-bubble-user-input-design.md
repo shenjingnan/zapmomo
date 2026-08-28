@@ -49,21 +49,25 @@ flowchart LR
 
 当前轮 = 用户句（可选） + 流式回复（可选）。
 
-### 3.2 状态归属：`useVoiceSession` 新增 `turnUserText: string`
+### 3.2 状态归属：`useVoiceSession` 新增 `turnUserText: string` 与 `turnSeq: number`
 
 - 在现有 `onVoiceSessionTranscript` 订阅点内，`is_final: true` 时
-  `setTurnUserText(p.text)`——与 `records` 累积共用同一订阅，零额外事件开销。
+  `setTurnUserText(p.text)` 且 `setTurnSeq((n) => n + 1)`——与 `records` 累积共用同一订
+  阅，零额外事件开销。
+- **`turnSeq: number` 单调递增序号用于判新轮**：仅比较文本在「连发相同短句」（「继续」
+  「嗯」等桌宠高频输入）时因 React 同值 bail-out + 值比较判不出新轮，新一轮用户句将不
+  显示（终评 Important，实施期补入）。同文本连发同样开启新一轮。
 - **不主动清零**：延续「想看的内容不被程序收走」——打断（barge-in）、会话停止时保留；
   只被「下一轮 transcript 顶替」或「气泡点击关闭」清除。
 - `start()` 时不清（与静置语义一致；新一轮 transcript 自然顶替）。
 
-### 3.3 气泡渲染：`VoiceReplyBubble` 新增 `userText` prop
+### 3.3 气泡渲染：`VoiceReplyBubble` 新增 `userText` / `turnSeq` prop
 
 - 用户句到达即上屏（此刻回复为空，气泡先亮出用户句，消除首 token 前的空窗）。
 - token 到达 → 用户句下方流式追加回复（现有打字机机制不变）。
 - reply-finished → 静置保留最后一帧（现有机制不变）。
-- 新一轮 `userText` 到达 → 顶替旧轮全部内容（含旧回复），符合「新一轮文本到达自然顶
-  替」既有语义。
+- 新一轮判定以 `turnSeq` 变化为准（`userText` 值比较对同文本连发不可靠，见 §3.2）：
+  新轮到达 → 顶替旧轮全部内容（含旧回复），符合「新一轮文本到达自然顶替」既有语义。
 
 ### 3.4 插播压制语义微调
 
