@@ -26,6 +26,8 @@ export interface VoiceSessionState {
   records: ConversationRecord[];
   /** 当前轮 LLM 流式回复（`reply-finished` 时提交为 assistant 记录） */
   pendingReply: string;
+  /** 当前轮用户句（transcript is_final 置位；气泡「先用户句后回复」用） */
+  turnUserText: string;
   replyDone: boolean;
   /** 已入队合成的句子 */
   queuedSentences: string[];
@@ -45,6 +47,7 @@ export interface VoiceSessionState {
  *
  * 记录流：用户最终句（`transcript` is_final）与桌宠完整回复（`reply-finished` 携带 text）
  * 均提交进 `records`；后端在事件转发层同步落盘，前端仅做展示与本地累积。
+ * transcript is_final 同时置位 turnUserText 供气泡展示当前轮用户句。
  */
 export function useVoiceSession(): VoiceSessionState {
   const [running, setRunning] = useState(false);
@@ -52,6 +55,7 @@ export function useVoiceSession(): VoiceSessionState {
   const [partial, setPartial] = useState("");
   const [records, setRecords] = useState<ConversationRecord[]>([]);
   const [pendingReply, setPendingReply] = useState("");
+  const [turnUserText, setTurnUserText] = useState("");
   const [replyDone, setReplyDone] = useState(false);
   const [queuedSentences, setQueuedSentences] = useState<string[]>([]);
   const [currentSentence, setCurrentSentence] = useState<string | null>(null);
@@ -90,6 +94,7 @@ export function useVoiceSession(): VoiceSessionState {
             ),
           );
           setPartial("");
+          setTurnUserText(p.text);
         } else {
           setPartial(p.text);
         }
@@ -172,6 +177,7 @@ export function useVoiceSession(): VoiceSessionState {
     partial,
     records,
     pendingReply,
+    turnUserText,
     replyDone,
     queuedSentences,
     currentSentence,

@@ -11,6 +11,7 @@ const { state } = vi.hoisted(() => {
     partial: "",
     records: [],
     pendingReply: "",
+    turnUserText: "",
     replyDone: false,
     queuedSentences: [],
     currentSentence: null,
