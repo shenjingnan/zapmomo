@@ -1,14 +1,13 @@
 /// 文本转语音（TTS）。
 ///
 /// 门面按 `ResolvedTtsConfig.backend` 分派双后端：
-/// - sherpa-onnx `OfflineTts`（进程内，ZipVoice/Vits/Matcha 等中英模型）；
-/// - audio.cpp sidecar（`crate::audiocpp`，PocketTTS 等 GGUF 模型经 HTTP）。
+/// - sherpa-onnx `OfflineTts`（进程内，ZipVoice 中英克隆模型）；
+/// - audio.cpp sidecar（`crate::audiocpp`，OmniVoice/VoxCPM2/Qwen3-TTS 等 GGUF 模型经 HTTP）。
 ///
 /// 设计上对齐 KWS/ASR：模型清单下载、配置解析、引擎「逐文件预检 + install-model 提示」
 /// 等模式保持一致；进度通过回调（`FnMut(f32) -> bool`）暴露（sherpa 为合成过程
 /// 协作回调，audiocpp 为请求前后探询——HTTP 在途请求无法中断）。
 pub mod config;
-pub mod kokoro_voices;
 pub mod reaction;
 pub mod voice;
 pub mod voice_store;
@@ -17,40 +16,34 @@ use crate::audiocpp::client::AudiocppTts;
 use config::{ResolvedTtsConfig, TtsBackendKind, TtsModelKind};
 use sherpa_onnx::{
     GenerationConfig, OfflineTts, OfflineTtsConfig, OfflineTtsKittenModelConfig,
-    OfflineTtsKokoroModelConfig, OfflineTtsMatchaModelConfig, OfflineTtsModelConfig,
-    OfflineTtsPocketModelConfig, OfflineTtsSupertonicModelConfig, OfflineTtsVitsModelConfig,
-    OfflineTtsZipvoiceModelConfig, Wave,
+    OfflineTtsModelConfig, OfflineTtsSupertonicModelConfig, OfflineTtsZipvoiceModelConfig, Wave,
 };
 use std::path::{Path, PathBuf};
 
 pub use crate::kws::model::{DownloadProgress, DownloadStage, ModelError, ProgressFn};
 pub use voice::TtsVoice;
 
-/// 合成时的「说话人/音色」参数：`Sid`（vits/matcha/kokoro 等固定说话人）、
-/// `Reference`（ZipVoice 参考音频克隆）或 `Named`（audiocpp 具名音色，如 `alba`）。
+/// 合成时的「说话人/音色」参数：`Sid`（固定说话人模型）、
+/// `Reference`（参考音频克隆）或 `Named`（audiocpp 具名音色）。
 #[derive(Debug, Clone, PartialEq)]
 pub enum TtsVoiceParams {
-    /// speaker id（本期单说话人模型恒 0；多说话人二期扩展）
+    /// speaker id（audiocpp 克隆族缺省音色时传 0 = server auto voice）
     Sid(i32),
-    /// 参考音频 + 逐字转写（ZipVoice 零样本克隆）
+    /// 参考音频 + 逐字转写（ZipVoice/OmniVoice/VoxCPM2/Qwen3-TTS 克隆）
     Reference {
         wav_path: PathBuf,
         reference_text: String,
     },
-    /// 具名音色（audio.cpp 后端，如 PocketTTS 的 `alba`；sherpa 后端不支持）
+    /// 具名音色（audio.cpp 后端，omnivoice 的 preset 通道；sherpa 后端不支持）
     Named(String),
 }
 
 /// 按模型类型构造 sherpa-onnx 的 `OfflineTtsModelConfig` 对应分支。
 ///
 /// 纯函数（不访问文件系统），便于单测各分支字段。registry 未收录的分支
-/// （kokoro/kitten/pocket/supertonic）字段照填，但缺文件时在预检阶段报错。
+/// （kitten/supertonic）字段照填，但缺文件时在预检阶段报错。
 pub(crate) fn build_offline_model_config(cfg: &ResolvedTtsConfig) -> OfflineTtsModelConfig {
     let path = |p: Option<&PathBuf>| p.map(|p| p.to_string_lossy().to_string());
-    let dict_dir = cfg
-        .dict_dir
-        .as_ref()
-        .map(|d| d.to_string_lossy().to_string());
     let mut config = OfflineTtsModelConfig {
         num_threads: cfg.num_threads,
         debug: cfg.debug,
@@ -72,44 +65,6 @@ pub(crate) fn build_offline_model_config(cfg: &ResolvedTtsConfig) -> OfflineTtsM
                 guidance_scale: config::DEFAULT_GUIDANCE_SCALE,
             };
         }
-        TtsModelKind::Vits => {
-            config.vits = OfflineTtsVitsModelConfig {
-                model: path(cfg.model.as_ref()),
-                lexicon: path(Some(&cfg.lexicon)),
-                tokens: path(Some(&cfg.tokens)),
-                data_dir: None,
-                noise_scale: 0.667,
-                noise_scale_w: 0.8,
-                length_scale: 1.0,
-                dict_dir,
-            };
-        }
-        TtsModelKind::Matcha => {
-            config.matcha = OfflineTtsMatchaModelConfig {
-                acoustic_model: path(cfg.acoustic_model.as_ref()),
-                vocoder: path(Some(&cfg.vocoder)),
-                lexicon: path(Some(&cfg.lexicon)),
-                tokens: path(Some(&cfg.tokens)),
-                data_dir: None,
-                noise_scale: 0.667,
-                length_scale: 1.0,
-                dict_dir,
-            };
-        }
-        TtsModelKind::Kokoro => {
-            config.kokoro = OfflineTtsKokoroModelConfig {
-                model: path(cfg.model.as_ref()),
-                voices: path(cfg.voices.as_ref()),
-                tokens: path(Some(&cfg.tokens)),
-                data_dir: path(Some(&cfg.data_dir)),
-                length_scale: 1.0,
-                dict_dir,
-                // Kokoro 包是多 lexicon（us-en/gb-en/zh），resolve 阶段按存在探测并
-                // 逗号 join 进单字段（sherpa-onnx 内部按逗号拆分）；无 lexicon.txt。
-                lexicon: cfg.kokoro_lexicons.clone(),
-                lang: None,
-            };
-        }
         TtsModelKind::Kitten => {
             config.kitten = OfflineTtsKittenModelConfig {
                 model: path(cfg.model.as_ref()),
@@ -118,10 +73,6 @@ pub(crate) fn build_offline_model_config(cfg: &ResolvedTtsConfig) -> OfflineTtsM
                 data_dir: path(Some(&cfg.data_dir)),
                 length_scale: 1.0,
             };
-        }
-        // registry 未收录：字段留空（sherpa 侧报缺文件），预检阶段已拦截
-        TtsModelKind::Pocket => {
-            config.pocket = OfflineTtsPocketModelConfig::default();
         }
         TtsModelKind::Supertonic => {
             config.supertonic = OfflineTtsSupertonicModelConfig::default();
@@ -134,28 +85,6 @@ pub(crate) fn build_offline_model_config(cfg: &ResolvedTtsConfig) -> OfflineTtsM
         | TtsModelKind::Qwen3Tts17 => {}
     }
     config
-}
-
-/// 按模型族探测根级 rule fsts（存在者逗号 join 全路径）。
-///
-/// - Vits：`date.fst` / `number.fst`（日期/数字规范化；缺省不影响合成）
-/// - Kokoro：`date-zh.fst` / `number-zh.fst` / `phone-zh.fst`（官方建议启用的中文
-///   数字/日期/电话规范化）
-///
-/// 传**全路径**（相对 CWD 的裸文件名在非模型目录启动时无法被 sherpa 定位）。
-fn probe_rule_fsts(kind: TtsModelKind, model_dir: &Path) -> Option<String> {
-    let names: &[&str] = match kind {
-        TtsModelKind::Vits => &["date.fst", "number.fst"],
-        TtsModelKind::Kokoro => &config::KOKORO_RULE_FSTS,
-        _ => return None,
-    };
-    let joined = names
-        .iter()
-        .filter(|f| model_dir.join(f).is_file())
-        .map(|f| model_dir.join(f).to_string_lossy().to_string())
-        .collect::<Vec<_>>()
-        .join(",");
-    (!joined.is_empty()).then_some(joined)
 }
 
 /// 文本转语音引擎（双后端门面）。
@@ -184,37 +113,14 @@ impl TtsEngine {
         match cfg.backend {
             TtsBackendKind::Sherpa => {
                 config::preflight(&cfg)?;
-                // Kokoro 主模型名随量化变体不同（model.onnx / model.int8.onnx），不在
-                // required_files 清单里，单独按候选探测。
-                if cfg.model_type == TtsModelKind::Kokoro
-                    && config::kokoro_model_file_in(&cfg.model_dir).is_none()
-                {
-                    return Err(format!(
-                        "缺少模型文件 {} 或 {}: {}\n请运行 `zapmomo tts install-model` 下载模型。",
-                        config::DEFAULT_KOKORO_MODEL,
-                        config::DEFAULT_KOKORO_INT8_MODEL,
-                        cfg.model_dir.display()
-                    ));
-                }
                 let model_config = build_offline_model_config(&cfg);
-                let rule_fsts = probe_rule_fsts(cfg.model_type, &cfg.model_dir);
                 let config = OfflineTtsConfig {
                     model: model_config,
-                    rule_fsts,
                     ..Default::default()
                 };
 
                 let tts = OfflineTts::create(&config)
                     .ok_or_else(|| "无法创建 OfflineTts，请检查模型文件与配置。".to_string())?;
-
-                // Kokoro v1.1 应有 103 个音色；不一致说明 voices.bin 与预期版本不符（仅告警，
-                // sid 钳界由 kokoro_voices::normalize_sid 兜底）。
-                if cfg.model_type == TtsModelKind::Kokoro && tts.num_speakers() != 103 {
-                    tracing::warn!(
-                        "Kokoro 音色数 {} 与预期 103 不符，请检查模型包版本",
-                        tts.num_speakers()
-                    );
-                }
 
                 Ok(Self {
                     inner: TtsBackendInner::Sherpa { tts, cfg },
@@ -236,7 +142,7 @@ impl TtsEngine {
         }
     }
 
-    /// 合成输出的采样率（Hz）。audiocpp 后端初值为 PocketTTS 固定 24000，
+    /// 合成输出的采样率（Hz）。audiocpp 后端初值为模型族固定值（24k/48k），
     /// 首次合成后按响应 wav 头校准。
     pub fn sample_rate(&self) -> i32 {
         match &self.inner {
@@ -617,36 +523,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "需要 kokoro-int8-multi-lang-v1_1 解压在 KOKORO_E2E_DIR 指定目录"]
-    fn test_kokoro_synthesize_produces_audio() {
-        // E2E：KOKORO_E2E_DIR=/path/to/kokoro-int8-multi-lang-v1_1 cargo test -- --ignored
-        let Some(dir) = std::env::var("KOKORO_E2E_DIR").ok() else {
-            eprintln!("跳过：未设置 KOKORO_E2E_DIR");
-            return;
-        };
-        // settings 为 None → 走 detect_kind_from_dir 探测（voices.bin → Kokoro）
-        let cfg = config::resolve(None, Some(Path::new(&dir))).unwrap();
-        assert_eq!(cfg.model_type, TtsModelKind::Kokoro, "目录探测应为 Kokoro");
-        let engine = TtsEngine::new(cfg.clone()).unwrap();
-        assert_eq!(engine.sample_rate(), 24000, "Kokoro 固定 24kHz");
-        // 中文女声 zf_001（sid 3）经统一解析入口
-        let voice = crate::tts::voice::resolve_sid_voice(&cfg, Some("zf_001"), None).unwrap();
-        let started = std::time::Instant::now();
-        let samples = engine
-            .synthesize("你好，我是 ZapMomo 语音伙伴。", 1.0, &voice)
-            .unwrap();
-        let elapsed = started.elapsed().as_secs_f32();
-        assert!(!samples.is_empty(), "合成音频不应为空");
-        let duration = samples.len() as f32 / engine.sample_rate() as f32;
-        eprintln!(
-            "kokoro e2e: {:.2}s 音频 / {:.2}s 合成 (RTF {:.2})",
-            duration,
-            elapsed,
-            elapsed / duration
-        );
-    }
-
-    #[test]
     #[ignore = "需要 omnivoice GGUF 在 OMNIVOICE_E2E_DIR 目录 + audiocpp 引擎可定位"]
     fn test_omnivoice_synthesize_produces_audio() {
         // E2E：OMNIVOICE_E2E_DIR=/path/to/omnivoice-audiocpp cargo test -- --ignored
@@ -827,37 +703,16 @@ mod tests {
     }
 
     #[test]
-    fn test_build_offline_model_config_vits_branch() {
+    fn test_build_offline_model_config_kitten_branch() {
         let mut cfg = config::ResolvedTtsConfig::default();
-        cfg.model_type = TtsModelKind::Vits;
-        cfg.model = Some(PathBuf::from("/m/vits/model.onnx"));
-        cfg.dict_dir = Some(PathBuf::from("/m/vits/dict"));
+        cfg.model_type = TtsModelKind::Kitten;
+        cfg.model = Some(PathBuf::from("/m/kitten/model.onnx"));
         let c = build_offline_model_config(&cfg);
-        let v = c.vits;
-        assert_eq!(v.model.as_deref(), Some("/m/vits/model.onnx"));
+        assert_eq!(c.kitten.model.as_deref(), Some("/m/kitten/model.onnx"));
         let expected_tokens = cfg.tokens.to_string_lossy().to_string();
-        assert_eq!(v.tokens.as_deref(), Some(expected_tokens.as_str()));
-        assert_eq!(v.dict_dir.as_deref(), Some("/m/vits/dict"));
-        // vits 分支不应污染 zipvoice 字段
+        assert_eq!(c.kitten.tokens.as_deref(), Some(expected_tokens.as_str()));
+        // 未收录分支不污染 zipvoice 字段
         assert!(c.zipvoice.tokens.is_none());
-    }
-
-    #[test]
-    fn test_build_offline_model_config_matcha_branch() {
-        let mut cfg = config::ResolvedTtsConfig::default();
-        cfg.model_type = TtsModelKind::Matcha;
-        cfg.acoustic_model = Some(PathBuf::from("/m/matcha/model-steps-3.onnx"));
-        cfg.vocoder = PathBuf::from("/m/matcha/vocos-22khz-univ.onnx");
-        let c = build_offline_model_config(&cfg);
-        assert_eq!(
-            c.matcha.acoustic_model.as_deref(),
-            Some("/m/matcha/model-steps-3.onnx")
-        );
-        assert_eq!(
-            c.matcha.vocoder.as_deref(),
-            Some("/m/matcha/vocos-22khz-univ.onnx")
-        );
-        assert!(c.vits.model.is_none());
     }
 
     #[test]
@@ -867,67 +722,13 @@ mod tests {
         let c = build_offline_model_config(&cfg);
         assert!(c.zipvoice.encoder.is_some());
         assert!(c.zipvoice.decoder.is_some());
-        assert!(c.vits.model.is_none());
-        assert!(c.matcha.acoustic_model.is_none());
-    }
-
-    #[test]
-    fn test_build_offline_model_config_kokoro_branch() {
-        let mut cfg = config::ResolvedTtsConfig::default();
-        cfg.model_type = TtsModelKind::Kokoro;
-        cfg.model = Some(PathBuf::from("/m/kokoro/model.int8.onnx"));
-        cfg.voices = Some(PathBuf::from("/m/kokoro/voices.bin"));
-        cfg.dict_dir = Some(PathBuf::from("/m/kokoro/dict"));
-        cfg.kokoro_lexicons =
-            Some("/m/kokoro/lexicon-us-en.txt,/m/kokoro/lexicon-zh.txt".to_string());
-        let c = build_offline_model_config(&cfg);
-        assert_eq!(c.kokoro.model.as_deref(), Some("/m/kokoro/model.int8.onnx"));
-        assert_eq!(c.kokoro.voices.as_deref(), Some("/m/kokoro/voices.bin"));
-        assert_eq!(
-            c.kokoro.lexicon.as_deref(),
-            Some("/m/kokoro/lexicon-us-en.txt,/m/kokoro/lexicon-zh.txt")
-        );
-        assert_eq!(c.kokoro.dict_dir.as_deref(), Some("/m/kokoro/dict"));
-        assert_eq!(c.kokoro.length_scale, 1.0);
-        // 不污染其他分支
-        assert!(c.vits.model.is_none());
-        assert!(c.zipvoice.encoder.is_none());
-    }
-
-    #[test]
-    fn test_probe_rule_fsts_by_kind() {
-        let base = tempfile::tempdir().unwrap();
-        let dir = base.path();
-        // 空目录：各族都无 fst
-        assert!(probe_rule_fsts(TtsModelKind::Vits, dir).is_none());
-        assert!(probe_rule_fsts(TtsModelKind::Kokoro, dir).is_none());
-        // 未收录族恒 None（即使文件存在）
-        std::fs::write(dir.join("date.fst"), b"x").unwrap();
-        assert!(probe_rule_fsts(TtsModelKind::Zipvoice, dir).is_none());
-        // Vits：date.fst/number.fst 存在者全路径逗号 join
-        std::fs::write(dir.join("number.fst"), b"x").unwrap();
-        let vits = probe_rule_fsts(TtsModelKind::Vits, dir).unwrap();
-        let date_fst = dir.join("date.fst").to_string_lossy().to_string();
-        let number_fst = dir.join("number.fst").to_string_lossy().to_string();
-        assert!(vits.contains(&date_fst), "{vits}");
-        assert!(vits.contains(&number_fst), "{vits}");
-        // Kokoro：三个 zh fst 按存在过滤（date-zh 存在、其余缺）
-        std::fs::write(dir.join("date-zh.fst"), b"x").unwrap();
-        std::fs::write(dir.join("phone-zh.fst"), b"x").unwrap();
-        let kokoro = probe_rule_fsts(TtsModelKind::Kokoro, dir).unwrap();
-        assert!(
-            kokoro.contains("date-zh.fst") && kokoro.contains("phone-zh.fst"),
-            "{kokoro}"
-        );
-        assert!(!kokoro.contains("number-zh.fst"), "{kokoro}");
-        // Kokoro 不吃 Vits 的裸 fst
-        assert!(!kokoro.contains("number.fst"), "{kokoro}");
+        assert!(c.kitten.model.is_none());
     }
 
     #[test]
     fn test_build_generation_config_sid() {
         let gc =
-            build_generation_config(TtsModelKind::Vits, 4, 1.2, &TtsVoiceParams::Sid(0), 22050)
+            build_generation_config(TtsModelKind::Kitten, 4, 1.2, &TtsVoiceParams::Sid(0), 22050)
                 .unwrap();
         assert_eq!(gc.sid, 0);
         assert_eq!(gc.speed, 1.2);
@@ -937,9 +738,9 @@ mod tests {
 
     #[test]
     fn test_build_generation_config_reference_requires_zipvoice() {
-        // 非 zipvoice 模型传 Reference → 报错
+        // sherpa 侧非克隆模型（未收录二期 kind）传 Reference → 报错
         let err = build_generation_config(
-            TtsModelKind::Vits,
+            TtsModelKind::Kitten,
             4,
             1.0,
             &TtsVoiceParams::Reference {
@@ -1020,12 +821,12 @@ mod tests {
         ))
     }
 
-    /// 能力分派：omnivoice true / pocket false（ZAPMOMO_TTS_NO_STREAM 未设时）。
+    /// 能力分派：omnivoice true / qwen3_tts false（ZAPMOMO_TTS_NO_STREAM 未设时）。
     #[test]
     fn test_supports_streaming_dispatch() {
         let url = spawn_streaming_stub(8);
         assert!(streaming_engine(TtsModelKind::Omnivoice, &url).supports_streaming());
-        assert!(!streaming_engine(TtsModelKind::Pocket, &url).supports_streaming());
+        assert!(!streaming_engine(TtsModelKind::Qwen3Tts06, &url).supports_streaming());
     }
 
     /// 语速跨 chunk 持久重采样：两块各 2400 样本（24k）speed 2.0 → 累计 ≈2400。

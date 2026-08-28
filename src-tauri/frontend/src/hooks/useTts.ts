@@ -131,32 +131,24 @@ export function useTts(): TtsState {
       setResult(null);
       setProgress(null);
       setSynthesizing(true);
-      // 音色语义按模型族三分：
-      // - zipvoice：参考音频克隆（自定义音色 → 直接传其 wav+转写；否则内置/默认）
-      // - kokoro：预置音色 id（如 zf_001）持久化在 [tts].voice，后端查表得 sid
-      // - vits/matcha：单说话人，固定 sid 0，不传 voice/reference
-      const kind = config?.model_type ?? "";
-      const kokoro = kind === "kokoro";
-      const sidFixed = !!kind && kind !== "zipvoice" && !kokoro;
-      const savedVoice =
-        !kokoro && !sidFixed
-          ? voices.find((v) => v.custom && v.id === selectedVoice)
-          : undefined;
+      // 收录模型均为参考音频克隆族：自定义音色 → 直接传其 wav+转写；
+      // 否则传音色 id（内置/默认音色，缺省走 auto voice/内置 leijun）
+      const savedVoice = voices.find((v) => v.custom && v.id === selectedVoice);
       try {
         await api.synthesizeTts({
           text: trimmed,
           speed: opts?.speed ?? null,
-          sid: sidFixed ? 0 : null,
-          voice: kokoro ? selectedVoice || null : savedVoice ? null : selectedVoice || null,
-          referenceWav: kokoro || sidFixed ? null : savedVoice ? savedVoice.wav_path : null,
-          referenceText: kokoro || sidFixed ? null : savedVoice ? savedVoice.reference_text : null,
+          sid: null,
+          voice: savedVoice ? null : selectedVoice || null,
+          referenceWav: savedVoice ? savedVoice.wav_path : null,
+          referenceText: savedVoice ? savedVoice.reference_text : null,
         });
       } catch (e) {
         setError(String(e));
         setSynthesizing(false);
       }
     },
-    [config, voices, selectedVoice],
+    [voices, selectedVoice],
   );
 
   // 批量保存合成参数（扩散步数/默认语速/线程/调试），写入 [tts] 后刷新配置。

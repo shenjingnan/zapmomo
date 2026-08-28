@@ -43,7 +43,7 @@ pub enum AudiocppError {
     DecodeWav(String),
     /// wav 编码失败（ASR 上传方向）
     EncodeWav(String),
-    /// 后端不支持的音色参数（如对 PocketTTS 传参考音频克隆）
+    /// 后端不支持的音色参数（如对 qwen3_tts 传具名音色）
     UnsupportedVoice(String),
     /// 该模型族不支持 SSE 流式合成（`families::supports_streaming == false`）
     StreamingUnsupported(String),

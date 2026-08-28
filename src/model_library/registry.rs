@@ -60,7 +60,7 @@ pub struct RegistryModel {
     pub display_name: String,
     #[serde(rename = "model_type")]
     pub model_type: ModelType,
-    /// TTS 子类型（zipvoice/vits/matcha/...；仅 `model_type == Tts` 有意义，其余为 None）
+    /// TTS 子类型（zipvoice/omnivoice/...；仅 `model_type == Tts` 有意义，其余为 None）
     #[serde(default)]
     pub tts_kind: Option<TtsModelKind>,
     /// ASR 子类型（zipformer/sensevoice/whisper；仅 `model_type == Asr` 有意义，其余为 None）
@@ -210,21 +210,11 @@ pub fn required_files_for_role(role: &str) -> &'static [&'static str] {
         "punctuation" => &crate::asr::config::PUNCT_REQUIRED_FILES,
         "tts" => &crate::tts::config::REQUIRED_FILES,
         "tts-vocoder" => &[crate::tts::config::DEFAULT_VOCODER],
-        "tts-vits-melo" => &crate::tts::config::VITS_REQUIRED_FILES,
-        "tts-matcha" => &crate::tts::config::MATCHA_REQUIRED_FILES,
-        "tts-vocoder-22khz" => &[crate::tts::config::DEFAULT_MATCHA_VOCODER],
-        // audiocpp（PocketTTS）：主 GGUF + speaker embeddings 子目录文件
-        "tts-audiocpp-pocket" => &[crate::audiocpp::families::POCKET.gguf_file],
-        "tts-audiocpp-pocket-embeddings" => &[crate::audiocpp::families::POCKET_EMBEDDINGS_FILE],
         "tts-audiocpp-omnivoice" => &[crate::audiocpp::families::OMNIVOICE.gguf_file],
         "tts-audiocpp-voxcpm2" => &[crate::audiocpp::families::VOXCPM2.gguf_file],
         // Qwen3-TTS 两尺寸（音色克隆）：钉死各自 gguf 主文件名
         "tts-audiocpp-qwen3-06b" => &[crate::audiocpp::families::QWEN3_TTS_06B.gguf_file],
         "tts-audiocpp-qwen3-17b" => &[crate::audiocpp::families::QWEN3_TTS_17B.gguf_file],
-        // Kokoro 两量化变体：registry 层按 role 钉死主模型文件名（staging 校验抓错误归档），
-        // 引擎层用 kokoro_model_file_in 双名探测容忍两种包
-        "tts-kokoro" => &crate::tts::config::KOKORO_FP32_REQUIRED_FILES,
-        "tts-kokoro-int8" => &crate::tts::config::KOKORO_INT8_REQUIRED_FILES,
         // LLM：必需文件由 `RegistryModel.file_name` 推导（见 install_managed_model），这里不维护静态表
         _ => &[],
     }
@@ -249,8 +239,8 @@ mod tests {
         let models = all_models();
         assert_eq!(
             models.len(),
-            24,
-            "应为 7 个首批（含 1 KWS）+ 5 个 ASR + 2 个新 TTS + 3 个新 ASR + 2 个流式 Paraformer + 2 个 Kokoro TTS + 1 个 Qwen3-ASR + 1 个 audiocpp PocketTTS + 1 个 audiocpp OmniVoice + 1 个 audiocpp VoxCPM2 + 2 个 Qwen3-TTS + 1 个 audiocpp Qwen3-ASR（LLM 条目已随本地推理移除）"
+            19,
+            "应为 7 个首批（含 1 KWS）+ 5 个 ASR + 2 个新 TTS + 3 个新 ASR + 2 个流式 Paraformer + 1 个 Qwen3-ASR + 1 个 audiocpp OmniVoice + 1 个 audiocpp VoxCPM2 + 2 个 Qwen3-TTS + 1 个 audiocpp Qwen3-ASR（LLM 条目已随本地推理移除；vits/matcha/kokoro/pocket TTS 已移除）"
         );
         assert!(
             models
@@ -314,17 +304,6 @@ mod tests {
         assert_eq!(required_files_for_role("punctuation").len(), 1);
         assert_eq!(required_files_for_role("tts").len(), 5); // 含 vocoder
         assert_eq!(required_files_for_role("tts-vocoder").len(), 1);
-        assert_eq!(required_files_for_role("tts-vits-melo").len(), 3);
-        assert_eq!(required_files_for_role("tts-matcha").len(), 4);
-        assert!(required_files_for_role("tts-matcha").contains(&"vocos-22khz-univ.onnx"));
-        // Kokoro：fp32 / int8 各自钉死主模型文件名，其余三件（voices.bin/tokens/lexicon-zh）共享
-        let kf = required_files_for_role("tts-kokoro");
-        assert_eq!(kf.len(), 4);
-        assert!(kf.contains(&"model.onnx"));
-        assert!(kf.contains(&"voices.bin"));
-        let ki = required_files_for_role("tts-kokoro-int8");
-        assert_eq!(ki.len(), 4);
-        assert!(ki.contains(&"model.int8.onnx"));
         assert_eq!(required_files_for_role("wake-word").len(), 5);
         // 新离线 ASR：精确 role 优先于 asr-* 通配
         assert_eq!(required_files_for_role("asr-sensevoice").len(), 2);
@@ -378,26 +357,6 @@ mod tests {
             Some(TtsModelKind::Zipvoice)
         );
         assert_eq!(
-            registry_tts_kind("tts-vits-melo-zh-en"),
-            Some(TtsModelKind::Vits)
-        );
-        assert_eq!(
-            registry_tts_kind("tts-matcha-zh-baker"),
-            Some(TtsModelKind::Matcha)
-        );
-        assert_eq!(
-            registry_tts_kind("tts-kokoro-int8-multi-lang-v1-1"),
-            Some(TtsModelKind::Kokoro)
-        );
-        assert_eq!(
-            registry_tts_kind("tts-kokoro-multi-lang-v1-1"),
-            Some(TtsModelKind::Kokoro)
-        );
-        assert_eq!(
-            registry_tts_kind("tts-pocket-english-audiocpp"),
-            Some(TtsModelKind::Pocket)
-        );
-        assert_eq!(
             registry_tts_kind("tts-omnivoice-q8-audiocpp"),
             Some(TtsModelKind::Omnivoice)
         );
@@ -409,6 +368,16 @@ mod tests {
             registry_tts_kind("tts-qwen3-17b-base-q8-audiocpp"),
             Some(TtsModelKind::Qwen3Tts17)
         );
+        // 已移除的 vits/matcha/kokoro/pocket 条目不再收录
+        for id in [
+            "tts-vits-melo-zh-en",
+            "tts-matcha-zh-baker",
+            "tts-kokoro-int8-multi-lang-v1-1",
+            "tts-kokoro-multi-lang-v1-1",
+            "tts-pocket-english-audiocpp",
+        ] {
+            assert!(model_by_id(id).is_none(), "{id} 应已从 registry 移除");
+        }
         // 非 TTS 或无 tts_kind → None
         assert_eq!(registry_tts_kind("kws-zipformer-zh-en-3m"), None);
         assert_eq!(registry_tts_kind("不存在"), None);
@@ -435,8 +404,8 @@ mod tests {
         assert!(!visible("linux-x86_64"));
         assert!(!visible("windows-x86_64"));
         // 无 platforms 的条目恒可见
-        let pocket = model_by_id("tts-pocket-english-audiocpp").unwrap();
-        assert!(pocket.platforms.is_none());
+        let zipvoice = model_by_id("tts-zipvoice-distill-int8").unwrap();
+        assert!(zipvoice.platforms.is_none());
         // 全量条目在当前平台的过滤数 ≤ 总数，且 darwin-aarch64 下含 omnivoice
         let filtered = models_for_current_platform();
         assert!(filtered.len() <= all_models().len());

@@ -149,9 +149,8 @@ export function TtsAdvancedParams() {
   const [saveError, setSaveError] = useState<string | null>(null);
 
   const params = tts.config;
-  // Kokoro 非扩散模型，扩散步数无意义，隐藏该行（保存时沿用 config 现值，无副作用）
-  const kokoro = params?.model_type === "kokoro";
-  const visibleKeys = PARAM_KEYS.filter((k) => !(kokoro && k === "num_steps"));
+  // 收录模型均为扩散/克隆模型，扩散步数全族适用（无按 kind 隐藏项）
+  const visibleKeys = PARAM_KEYS;
 
   // hydrate：config 就绪时填充草稿；dirty 时保留用户编辑，否则随 config 同步
   useEffect(() => {

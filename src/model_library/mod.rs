@@ -430,8 +430,8 @@ pub fn set_selected_model(mt: ModelType, path: &Path) -> Result<(), String> {
             let tts = cfg.tts.get_or_insert_with(Default::default);
             tts.model_dir = Some(path_str);
             // 切换时同步持久化模型类型与推理后端：managed 安装目录名 == registry
-            // `name`，据此推导 vits/matcha/kokoro/zipvoice 与 audiocpp（runtime 字段）；
-            // external/local 目录探测不到时保持原值（resolve 会按目录内容兜底探测）。
+            // `name`，据此推导 zipvoice 与 audiocpp（runtime 字段）；
+            // external/local 目录探测不到时保持原值。
             let mut new_kind = old_kind;
             if let Some(name) = path.file_name() {
                 let base = name.to_string_lossy().to_string();
@@ -455,8 +455,8 @@ pub fn set_selected_model(mt: ModelType, path: &Path) -> Result<(), String> {
                     tts.engine_path = None;
                 }
             }
-            // 模型族变化时清空默认音色：zipvoice 音色 id（leijun-1 等）与 Kokoro 音色名
-            // （zf_001 等）互为无效值，残留会让切换后的首次合成报「未找到音色」。
+            // 模型族变化时清空默认音色：zipvoice 音色 id（leijun-1 等参考音色）与
+            // omnivoice 具名音色互为无效值，残留会让切换后的首次合成报「未找到音色」。
             if old_kind.is_some() && old_kind != new_kind {
                 tts.voice = None;
             }
@@ -1480,20 +1480,12 @@ mod tests {
     fn test_set_selected_tts_persists_model_type_from_registry_name() {
         run_with_temp_home(|home| {
             // managed 安装目录名 == registry `name` → 切换时推导并持久化对应 kind
-            let vits = home.join("models/vits-melo-tts-zh_en");
-            set_selected_model(ModelType::Tts, &vits).unwrap();
+            let omni = home.join("models/omnivoice-audiocpp");
+            set_selected_model(ModelType::Tts, &omni).unwrap();
             let cfg = settings::load_settings().unwrap().unwrap();
             assert_eq!(
                 cfg.tts.as_ref().and_then(|t| t.model_type),
-                Some(crate::tts::config::TtsModelKind::Vits)
-            );
-
-            let matcha = home.join("models/matcha-icefall-zh-baker");
-            set_selected_model(ModelType::Tts, &matcha).unwrap();
-            let cfg = settings::load_settings().unwrap().unwrap();
-            assert_eq!(
-                cfg.tts.as_ref().and_then(|t| t.model_type),
-                Some(crate::tts::config::TtsModelKind::Matcha)
+                Some(crate::tts::config::TtsModelKind::Omnivoice)
             );
 
             let zip = home.join("models/sherpa-onnx-zipvoice-distill-int8-zh-en-emilia");
@@ -1504,7 +1496,7 @@ mod tests {
                 Some(crate::tts::config::TtsModelKind::Zipvoice)
             );
 
-            // 非 registry 目录名：不写错 kind（保持上一次推导值，resolve 再按目录探测兜底）
+            // 非 registry 目录名：不写错 kind（保持上一次推导值）
             let unknown = home.join("models/my-local-model");
             set_selected_model(ModelType::Tts, &unknown).unwrap();
             let cfg = settings::load_settings().unwrap().unwrap();
@@ -1519,18 +1511,7 @@ mod tests {
     #[test]
     fn test_set_selected_tts_persists_backend_from_registry_runtime() {
         run_with_temp_home(|home| {
-            // audiocpp managed 目录 → backend = audiocpp + model_type = pocket
-            let pocket = home.join("models/pocket-tts-english-audiocpp");
-            set_selected_model(ModelType::Tts, &pocket).unwrap();
-            let cfg = settings::load_settings().unwrap().unwrap();
-            let tts = cfg.tts.as_ref().expect("tts 段应存在");
-            assert_eq!(tts.backend.as_deref(), Some("audiocpp"));
-            assert_eq!(
-                tts.model_type,
-                Some(crate::tts::config::TtsModelKind::Pocket)
-            );
-
-            // omnivoice managed 目录 → backend = audiocpp + model_type = omnivoice
+            // audiocpp managed 目录 → backend = audiocpp + model_type = omnivoice
             let omni = home.join("models/omnivoice-audiocpp");
             set_selected_model(ModelType::Tts, &omni).unwrap();
             let cfg = settings::load_settings().unwrap().unwrap();
@@ -1548,7 +1529,7 @@ mod tests {
             assert_eq!(cfg.tts.as_ref().and_then(|t| t.backend.clone()), None);
 
             // audiocpp → external/local 目录 → backend 同样复位（不残留 audiocpp 拦合成）
-            set_selected_model(ModelType::Tts, &pocket).unwrap();
+            set_selected_model(ModelType::Tts, &omni).unwrap();
             let unknown = home.join("models/my-local-model");
             set_selected_model(ModelType::Tts, &unknown).unwrap();
             let cfg = settings::load_settings().unwrap().unwrap();
@@ -1559,17 +1540,17 @@ mod tests {
     #[test]
     fn test_set_selected_tts_kind_switch_clears_voice() {
         run_with_temp_home(|home| {
-            // Kokoro registry 目录名 → tts_kind = kokoro
-            let kokoro = home.join("models/kokoro-int8-multi-lang-v1_1");
-            set_selected_model(ModelType::Tts, &kokoro).unwrap();
+            // audiocpp registry 目录名 → tts_kind = omnivoice
+            let omni = home.join("models/omnivoice-audiocpp");
+            set_selected_model(ModelType::Tts, &omni).unwrap();
             let cfg = settings::load_settings().unwrap().unwrap();
             assert_eq!(
                 cfg.tts.as_ref().and_then(|t| t.model_type),
-                Some(crate::tts::config::TtsModelKind::Kokoro)
+                Some(crate::tts::config::TtsModelKind::Omnivoice)
             );
-            // 设置一个 Kokoro 音色后切回 zipvoice：音色 id 互为无效，应被清空
+            // 设置一个 omnivoice 音色后切回 zipvoice：音色 id 互为无效，应被清空
             update_settings(|c| {
-                c.tts.get_or_insert_with(Default::default).voice = Some("zf_001".to_string());
+                c.tts.get_or_insert_with(Default::default).voice = Some("demo_01_man".to_string());
             })
             .unwrap();
             let zip = home.join("models/sherpa-onnx-zipvoice-distill-int8-zh-en-emilia");
@@ -1584,21 +1565,6 @@ mod tests {
                 tts.voice.is_none(),
                 "模型族变化时应清空默认音色（旧族音色 id 在新族无效）"
             );
-            // 同族内切换（kokoro int8 → fp32）：音色保留
-            set_selected_model(ModelType::Tts, &kokoro).unwrap();
-            update_settings(|c| {
-                c.tts.get_or_insert_with(Default::default).voice = Some("zf_050".to_string());
-            })
-            .unwrap();
-            let kokoro_fp32 = home.join("models/kokoro-multi-lang-v1_1");
-            set_selected_model(ModelType::Tts, &kokoro_fp32).unwrap();
-            let cfg = settings::load_settings().unwrap().unwrap();
-            let tts = cfg.tts.as_ref().unwrap();
-            assert_eq!(
-                tts.model_type,
-                Some(crate::tts::config::TtsModelKind::Kokoro)
-            );
-            assert_eq!(tts.voice.as_deref(), Some("zf_050"), "同族切换应保留音色");
         });
     }
 

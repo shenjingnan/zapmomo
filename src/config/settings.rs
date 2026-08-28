@@ -434,7 +434,8 @@ pub struct TtsSettings {
     /// 是否启用语音合成，缺省 true
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
-    /// 模型类型（sherpa-onnx 分支：zipvoice/vits/matcha/...；缺省按模型目录内容探测）
+    /// 模型类型（zipvoice/omnivoice/...；缺省 Zipvoice，未知值回落默认——
+    /// 兼容老版本 settings 里已移除的模型 kind）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_type: Option<crate::tts::config::TtsModelKind>,
     /// 模型目录（支持 ${env.VAR} 引用）
