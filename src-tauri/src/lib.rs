@@ -24,7 +24,7 @@ use tauri_plugin_global_shortcut::GlobalShortcutExt;
 use zapmomo::asr::config::AsrParamsPatch;
 use zapmomo::asr::{AsrReaction, AsrResult};
 use zapmomo::config::settings::{
-    self, AsrSettings, ChatboxSettings, CompanionDragMode, CompanionWindowLayer,
+    self, AsrSettings, BubbleSettings, ChatboxSettings, CompanionDragMode, CompanionWindowLayer,
     CompanionWindowPosition, KwsSettings, Live2dSettings, LlmSettings, TtsSettings,
 };
 use zapmomo::datetime::iso_timestamp_now;
@@ -91,6 +91,27 @@ mod chatbox_panel {
 }
 #[cfg(target_os = "macos")]
 use chatbox_panel::ChatboxPanel;
+
+// 语音回复气泡窗口的 macOS 非激活面板：纯展示 + 拖动，无需键盘输入，
+// 与角色窗口一样彻底不抢焦点（can_become_key_window: false）。
+// 宏展开含 use 声明，须包在独立模块内避免与上方 panel 冲突。
+#[cfg(target_os = "macos")]
+mod bubble_panel {
+    // 宏生成代码需调用 WebviewWindow::app_handle()（Manager trait 方法）
+    use tauri::Manager as _;
+
+    tauri_nspanel::tauri_panel! {
+        panel!(BubblePanel {
+            config: {
+                is_floating_panel: true,
+                can_become_key_window: false,
+                can_become_main_window: false,
+            }
+        })
+    }
+}
+#[cfg(target_os = "macos")]
+use bubble_panel::BubblePanel;
 
 /// 监听线程状态：共享停止标志 + 线程句柄 + 运行时实际模型目录（RuntimeActual）。
 struct ListenState {
@@ -3128,6 +3149,25 @@ fn save_chatbox_position(x: i32, y: i32) -> Result<(), String> {
     settings::save_settings(&settings)
 }
 
+/// 持久化语音回复气泡窗口位置（逻辑像素），供下次启动恢复。
+///
+/// 由前端在用户手动拖动窗口后（debounce）调用，写入 `~/.zapmomo/settings.toml`
+/// 的 `[bubble.window_position]` 段。
+#[tauri::command]
+fn save_bubble_position(x: i32, y: i32) -> Result<(), String> {
+    let mut settings = settings::load_settings()?.unwrap_or_default();
+    let bubble = settings.bubble.get_or_insert_with(BubbleSettings::default);
+    bubble.window_position = Some(CompanionWindowPosition { x, y });
+    settings::save_settings(&settings)
+}
+
+/// （临时调试）气泡窗口前端状态日志：排查「气泡无法拖动」——确认点穿切换与
+/// 拖动事件是否到达。验收通过后删除。
+#[tauri::command]
+fn bubble_debug_log(message: String) {
+    tracing::info!(target: "bubble_debug", "{message}");
+}
+
 /// 隐藏文字输入条窗口并持久化开关（前端 Esc 关闭时调用，保持菜单勾选态一致）。
 #[tauri::command]
 fn hide_chatbox(app: AppHandle) {
@@ -4227,6 +4267,25 @@ fn toggle_companion_window(app: &AppHandle) {
         // 非激活面板，聚焦不激活 App，不会把开着的设置窗带到最前。
         set_chatbox_visible(app, true, true);
     }
+    sync_bubble_visibility(app);
+}
+
+/// 气泡窗口显隐与角色窗口保持一致（气泡无独立开关，显隐不持久化）。
+///
+/// 所有改变角色显隐的路径（快捷键切换 / 右键隐藏 / 单实例恢复 / 启动）都应调用，
+/// 否则气泡会成为孤儿窗口（角色已隐藏，气泡还漂在屏幕上）。
+fn sync_bubble_visibility(app: &AppHandle) {
+    let visible = app
+        .get_webview_window("companion")
+        .map(|w| w.is_visible().unwrap_or(true))
+        .unwrap_or(false);
+    if let Some(bubble) = app.get_webview_window("bubble") {
+        let _ = if visible {
+            bubble.show()
+        } else {
+            bubble.hide()
+        };
+    }
 }
 
 /// 打开设置窗口（供角色窗口右键菜单调用）。
@@ -4400,6 +4459,7 @@ fn hide_companion_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("companion") {
         let _ = window.hide();
     }
+    sync_bubble_visibility(app);
 }
 
 /// 隐藏角色窗口（供角色窗口右键菜单调用）。
@@ -5465,6 +5525,13 @@ const CHATBOX_W: f64 = 520.0;
 const CHATBOX_H: f64 = 96.0;
 /// 输入条默认位置距屏幕工作区底边的留白（逻辑像素）：galgame 对话框位，明显高于贴边。
 const CHATBOX_BOTTOM_MARGIN: f64 = 120.0;
+/// 语音回复气泡窗口尺寸（逻辑像素，与 `setup` 中的 `inner_size` 保持一致）。
+/// 内容上限为 4 行文本（max-h-32）+ 内边距，底部 26px 透明外边距给 CSS 阴影留扩散空间。
+const BUBBLE_W: f64 = 480.0;
+const BUBBLE_H: f64 = 180.0;
+/// 气泡默认位置距屏幕工作区底边的留白（逻辑像素）：输入条默认位正上方
+///（输入条底边距 + 输入条高度 + 16px 间距）。
+const BUBBLE_BOTTOM_MARGIN: f64 = CHATBOX_BOTTOM_MARGIN + CHATBOX_H + 16.0;
 
 /// 计算角色窗口首次出现的右下角位置（逻辑像素）。
 ///
@@ -5495,6 +5562,22 @@ fn default_chatbox_position(app: &AppHandle) -> Option<(f64, f64)> {
     Some((
         left + (w - CHATBOX_W) / 2.0,
         top + h - CHATBOX_H - CHATBOX_BOTTOM_MARGIN,
+    ))
+}
+
+/// 计算气泡窗口首次出现的位置（逻辑像素）：主屏工作区底部居中、输入条默认位
+/// 正上方（排除 Dock / 任务栏）。拖动后由配置记忆接管。
+fn default_bubble_position(app: &AppHandle) -> Option<(f64, f64)> {
+    let monitor = app.primary_monitor().ok().flatten()?;
+    let work = monitor.work_area();
+    let scale = monitor.scale_factor();
+    let left = work.position.x as f64 / scale;
+    let top = work.position.y as f64 / scale;
+    let w = work.size.width as f64 / scale;
+    let h = work.size.height as f64 / scale;
+    Some((
+        left + (w - BUBBLE_W) / 2.0,
+        top + h - BUBBLE_H - BUBBLE_BOTTOM_MARGIN,
     ))
 }
 
@@ -5533,6 +5616,7 @@ pub fn run() {
                     apply_companion_layer_platform(app, CompanionWindowLayer::Back);
                 }
             }
+            sync_bubble_visibility(app);
             show_settings_window(app);
         }))
         .plugin(tauri_plugin_dialog::init())
@@ -5651,6 +5735,8 @@ pub fn run() {
             save_cover_image,
             save_companion_position,
             save_chatbox_position,
+            save_bubble_position,
+            bubble_debug_log,
             hide_chatbox,
             set_companion_scale,
             set_companion_opacity,
@@ -5978,6 +6064,63 @@ pub fn run() {
             {
                 let _ = window.show();
             }
+
+            // 语音回复气泡窗口：纯展示（流式回复打字机），显隐跟随角色窗口
+            // （无独立开关、不持久化）；无文本时完全透明且点击穿透（前端按
+            // 内容切换 setIgnoreCursorEvents），有文本时整面可拖动。
+            // macOS 建窗后转为非激活面板（can_become_key_window: false），
+            // 拖动不抢焦点。
+            let bubble_cfg = loaded.as_ref().and_then(|s| s.bubble.clone());
+            let mut bubble =
+                WebviewWindowBuilder::new(app, "bubble", WebviewUrl::App("bubble.html".into()))
+                    .title("ZapMomo 气泡")
+                    .inner_size(BUBBLE_W, BUBBLE_H)
+                    .resizable(false)
+                    .decorations(false)
+                    .transparent(true)
+                    .always_on_top(true)
+                    .skip_taskbar(true)
+                    // 与 chatbox 一致：透明窗口原生阴影按整个矩形绘制，关闭，CSS 自绘
+                    .shadow(false)
+                    .visible(false);
+            #[cfg(target_os = "macos")]
+            {
+                bubble = bubble.accept_first_mouse(true);
+            }
+            // 定位：配置记忆（落在所有显示器之外时视为多屏布局已变化，回退默认）> 输入条正上方
+            let saved_pos = bubble_cfg
+                .as_ref()
+                .and_then(|c| c.window_position.clone())
+                .map(|p| (p.x as f64, p.y as f64))
+                .filter(|&(x, y)| position_on_any_monitor(app.handle(), x, y));
+            if let Some((x, y)) = saved_pos.or_else(|| default_bubble_position(app.handle())) {
+                bubble = bubble.position(x, y);
+            }
+            bubble.build()?;
+            // 空闲点穿：初始忽略光标事件，前端有文本时恢复（builder 无此选项，建窗后设置）
+            if let Some(window) = app.get_webview_window("bubble") {
+                let _ = window.set_ignore_cursor_events(true);
+            }
+            // macOS：转成非激活面板——拖动/悬停不激活应用、不抢键盘焦点。
+            #[cfg(target_os = "macos")]
+            {
+                use tauri_nspanel::{CollectionBehavior, StyleMask, WebviewWindowExt};
+
+                if let Some(window) = app.get_webview_window("bubble")
+                    && let Ok(panel) = window.to_panel::<BubblePanel>()
+                {
+                    panel.set_style_mask(StyleMask::empty().nonactivating_panel().into());
+                    panel.set_collection_behavior(
+                        CollectionBehavior::new()
+                            .stationary()
+                            .move_to_active_space()
+                            .full_screen_auxiliary()
+                            .into(),
+                    );
+                }
+            }
+            // 显隐跟随角色（companion 默认可见 → 气泡随之显示；内容为空时仍点穿）
+            sync_bubble_visibility(app.handle());
 
             // 自动打开设置窗口：仅用于「无全局菜单栏」的场景（macOS Accessory 模式或非 macOS），
             // 否则 Cmd+, 快捷键不可靠，自动打开可避免「找不到设置」；普通模式有菜单栏，无需自动弹出。

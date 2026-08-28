@@ -1,10 +1,23 @@
-import { act, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { VoiceReplyBubble } from "./VoiceReplyBubble";
+
+const { startDraggingMock, invokeMock } = vi.hoisted(() => ({
+  startDraggingMock: vi.fn(() => Promise.resolve()),
+  invokeMock: vi.fn(() => Promise.resolve(undefined)),
+}));
+
+vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
+vi.mock("@tauri-apps/api/window", () => ({
+  getCurrentWindow: vi.fn(() => ({
+    startDragging: startDraggingMock,
+  })),
+}));
 
 describe("VoiceReplyBubble（回复气泡）", () => {
   beforeEach(() => {
     vi.useFakeTimers();
+    vi.clearAllMocks();
   });
   afterEach(() => {
     vi.useRealTimers();
@@ -68,5 +81,31 @@ describe("VoiceReplyBubble（回复气泡）", () => {
       vi.advanceTimersByTime(4000);
     });
     expect(screen.getByText("新回复")).toBeTruthy();
+  });
+
+  it("气泡面 mousedown(button 0) 触发窗口拖动", () => {
+    render(<VoiceReplyBubble text="拖我" phase="speaking" />);
+    // 事件从内层文本冒泡到外层拖动面
+    fireEvent.mouseDown(screen.getByText("拖我"), { button: 0 });
+    expect(startDraggingMock).toHaveBeenCalled();
+  });
+
+  it("右键 mousedown 不触发拖动", () => {
+    render(<VoiceReplyBubble text="拖我" phase="speaking" />);
+    fireEvent.mouseDown(screen.getByText("拖我"), { button: 2 });
+    expect(startDraggingMock).not.toHaveBeenCalled();
+  });
+
+  it("可见性变化经 onVisibleChange 上报（供窗口根组件切换点击穿透）", () => {
+    const onVisibleChange = vi.fn();
+    const { rerender } = render(
+      <VoiceReplyBubble text="" phase="armed" onVisibleChange={onVisibleChange} />,
+    );
+    expect(onVisibleChange).toHaveBeenLastCalledWith(false);
+    rerender(<VoiceReplyBubble text="出现" phase="thinking" onVisibleChange={onVisibleChange} />);
+    expect(onVisibleChange).toHaveBeenLastCalledWith(true);
+    // 打断立即消失 → 上报不可见
+    rerender(<VoiceReplyBubble text="" phase="armed" onVisibleChange={onVisibleChange} />);
+    expect(onVisibleChange).toHaveBeenLastCalledWith(false);
   });
 });

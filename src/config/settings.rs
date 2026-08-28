@@ -252,6 +252,9 @@ pub struct AppConfig {
     /// 文字输入条窗口配置
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chatbox: Option<ChatboxSettings>,
+    /// 语音回复气泡窗口配置
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bubble: Option<BubbleSettings>,
 }
 
 /// 用户「添加本地模型」注册的模型（external）。
@@ -710,6 +713,16 @@ pub struct ChatboxSettings {
     pub window_position: Option<CompanionWindowPosition>,
 }
 
+/// 语音回复气泡窗口配置。
+///
+/// 显隐不持久化：气泡窗口跟随角色窗口显隐（无独立开关）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct BubbleSettings {
+    /// 气泡窗口位置（逻辑像素；缺省表示未记录 → 定位到输入条默认位正上方）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_position: Option<CompanionWindowPosition>,
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -729,6 +742,7 @@ impl Default for AppConfig {
             shortcuts: None,
             dsh: None,
             chatbox: None,
+            bubble: None,
         }
     }
 }
@@ -920,6 +934,7 @@ mod tests {
             shortcuts: None,
             dsh: None,
             chatbox: None,
+            bubble: None,
         };
         let toml_str = toml::to_string(&config).unwrap();
         let deserialized: AppConfig = toml::from_str(&toml_str).unwrap();
@@ -1180,6 +1195,36 @@ mod tests {
     }
 
     #[test]
+    fn test_bubble_settings_serde_roundtrip() {
+        let bubble = BubbleSettings {
+            window_position: Some(CompanionWindowPosition { x: 200, y: 600 }),
+        };
+        let toml_str = toml::to_string(&bubble).unwrap();
+        assert!(toml_str.contains("window_position"));
+        let deserialized: BubbleSettings = toml::from_str(&toml_str).unwrap();
+        assert_eq!(bubble, deserialized);
+        // 未记录位置时字段应被 skip_serializing_if 忽略
+        let none_pos = BubbleSettings {
+            window_position: None,
+        };
+        let none_toml = toml::to_string(&none_pos).unwrap();
+        assert!(!none_toml.contains("window_position"));
+    }
+
+    #[test]
+    fn test_load_settings_with_bubble_table() {
+        run_with_temp_home(|home| {
+            write_toml_settings(home, "[bubble.window_position]\nx = 200\ny = 600\n");
+            let result = load_settings().unwrap().unwrap();
+            let bubble = result.bubble.unwrap();
+            assert_eq!(
+                bubble.window_position,
+                Some(CompanionWindowPosition { x: 200, y: 600 })
+            );
+        });
+    }
+
+    #[test]
     fn test_live2d_drag_mode_invalid_value_rejected() {
         run_with_temp_home(|home| {
             write_toml_settings(home, "[live2d]\ndrag_mode = \"bogus\"\n");
@@ -1211,6 +1256,7 @@ mod tests {
                 shortcuts: None,
                 dsh: None,
                 chatbox: None,
+                bubble: None,
             };
             save_settings(&config).unwrap();
             let loaded = load_settings().unwrap().unwrap();

@@ -2,7 +2,6 @@ import { getCurrentWindow, LogicalPosition, LogicalSize } from "@tauri-apps/api/
 import type { Live2DModel } from "pixi-live2d-display/cubism4";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { EventBubble } from "@/components/companion/EventBubble";
-import { VoiceReplyBubble } from "@/components/companion/VoiceReplyBubble";
 import { GifStage } from "@/components/gif/GifStage";
 import {
   Live2dStage,
@@ -399,8 +398,7 @@ export function CompanionRoot() {
       </div>
       {/* dsh 任务事件气泡（pointer-events-none，不挡拖动/右键） */}
       <EventBubble />
-      {/* AI 伙伴回复气泡（galgame 对话框位，底部 overlay；打字/语音对话都展示） */}
-      {layer === "front" && <VoiceReplyBubble text={voice.pendingReply} phase={voice.phase} />}
+      {/* AI 伙伴回复气泡已迁移至独立 bubble 窗口（components/bubble/BubbleRoot） */}
       {/* 置底为纯背景装饰，不显示语音状态点 */}
       {layer === "front" && (
         <span className="absolute right-2 top-2">

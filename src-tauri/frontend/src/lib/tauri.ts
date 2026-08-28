@@ -151,6 +151,11 @@ export const api = {
   saveChatboxPosition: (args: { x: number; y: number }) =>
     invoke<void>("save_chatbox_position", args),
   hideChatbox: () => invoke<void>("hide_chatbox"),
+  // ---- 语音回复气泡（bubble 窗口）----
+  saveBubblePosition: (args: { x: number; y: number }) =>
+    invoke<void>("save_bubble_position", args),
+  /** （临时调试）气泡窗口状态日志，验收后删除 */
+  bubbleDebugLog: (args: { message: string }) => invoke<void>("bubble_debug_log", args),
   // ---- 对话记录（~/.zapmomo/conversations.json）----
   getConversationRecords: () => invoke<ConversationRecord[]>("get_conversation_records"),
   clearConversationRecords: () => invoke<void>("clear_conversation_records"),

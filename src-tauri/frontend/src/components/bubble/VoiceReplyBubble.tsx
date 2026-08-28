@@ -1,19 +1,32 @@
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useRef, useState } from "react";
+import { api } from "@/lib/tauri";
 import type { VoiceSessionPhase } from "@/types/tauri";
 
 /** 回复完结后气泡定格时长（毫秒），之后淡出消失。 */
 const HOLD_MS = 5000;
 
 /**
- * 语音回复气泡（桌宠窗口底部 overlay，galgame 对话框位）。
+ * 语音回复气泡（独立 bubble 窗口的内容，galgame 对话框位）。
  *
  * `text` 来自 useVoiceSession 的 pendingReply（流式 token 累积 = 天然打字机）。
  * 清空分两义：正常完结（reply-finished，此刻 phase 仍在 thinking/speaking）→
  * 定格 5s 后淡出；打断/停止（phase 已回 armed/idle）→ 立即消失。
  * 定格期内的 phase 迁移（如播完回 armed）不打断定格。
- * pointer-events-none 不遮挡角色拖动。
+ *
+ * 整个气泡面按住左键即可拖动窗口（纯展示组件、无输入/选择交互，故文本不可选中）。
+ * 可见性变化经 `onVisibleChange` 上报，窗口根组件据此切换点击穿透：
+ * 有内容时可拖动，无内容时透明区域穿透到下方窗口。
  */
-export function VoiceReplyBubble({ text, phase }: { text: string; phase: VoiceSessionPhase }) {
+export function VoiceReplyBubble({
+  text,
+  phase,
+  onVisibleChange,
+}: {
+  text: string;
+  phase: VoiceSessionPhase;
+  onVisibleChange?: (visible: boolean) => void;
+}) {
   const [visibleText, setVisibleText] = useState("");
   const [fading, setFading] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -55,10 +68,26 @@ export function VoiceReplyBubble({ text, phase }: { text: string; phase: VoiceSe
   // 卸载时清理定时器
   useEffect(() => () => clearTimeout(timerRef.current), []);
 
+  // 上报可见性（窗口根组件据此切换点击穿透）
+  useEffect(() => {
+    onVisibleChange?.(visibleText !== "");
+  }, [visibleText, onVisibleChange]);
+
   if (!visibleText) return null;
 
   return (
-    <div className="pointer-events-none absolute inset-x-3 bottom-3 z-10 flex justify-center">
+    // 纯展示气泡无输入/选择交互，整个可视面按住左键即拖动窗口（代价：文本不可选中）。
+    // biome-ignore lint/a11y/noStaticElementInteractions: 气泡面即拖动把手（startDragging），无键盘等价交互（窗口拖动由 OS 承载）
+    <div
+      className="w-full cursor-grab touch-none select-none active:cursor-grabbing"
+      onMouseDown={(e) => {
+        if (e.button !== 0) return;
+        void api.bubbleDebugLog({ message: "气泡 mousedown 到达 → startDragging" });
+        getCurrentWindow()
+          .startDragging()
+          .catch((err) => void api.bubbleDebugLog({ message: `startDragging 失败: ${err}` }));
+      }}
+    >
       <div
         className={`max-h-32 w-full overflow-hidden rounded-xl border border-border bg-popover px-4 py-2.5 text-sm text-text-primary shadow-lg transition-opacity duration-500 ${
           fading ? "opacity-0" : "opacity-100"

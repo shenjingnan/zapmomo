@@ -17,13 +17,14 @@ export default defineConfig({
     port: 1420,
     strictPort: true,
   },
-  // 多入口：settings.html（设置面板）+ companion.html（常驻角色窗口）+ chatbox.html（文字输入条）
+  // 多入口：settings.html（设置面板）+ companion.html（常驻角色窗口）+ chatbox.html（文字输入条）+ bubble.html（回复气泡）
   build: {
     rollupOptions: {
       input: {
         settings: path.resolve(import.meta.dirname, "settings.html"),
         companion: path.resolve(import.meta.dirname, "companion.html"),
         chatbox: path.resolve(import.meta.dirname, "chatbox.html"),
+        bubble: path.resolve(import.meta.dirname, "bubble.html"),
       },
     },
   },
