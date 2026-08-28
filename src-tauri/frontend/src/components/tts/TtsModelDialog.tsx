@@ -1,4 +1,4 @@
-import { CircleAlert, Download, Trash2 } from "lucide-react";
+import { CircleAlert, Download, Loader2, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { ModelConfirmDialog } from "@/components/models/ModelConfirmDialog";
 import { ModelDialog } from "@/components/models/ModelDialog";
@@ -21,13 +21,24 @@ interface TtsModelDialogProps {
  * 选择合成模型弹窗（与 KWS/ASR/LLM 选择模型弹窗同款交互）：
  * 内置预设（未安装→下载；已安装→设为当前 / 卸载；当前→标记）。
  * TTS 每次合成现场建引擎：切换立即生效（下次合成使用新模型）；
- * 语音会话运行中也静默生效（下次会话用新模型），无需重启提示。
- * 卸载确认框嵌套在此弹窗内。
+ * 语音会话运行中切换会预构造新引擎做句间热切换（耗时数秒，期间按钮
+ * 转圈并禁用），下一句起生效，不打断当前句。卸载确认框嵌套在此弹窗内。
  */
 export function TtsModelDialog({ open, onClose }: TtsModelDialogProps) {
   const switcher = useTtsModelSwitch();
   const [confirmModel, setConfirmModel] = useState<LibraryModel | null>(null);
+  /** 正在设为当前的预设 id；期间按钮转圈并禁用（会话运行中含现场构造引擎耗时） */
+  const [switchingId, setSwitchingId] = useState<string | null>(null);
   const { downloadingId, progress } = switcher;
+
+  const handleSetCurrent = async (id: string) => {
+    setSwitchingId(id);
+    try {
+      await switcher.setCurrent(id);
+    } finally {
+      setSwitchingId(null);
+    }
+  };
 
   // verifying/done 等阶段后端 overallPercent=-1，非 downloading 一律按 100
   const targetPercent =
@@ -38,7 +49,7 @@ export function TtsModelDialog({ open, onClose }: TtsModelDialogProps) {
   return (
     <ModelDialog open={open} onClose={onClose} title="选择合成模型" width="lg">
       <p className="text-xs text-text-muted">
-        内置语音合成模型：下载后即可设为当前；切换立即生效（下次合成使用新模型）。
+        内置语音合成模型：下载后即可设为当前；语音会话运行中切换需现场构造引擎（数秒），下一句起生效。
       </p>
 
       <div className="space-y-2">
@@ -77,14 +88,22 @@ export function TtsModelDialog({ open, onClose }: TtsModelDialogProps) {
                     </span>
                   ) : (
                     <>
-                      <Button size="sm" onClick={() => void switcher.setCurrent(installed.id)}>
-                        设为当前
+                      <Button
+                        size="sm"
+                        onClick={() => void handleSetCurrent(installed.id)}
+                        disabled={busy || switchingId !== null}
+                      >
+                        {switchingId === installed.id && (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        )}
+                        {switchingId === installed.id ? "切换中…" : "设为当前"}
                       </Button>
                       <Button
                         variant="outline"
                         size="sm"
                         className="shadow-none text-destructive hover:text-destructive"
                         onClick={() => setConfirmModel(installed)}
+                        disabled={switchingId !== null}
                       >
                         <Trash2 className="h-3.5 w-3.5" />
                         卸载

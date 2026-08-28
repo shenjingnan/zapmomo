@@ -12,6 +12,7 @@ pub mod events;
 pub mod listen;
 pub mod player;
 pub mod records;
+pub mod sanitizer;
 pub mod session;
 pub mod splitter;
 pub mod state;
@@ -22,6 +23,7 @@ pub use events::{ErrorKind, VoiceEvent, cli_sink};
 pub use listen::{ChunkAccumulator, MicEvent, MicLoop};
 pub use player::{AudioPlayer, MockPlayer, Speaker};
 pub use records::{ConversationRecord, RecordRole};
+pub use sanitizer::{TtsSanitizer, sanitize_for_tts};
 pub use session::{ReplyAccumulator, TtsSwap, TtsSwapSlot, VoiceSession};
 pub use synthesizer::{SynthHandle, SynthResult};
 
