@@ -702,10 +702,10 @@ fn default_log_level() -> String {
 
 /// 文字输入条窗口配置。
 ///
-/// 字段可缺省：未配置时回退内置默认（隐藏 + 桌宠正上方/屏幕底部居中）。
+/// 字段可缺省：未配置时回退内置默认（显示 + 桌宠正上方/屏幕底部居中）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct ChatboxSettings {
-    /// 输入条是否显示（缺省视为 false）
+    /// 输入条是否显示（缺省视为 true：未配置时默认显示）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visible: Option<bool>,
     /// 输入条窗口位置（逻辑像素；缺省表示未记录 → 定位到桌宠正上方）
