@@ -6,7 +6,7 @@ import type { CompanionLibraryView, CompanionModelInfo } from "@/types/tauri";
 import { CompanionPage } from "./CompanionPage";
 
 type StageCatalog = import("@/components/live2d/previewManager").Live2dCatalog;
-const { invokeMock, openMock, stageHandleMock, stageState } = vi.hoisted(() => ({
+const { invokeMock, openMock, stageHandleMock, stageState, configState } = vi.hoisted(() => ({
   invokeMock: vi.fn(),
   openMock: vi.fn(),
   stageHandleMock: {
@@ -16,6 +16,10 @@ const { invokeMock, openMock, stageHandleMock, stageState } = vi.hoisted(() => (
   },
   /** 供 mock 替身注入目录的可变容器（vi.mock 工厂只可靠引用 hoisted 变量）。 */
   stageState: { catalog: null as StageCatalog | null },
+  /** get_live2d_config 返回的有效缩放（模拟「active 伙伴私有 ?? 全局」合并结果）。 */
+  configState: {
+    windowScale: 1.0,
+  },
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -85,6 +89,7 @@ beforeEach(() => {
   stageHandleMock.applyExpression.mockReset();
   stageHandleMock.resetExpression.mockReset();
   stageState.catalog = null;
+  configState.windowScale = 1.0;
   library = { models: [], active_model_id: null };
   importSeq = 0;
   openDirError = null;
@@ -100,7 +105,7 @@ beforeEach(() => {
             model_file: null,
             format: null,
             models_present: false,
-            window_scale: 1.0,
+            window_scale: configState.windowScale,
             window_opacity: 1.0,
             click_through: false,
             window_layer: "front",
@@ -300,6 +305,24 @@ describe("CompanionPage 伙伴模型管理器", () => {
     });
     expect(screen.queryByRole("button", { name: "设为当前使用" })).not.toBeInTheDocument();
     expect(screen.getAllByText("使用中")).toHaveLength(1);
+  });
+
+  it("设为当前使用后尺寸滑杆刷新为新伙伴的缩放", async () => {
+    library = { models: [MODEL_A, MODEL_B], active_model_id: MODEL_A.id };
+    // 后端视角：A 的有效缩放 0.5 → 滑杆 50%。
+    configState.windowScale = 0.5;
+    const user = userEvent.setup();
+    renderPage();
+
+    expect(await screen.findByText("50%")).toBeInTheDocument();
+
+    // 后端视角：B 的有效缩放 1.5；把 B 设为当前使用后滑杆刷新为 150%。
+    configState.windowScale = 1.5;
+    await user.click(screen.getByRole("button", { name: MODEL_B.name }));
+    await user.click(screen.getByRole("button", { name: "设为当前使用" }));
+
+    expect(await screen.findByText("150%")).toBeInTheDocument();
+    expect(screen.queryByText("50%")).not.toBeInTheDocument();
   });
 
   it("首次导入：自动 selected + active，右侧直接显示「当前使用」", async () => {

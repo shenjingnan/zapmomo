@@ -20,8 +20,9 @@ interface CurrentCompanionCardProps {
  * - 预览复用共享舞台 `SharedLive2dStage`（与伙伴页同一 PIXI 实例，ResizeObserver 量测容器尺寸），
  *   渲染失败时按伙伴重试两次（启动瞬间 GPU 繁忙导致的瞬时失败可自愈），
  *   仍失败才回退 `cover_image` 静态封面，无封面则提示文案；
- * - 尺寸/透明度与伙伴页共用同一持久化状态（settings.toml [live2d].window_scale /
- *   window_opacity），写入后桌宠窗口即时生效；其它入口（滚轮/菜单）改动时经事件同步显示值。
+ * - 尺寸是伙伴私有配置（伙伴库 layout.scale）、透明度是全局配置
+ *   （settings.toml [live2d].window_opacity），写入后桌宠窗口即时生效；
+ *   其它入口（滚轮/菜单）改动时经事件同步显示值。
  */
 export function CurrentCompanionCard({ companion, loading, error }: CurrentCompanionCardProps) {
   // Live2D 预览：量测容器尺寸交给 SharedLive2dStage（PIXI 需要非 0 尺寸）。
@@ -58,9 +59,11 @@ export function CurrentCompanionCard({ companion, loading, error }: CurrentCompa
     }, 1200);
   }, [companion]);
 
-  // 桌宠尺寸（缩放百分比，25%~200%）与透明度（20%~100%）：初始从持久化配置读取。
+  // 桌宠尺寸（缩放百分比，25%~200%）与透明度（20%~100%）：初始从持久化配置读取；
+  // 尺寸是伙伴私有配置（透明度是全局），切换当前伙伴时重读以刷新滑杆显示值。
   const [percent, setPercent] = useState(100);
   const [opacityPercent, setOpacityPercent] = useState(100);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: companion?.id 是伙伴切换触发器（缩放为伙伴私有，需重读刷新滑杆）
   useEffect(() => {
     void api
       .getLive2dConfig()
@@ -69,7 +72,7 @@ export function CurrentCompanionCard({ companion, loading, error }: CurrentCompa
         if (cfg.window_opacity != null) setOpacityPercent(Math.round(cfg.window_opacity * 100));
       })
       .catch(() => {});
-  }, []);
+  }, [companion?.id]);
 
   // 桌宠窗口滚轮 / 右键菜单改尺寸时同步显示值（自己写入触发的同值事件是 no-op）。
   useEffect(() => {

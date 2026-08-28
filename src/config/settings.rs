@@ -531,10 +531,15 @@ pub struct Live2dSettings {
     /// 模型目录（支持 ${env.VAR} 引用）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_dir: Option<String>,
-    /// 角色窗口位置（逻辑像素；缺省表示未记录）
+    /// 角色窗口位置（逻辑像素；缺省表示未记录）。
+    ///
+    /// 现在是**兜底默认值**：伙伴私有布局（library.json `layout.position`）优先；
+    /// 该全局值只在伙伴未单独配置时（以及空库窗口期写入）生效。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_position: Option<CompanionWindowPosition>,
-    /// 角色窗口缩放比例（1.0 = 100%；缺省视为 1.0）
+    /// 角色窗口缩放比例（1.0 = 100%；缺省视为 1.0）。
+    ///
+    /// 同样是兜底默认值：伙伴私有 `layout.scale` 优先（见 `window_position`）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_scale: Option<f64>,
     /// 角色窗口透明度（1.0 = 不透明；缺省视为 1.0）

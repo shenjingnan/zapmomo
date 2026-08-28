@@ -61,6 +61,23 @@ pub struct CompanionModel {
     pub format: String,
     /// 导入时间（RFC3339）。
     pub imported_at: String,
+    /// 伙伴私有窗口布局（尺寸/位置）；`None` = 从未单独配置，沿用全局默认
+    /// （`settings.toml [live2d]`）与当前窗口状态。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<CompanionLayout>,
+}
+
+/// 伙伴私有窗口布局（尺寸/位置）。
+///
+/// 字段为 `Option`：`None` = 该项从未单独配置，读取方回退全局默认或沿用当前窗口状态。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct CompanionLayout {
+    /// 缩放比例（1.0 = 100%）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale: Option<f64>,
+    /// 窗口左上角坐标（逻辑像素）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<settings::CompanionWindowPosition>,
 }
 
 /// 伙伴库清单（持久化到 `library.json`）。
@@ -621,6 +638,7 @@ fn commit_import(prepared: PreparedImport) -> Result<(CompanionModel, bool), Str
             .to_string(),
         format: prepared.format.clone(),
         imported_at: prepared.imported_at.clone(),
+        layout: None,
     };
 
     {
@@ -1274,6 +1292,48 @@ pub fn rename(id: &str, name: &str) -> Result<CompanionLibrary, String> {
     Ok(lib)
 }
 
+/// 保存伙伴私有缩放比例（增量更新：只覆盖 `layout.scale`，不动 position）。
+///
+/// 由角色窗口滚轮/设置面板/原生菜单缩放后调用，写入 `library.json` 中该伙伴的条目。
+pub fn save_layout_scale(id: &str, scale: f64) -> Result<(), String> {
+    let _g = lock();
+    let mut lib = load_library_inner()?;
+    let model = lib
+        .models
+        .iter_mut()
+        .find(|m| m.id == id)
+        .ok_or_else(|| "未找到该伙伴".to_string())?;
+    model.layout.get_or_insert_with(Default::default).scale = Some(scale);
+    save_library_inner(&lib)
+}
+
+/// 保存伙伴私有窗口位置（逻辑像素；增量更新：只覆盖 `layout.position`，不动 scale）。
+///
+/// 由前端在用户手动拖动窗口后（debounce）调用，写入 `library.json` 中该伙伴的条目。
+pub fn save_layout_position(id: &str, x: i32, y: i32) -> Result<(), String> {
+    let _g = lock();
+    let mut lib = load_library_inner()?;
+    let model = lib
+        .models
+        .iter_mut()
+        .find(|m| m.id == id)
+        .ok_or_else(|| "未找到该伙伴".to_string())?;
+    model.layout.get_or_insert_with(Default::default).position =
+        Some(settings::CompanionWindowPosition { x, y });
+    save_library_inner(&lib)
+}
+
+/// 当前 active 伙伴的私有布局（无 active / 未配置 → None）。
+pub fn active_layout() -> Option<CompanionLayout> {
+    let lib = load_library_fast()
+        .map_err(|e| {
+            tracing::warn!("读取伙伴库失败（跳过布局探测）: {e}");
+            e
+        })
+        .ok()?;
+    active_model(&lib)?.layout.clone()
+}
+
 /// 迁移后改写伙伴库中某条目的载荷路径（`model_dir`/`model_file` 指向新 store 目录）。
 ///
 /// 旧载荷根 = 条目当前路径所在的管理根（`companion_store_roots()` 中能剥离的那个）。
@@ -1689,6 +1749,7 @@ mod tests {
                         .to_string(),
                     format: "Cubism3".into(),
                     imported_at: "t".into(),
+                    layout: None,
                 }],
                 active_model_id: Some(id.to_string()),
                 completed_migrations: Vec::new(),
@@ -2520,6 +2581,103 @@ mod tests {
             assert!(active_character_voice().is_none());
             assert!(!has_persona(&gif));
             assert!(!has_character_voice(&gif));
+        });
+    }
+
+    // ---- 伙伴私有布局（尺寸/位置） ----
+
+    #[test]
+    fn test_layout_save_and_reload_roundtrip() {
+        run_with_temp_home(|home| {
+            let src = home.join("A");
+            make_valid_model(&src, "a.model3.json");
+            let (model, _) = import_from_dir(&src).unwrap();
+            // 新导入的伙伴无私有布局。
+            assert!(model.layout.is_none());
+
+            save_layout_scale(&model.id, 1.5).unwrap();
+            save_layout_position(&model.id, 120, 800).unwrap();
+
+            let lib = load_library_fast().unwrap();
+            let m = lib.models.iter().find(|m| m.id == model.id).unwrap();
+            let layout = m.layout.as_ref().unwrap();
+            assert_eq!(layout.scale, Some(1.5));
+            assert_eq!(
+                layout.position,
+                Some(settings::CompanionWindowPosition { x: 120, y: 800 })
+            );
+        });
+    }
+
+    #[test]
+    fn test_layout_incremental_update_keeps_other_field() {
+        run_with_temp_home(|home| {
+            let src = home.join("A");
+            make_valid_model(&src, "a.model3.json");
+            let (model, _) = import_from_dir(&src).unwrap();
+
+            save_layout_scale(&model.id, 1.5).unwrap();
+            save_layout_position(&model.id, 10, 20).unwrap();
+            // 再改 scale：position 不被清掉。
+            save_layout_scale(&model.id, 0.8).unwrap();
+
+            let lib = load_library_fast().unwrap();
+            let layout = lib.models[0].layout.as_ref().unwrap();
+            assert_eq!(layout.scale, Some(0.8));
+            assert_eq!(
+                layout.position,
+                Some(settings::CompanionWindowPosition { x: 10, y: 20 })
+            );
+        });
+    }
+
+    #[test]
+    fn test_layout_save_unknown_id_errors() {
+        run_with_temp_home(|_home| {
+            assert!(save_layout_scale("companion-nope", 1.0).is_err());
+            assert!(save_layout_position("companion-nope", 0, 0).is_err());
+        });
+    }
+
+    #[test]
+    fn test_active_layout_reads_active_companion() {
+        run_with_temp_home(|home| {
+            // 无 active → None。
+            assert!(active_layout().is_none());
+
+            let src = home.join("A");
+            make_valid_model(&src, "a.model3.json");
+            let (model, _) = import_from_dir(&src).unwrap();
+            // active 但未配置 → None。
+            assert!(active_layout().is_none());
+
+            save_layout_scale(&model.id, 1.2).unwrap();
+            let layout = active_layout().unwrap();
+            assert_eq!(layout.scale, Some(1.2));
+            assert!(layout.position.is_none());
+        });
+    }
+
+    #[test]
+    fn test_library_json_without_layout_field_loads() {
+        run_with_temp_home(|home| {
+            // 老版本 library.json（条目无 layout 字段）宽容加载为 None。
+            let root = get_companions_dir();
+            let id = "companion-abc";
+            make_valid_model(&root.join(id), "cat.model3.json");
+            // 路径须经 JSON 字符串转义后再拼入，否则 Windows 反斜杠路径是非法 JSON。
+            let json_path = |p: &Path| serde_json::to_string(&p.display().to_string()).unwrap();
+            std::fs::write(
+                root.join(LIBRARY_FILE),
+                format!(
+                    r#"{{"schema_version":1,"models":[{{"id":"{id}","name":"cat","model_dir":{},"model_file":{},"format":"cubism3","imported_at":"t"}}],"active_model_id":"{id}"}}"#,
+                    json_path(&root.join(id)),
+                    json_path(&root.join(id).join("cat.model3.json"))
+                ),
+            )
+            .unwrap();
+            let lib = load_library_fast().unwrap();
+            assert!(lib.models[0].layout.is_none());
         });
     }
 

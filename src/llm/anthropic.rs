@@ -428,7 +428,7 @@ impl LlmProvider for AnthropicProvider {
         input: &[InputItem],
         tools: &[ToolDefinition],
         params: &GenParams,
-        emit: &mut dyn FnMut(OutputItem),
+        emit: &mut (dyn FnMut(OutputItem) + Send),
         cancel: Arc<AtomicBool>,
     ) -> Result<FinishReason, LlmError> {
         if cancel.load(Ordering::Relaxed) {

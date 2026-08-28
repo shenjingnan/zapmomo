@@ -432,12 +432,14 @@ export function CompanionPage() {
     setStageError(e.message);
   }, []);
 
-  // 桌宠尺寸（缩放百分比，25%~200%）与透明度（20%~100%）：写入 settings 并通知桌宠窗口即时生效。
+  // 桌宠尺寸（缩放百分比，25%~200%，伙伴私有）与透明度（20%~100%，全局）：
+  // 写入后通知桌宠窗口即时生效；切换 active 伙伴时重读以刷新滑杆显示值。
   // 点击穿透（窗口级行为，与选中哪个伙伴无关）：开启后桌宠窗口对所有鼠标事件透明。
   // 显示层级（置顶/置底，窗口级）：写入 settings 并通知桌宠窗口即时生效。
   // 拖拽模式（窗口级）：modifier = 需按住 ⌘/Ctrl 才能拖动，direct = 直接拖动。
   const [percent, setPercent] = useState(100);
   const [opacityPercent, setOpacityPercent] = useState(100);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: library?.active_model_id 是伙伴切换触发器（缩放为伙伴私有，需重读刷新滑杆）
   useEffect(() => {
     void api
       .getLive2dConfig()
@@ -446,7 +448,7 @@ export function CompanionPage() {
         if (cfg.window_opacity != null) setOpacityPercent(Math.round(cfg.window_opacity * 100));
       })
       .catch(() => {});
-  }, []);
+  }, [library?.active_model_id]);
   const handleScaleChange = useCallback((value: number) => {
     const clamped = Math.max(25, Math.min(200, Math.round(value)));
     setPercent(clamped);
