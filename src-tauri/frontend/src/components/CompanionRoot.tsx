@@ -1,8 +1,6 @@
 import { getCurrentWindow, LogicalPosition, LogicalSize } from "@tauri-apps/api/window";
 import type { Live2DModel } from "pixi-live2d-display/cubism4";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { EventBubble } from "@/components/companion/EventBubble";
-import { VoiceReplyBubble } from "@/components/companion/VoiceReplyBubble";
 import { GifStage } from "@/components/gif/GifStage";
 import {
   Live2dStage,
@@ -281,7 +279,7 @@ export function CompanionRoot() {
     if (stage.isGif) modelRef.current = null;
   }, [stage.isGif]);
 
-  // dsh 任务事件：气泡由 EventBubble 渲染，这里联动触发模型动作。
+  // dsh 任务事件：台词由独立 bubble 窗口统一渲染（唯一聊天气泡），这里联动触发模型动作。
   useEffect(() => {
     const unlisten = onDshSpeak(({ event }) => {
       const model = modelRef.current;
@@ -397,10 +395,7 @@ export function CompanionRoot() {
           />
         </div>
       </div>
-      {/* dsh 任务事件气泡（pointer-events-none，不挡拖动/右键） */}
-      <EventBubble />
-      {/* AI 伙伴回复气泡（galgame 对话框位，底部 overlay；打字/语音对话都展示） */}
-      {layer === "front" && <VoiceReplyBubble text={voice.pendingReply} phase={voice.phase} />}
+      {/* dsh 播报与对话回复统一由独立 bubble 窗口渲染（components/bubble/BubbleRoot，唯一聊天气泡） */}
       {/* 置底为纯背景装饰，不显示语音状态点 */}
       {layer === "front" && (
         <span className="absolute right-2 top-2">

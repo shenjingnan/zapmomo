@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "角色/设置/输入条窗口默认权限：调用自定义命令 + 监听事件 + 无边框窗口控制",
-  "windows": ["companion", "settings", "chatbox"],
+  "description": "角色/设置/输入条/气泡窗口默认权限：调用自定义命令 + 监听事件 + 无边框窗口控制",
+  "windows": ["companion", "settings", "chatbox", "bubble"],
   "permissions": [
     "core:default",
     "core:window:allow-show",
@@ -16,6 +16,7 @@
     "core:window:allow-is-maximized",
     "core:window:allow-set-size",
     "core:window:allow-set-position",
+    "core:window:allow-set-ignore-cursor-events",
     "dialog:allow-open"
   ]
 }
