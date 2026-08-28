@@ -18,6 +18,8 @@ export interface CompanionLibraryState {
   rename: (id: string, name: string) => Promise<void>;
   /** 移除伙伴（删除托管文件；若删的是 active 会自动落位/清空）。 */
   remove: (id: string) => Promise<void>;
+  /** 在文件管理器中打开伙伴的托管资产目录（音色参考等可自行调整）。 */
+  openAssetsDir: (id: string) => Promise<void>;
   /** 保存从 Live2D 渲染画布截取的封面 PNG，保存后返回更新后的库视图。 */
   saveCover: (id: string, png: number[]) => Promise<CompanionLibraryView | null>;
 }
@@ -125,6 +127,17 @@ export function useCompanionLibrary(): CompanionLibraryState {
     [library, toast],
   );
 
+  const openAssetsDir = useCallback(
+    async (id: string) => {
+      try {
+        await api.openCompanionDir({ id });
+      } catch (e) {
+        toast.error(String(e));
+      }
+    },
+    [toast],
+  );
+
   const saveCover = useCallback(
     async (id: string, png: number[]): Promise<CompanionLibraryView | null> => {
       try {
@@ -149,6 +162,7 @@ export function useCompanionLibrary(): CompanionLibraryState {
     setActive,
     rename,
     remove,
+    openAssetsDir,
     saveCover,
   };
 }
