@@ -239,8 +239,8 @@ mod tests {
         let models = all_models();
         assert_eq!(
             models.len(),
-            19,
-            "应为 7 个首批（含 1 KWS）+ 5 个 ASR + 2 个新 TTS + 3 个新 ASR + 2 个流式 Paraformer + 1 个 Qwen3-ASR + 1 个 audiocpp OmniVoice + 1 个 audiocpp VoxCPM2 + 2 个 Qwen3-TTS + 1 个 audiocpp Qwen3-ASR（LLM 条目已随本地推理移除；vits/matcha/kokoro/pocket TTS 已移除）"
+            16,
+            "应为 7 个首批（含 1 KWS）+ 5 个 ASR + 2 个新 TTS + 3 个新 ASR + 2 个流式 Paraformer + 1 个 Qwen3-ASR + 1 个 audiocpp OmniVoice + 1 个 audiocpp VoxCPM2 + 2 个 Qwen3-TTS + 1 个 audiocpp Qwen3-ASR（LLM 条目已随本地推理移除；vits/matcha/kokoro/pocket TTS 已移除；3 个纯英文 Zipformer ASR 已移除）"
         );
         assert!(
             models

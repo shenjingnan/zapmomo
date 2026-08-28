@@ -28,27 +28,6 @@ export const ASR_PRESETS = [
     kind: "zipformer",
   },
   {
-    id: "asr-streaming-en-20m",
-    name: "Streaming Zipformer ASR en 20M",
-    tagline: "纯英文 · 轻量 20M · 不支持中文",
-    sizeBytes: 127_887_156,
-    kind: "zipformer",
-  },
-  {
-    id: "asr-streaming-en-2023-06-21",
-    name: "Streaming Zipformer ASR en 2023-06-21",
-    tagline: "纯英文 · 不支持中文",
-    sizeBytes: 506_956_414,
-    kind: "zipformer",
-  },
-  {
-    id: "asr-streaming-en-2023-02-21",
-    name: "Streaming Zipformer ASR en 2023-02-21",
-    tagline: "纯英文 · 不支持中文",
-    sizeBytes: 397_939_030,
-    kind: "zipformer",
-  },
-  {
     id: "asr-paraformer-bilingual-zh-en",
     name: "Streaming Paraformer ASR zh-en",
     tagline: "中英双语 · 流式 · 高准确率 · 包体约 1GB",

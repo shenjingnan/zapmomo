@@ -42,36 +42,6 @@
       "license": "Apache-2.0"
     },
     {
-      "name": "sherpa-onnx-streaming-zipformer-en-20M-2023-02-17",
-      "role": "asr-en-20m",
-      "version": "2023-02-17",
-      "archive": "sherpa-onnx-streaming-zipformer-en-20M-2023-02-17.tar.bz2",
-      "source": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-en-20M-2023-02-17.tar.bz2",
-      "sha256": "9c559283e8498d3fe95913c79ca1cb454bb26281ac2b102b41306c7d752765d9",
-      "size_bytes": 127887156,
-      "license": "Apache-2.0"
-    },
-    {
-      "name": "sherpa-onnx-streaming-zipformer-en-2023-06-21",
-      "role": "asr-en-2023-06-21",
-      "version": "2023-06-21",
-      "archive": "sherpa-onnx-streaming-zipformer-en-2023-06-21.tar.bz2",
-      "source": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-en-2023-06-21.tar.bz2",
-      "sha256": "455f40e556aa2b20ac9d3bffd603b58002075c1193b4070938540c11efe0a4da",
-      "size_bytes": 506956414,
-      "license": "Apache-2.0"
-    },
-    {
-      "name": "sherpa-onnx-streaming-zipformer-en-2023-02-21",
-      "role": "asr-en-2023-02-21",
-      "version": "2023-02-21",
-      "archive": "sherpa-onnx-streaming-zipformer-en-2023-02-21.tar.bz2",
-      "source": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-en-2023-02-21.tar.bz2",
-      "sha256": "54360f7a50b6cca9511fb318e472cbff87e9b48ba5f8f389bce46aeba7c31602",
-      "size_bytes": 397939030,
-      "license": "Apache-2.0"
-    },
-    {
       "name": "sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12",
       "role": "punctuation",
       "version": "2024-04-12",
