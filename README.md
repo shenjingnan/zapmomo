@@ -52,11 +52,11 @@ An open-source, real-time desktop **AI companion** with voice, memory, and a cus
 
 | 系统 | 芯片 / 架构 | 立即下载 |
 | --- | --- | --- |
-| Windows 10 / 11 | x64 | [![立即下载](https://img.shields.io/badge/%E7%AB%8B%E5%8D%B3%E4%B8%8B%E8%BD%BD-Windows_x64-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/shenjingnan/zapmomo/releases/latest/download/ZapMomo_Windows_x64.exe) |
-| macOS 13+ | Apple Silicon（M1/M2/M3/M4） | [![立即下载](https://img.shields.io/badge/%E7%AB%8B%E5%8D%B3%E4%B8%8B%E8%BD%BD-macOS_arm64-8E8E93?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/shenjingnan/zapmomo/releases/latest/download/ZapMomo_macOS_arm64.dmg) |
-| macOS 13+ | Intel | [![立即下载](https://img.shields.io/badge/%E7%AB%8B%E5%8D%B3%E4%B8%8B%E8%BD%BD-macOS_x64-8E8E93?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/shenjingnan/zapmomo/releases/latest/download/ZapMomo_macOS_x64.dmg) |
-| Ubuntu / Debian | amd64 | [![立即下载](https://img.shields.io/badge/%E7%AB%8B%E5%8D%B3%E4%B8%8B%E8%BD%BD-Linux_amd64-A80030?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/shenjingnan/zapmomo/releases/latest/download/ZapMomo_Linux_amd64.deb) |
-| Fedora / RHEL | x86_64 | [![立即下载](https://img.shields.io/badge/%E7%AB%8B%E5%8D%B3%E4%B8%8B%E8%BD%BD-Linux_x86_64-294172?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/shenjingnan/zapmomo/releases/latest/download/ZapMomo_Linux_x86_64.rpm) |
+| Windows 10 / 11 | x64 | [![立即下载](https://img.shields.io/badge/%E7%AB%8B%E5%8D%B3%E4%B8%8B%E8%BD%BD-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/shenjingnan/zapmomo/releases/latest/download/ZapMomo_Windows_x64.exe) |
+| macOS 13+ | Apple Silicon（M1/M2/M3/M4） | [![立即下载](https://img.shields.io/badge/%E7%AB%8B%E5%8D%B3%E4%B8%8B%E8%BD%BD-8E8E93?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/shenjingnan/zapmomo/releases/latest/download/ZapMomo_macOS_arm64.dmg) |
+| macOS 13+ | Intel | [![立即下载](https://img.shields.io/badge/%E7%AB%8B%E5%8D%B3%E4%B8%8B%E8%BD%BD-8E8E93?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/shenjingnan/zapmomo/releases/latest/download/ZapMomo_macOS_x64.dmg) |
+| Ubuntu / Debian | amd64 | [![立即下载](https://img.shields.io/badge/%E7%AB%8B%E5%8D%B3%E4%B8%8B%E8%BD%BD-A80030?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/shenjingnan/zapmomo/releases/latest/download/ZapMomo_Linux_amd64.deb) |
+| Fedora / RHEL | x86_64 | [![立即下载](https://img.shields.io/badge/%E7%AB%8B%E5%8D%B3%E4%B8%8B%E8%BD%BD-294172?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/shenjingnan/zapmomo/releases/latest/download/ZapMomo_Linux_x86_64.rpm) |
 
 - Windows 企业批量部署可选 [MSI 版](https://github.com/shenjingnan/zapmomo/releases/latest/download/ZapMomo_Windows_x64.msi)；Linux 可选 [AppImage](https://github.com/shenjingnan/zapmomo/releases/latest/download/ZapMomo_Linux_amd64.AppImage) 免安装直接运行。
 - 完整版本与更新日志见 [Releases](https://github.com/shenjingnan/zapmomo/releases)。

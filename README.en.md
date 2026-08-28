@@ -50,11 +50,11 @@ Click a button below to grab the latest installer for your system (no GitHub log
 
 | OS | Chip / Arch | Download |
 | --- | --- | --- |
-| Windows 10 / 11 | x64 | [![Download](https://img.shields.io/badge/Download-Windows_x64-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/shenjingnan/zapmomo/releases/latest/download/ZapMomo_Windows_x64.exe) |
-| macOS 13+ | Apple Silicon (M1/M2/M3/M4) | [![Download](https://img.shields.io/badge/Download-macOS_arm64-8E8E93?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/shenjingnan/zapmomo/releases/latest/download/ZapMomo_macOS_arm64.dmg) |
-| macOS 13+ | Intel | [![Download](https://img.shields.io/badge/Download-macOS_x64-8E8E93?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/shenjingnan/zapmomo/releases/latest/download/ZapMomo_macOS_x64.dmg) |
-| Ubuntu / Debian | amd64 | [![Download](https://img.shields.io/badge/Download-Linux_amd64-A80030?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/shenjingnan/zapmomo/releases/latest/download/ZapMomo_Linux_amd64.deb) |
-| Fedora / RHEL | x86_64 | [![Download](https://img.shields.io/badge/Download-Linux_x86_64-294172?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/shenjingnan/zapmomo/releases/latest/download/ZapMomo_Linux_x86_64.rpm) |
+| Windows 10 / 11 | x64 | [![Download](https://img.shields.io/badge/Download-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/shenjingnan/zapmomo/releases/latest/download/ZapMomo_Windows_x64.exe) |
+| macOS 13+ | Apple Silicon (M1/M2/M3/M4) | [![Download](https://img.shields.io/badge/Download-8E8E93?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/shenjingnan/zapmomo/releases/latest/download/ZapMomo_macOS_arm64.dmg) |
+| macOS 13+ | Intel | [![Download](https://img.shields.io/badge/Download-8E8E93?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/shenjingnan/zapmomo/releases/latest/download/ZapMomo_macOS_x64.dmg) |
+| Ubuntu / Debian | amd64 | [![Download](https://img.shields.io/badge/Download-A80030?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/shenjingnan/zapmomo/releases/latest/download/ZapMomo_Linux_amd64.deb) |
+| Fedora / RHEL | x86_64 | [![Download](https://img.shields.io/badge/Download-294172?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/shenjingnan/zapmomo/releases/latest/download/ZapMomo_Linux_x86_64.rpm) |
 
 - For Windows enterprise mass deployment there is also an [MSI build](https://github.com/shenjingnan/zapmomo/releases/latest/download/ZapMomo_Windows_x64.msi); on Linux there is also an [AppImage](https://github.com/shenjingnan/zapmomo/releases/latest/download/ZapMomo_Linux_amd64.AppImage) that runs without installation.
 - See [Releases](https://github.com/shenjingnan/zapmomo/releases) for the full version history and changelogs.
