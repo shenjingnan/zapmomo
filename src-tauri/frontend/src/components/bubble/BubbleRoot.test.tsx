@@ -1,8 +1,19 @@
+import { LogicalSize, PhysicalPosition } from "@tauri-apps/api/dpi";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { BubbleRoot } from "./BubbleRoot";
 
-const { invokeMock, listenMock, eventHandlers, setIgnoreMock, onMovedHandlers } = vi.hoisted(() => {
+const {
+  invokeMock,
+  listenMock,
+  eventHandlers,
+  setIgnoreMock,
+  onMovedHandlers,
+  winState,
+  setSizeMock,
+  setPositionMock,
+  roInstances,
+} = vi.hoisted(() => {
   const handlers: Record<string, (payload: unknown) => void> = {};
   return {
     invokeMock: vi.fn(),
@@ -15,8 +26,45 @@ const { invokeMock, listenMock, eventHandlers, setIgnoreMock, onMovedHandlers } 
     onMovedHandlers: {
       current: undefined as undefined | ((e: { payload: { x: number; y: number } }) => void),
     },
+    // 窗口几何（物理像素，2x 缩放）：初始 480×180 @ (100, 400)，setSize/setPosition 真实回写
+    winState: { x: 100, y: 400, w: 960, h: 360 },
+    setSizeMock: vi.fn(async (s: { width: number; height: number; type?: string }) => {
+      const logical = s.type === "Logical";
+      winState.w = logical ? s.width * 2 : s.width;
+      winState.h = logical ? s.height * 2 : s.height;
+    }),
+    setPositionMock: vi.fn(async (p: { x: number; y: number }) => {
+      winState.x = p.x;
+      winState.y = p.y;
+    }),
+    roInstances: [] as { cb: ResizeObserverCallback }[],
   };
 });
+
+// jsdom 无 ResizeObserver：stub 捕获实例，测试手动派发 contentRect 变化
+class ROStub {
+  cb: ResizeObserverCallback;
+  constructor(cb: ResizeObserverCallback) {
+    this.cb = cb;
+    roInstances.push(this);
+  }
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+vi.stubGlobal("ResizeObserver", ROStub);
+
+/** 手动触发气泡容器的 ResizeObserver 回调（height 为逻辑像素）。 */
+const fireBubbleResize = (height: number) => {
+  const ro = roInstances.at(-1);
+  if (!ro) throw new Error("ResizeObserver 未挂载");
+  act(() => {
+    ro.cb(
+      [{ contentRect: { width: 448, height } }] as unknown as ResizeObserverEntry[],
+      ro as unknown as ResizeObserver,
+    );
+  });
+};
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: listenMock }));
@@ -29,6 +77,10 @@ vi.mock("@tauri-apps/api/window", () => ({
       return Promise.resolve(() => {});
     }),
     scaleFactor: vi.fn(() => Promise.resolve(2)),
+    innerSize: vi.fn(() => Promise.resolve({ width: winState.w, height: winState.h })),
+    outerPosition: vi.fn(() => Promise.resolve({ x: winState.x, y: winState.y })),
+    setSize: setSizeMock,
+    setPosition: setPositionMock,
   })),
 }));
 
@@ -41,6 +93,12 @@ function emit(event: string, payload: unknown) {
 describe("BubbleRoot（气泡窗口根组件）", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    roInstances.length = 0;
+    // 窗口几何复位：480×180 @ (100, 400)，物理像素（2x）
+    winState.x = 100;
+    winState.y = 400;
+    winState.w = 960;
+    winState.h = 360;
     // useVoiceSession / getLive2dConfig 等所有命令默认放行
     invokeMock.mockResolvedValue(undefined);
     setIgnoreMock.mockClear();
@@ -129,5 +187,38 @@ describe("BubbleRoot（气泡窗口根组件）", () => {
     await act(async () => {});
     emit("dsh-speak", { text: "置底不播", event: {} });
     expect(screen.queryByText("置底不播")).toBeNull();
+  });
+
+  // ---- 窗口高度随内容自适应（底边锚定向上生长）----
+
+  it("气泡内容增高时窗口高度跟随，底边锚定向上生长", async () => {
+    render(<BubbleRoot />);
+    emit("voice-session-token", { delta: "你好" });
+    expect(screen.getByText("你好")).toBeTruthy();
+    // 内容 100 逻辑像素 → 期望窗口高 100 + 12(pt) + 26(阴影扩散) = 138
+    fireBubbleResize(100);
+    await waitFor(() => expect(setSizeMock).toHaveBeenLastCalledWith(new LogicalSize(480, 138)));
+    // dy = 138 - 180 = -42 → y = 400 - (-42 × 2) = 484；底边不变：400+360 === 484+276
+    expect(setPositionMock).toHaveBeenLastCalledWith(new PhysicalPosition(100, 484));
+  });
+
+  it("内容高度未变化时不重复调整窗口", async () => {
+    render(<BubbleRoot />);
+    fireBubbleResize(100);
+    await waitFor(() => expect(setSizeMock).toHaveBeenLastCalledWith(new LogicalSize(480, 138)));
+    setSizeMock.mockClear();
+    setPositionMock.mockClear();
+    fireBubbleResize(100);
+    await act(async () => {});
+    expect(setSizeMock).not.toHaveBeenCalled();
+    expect(setPositionMock).not.toHaveBeenCalled();
+  });
+
+  it("内容清空（点击关闭）后窗口缩回最小高度", async () => {
+    render(<BubbleRoot />);
+    fireBubbleResize(60); // 60 + 38 = 98
+    await waitFor(() => expect(setSizeMock).toHaveBeenLastCalledWith(new LogicalSize(480, 98)));
+    fireBubbleResize(0); // 内容消失 → 仅剩上下留白（38），纯透明不可见
+    await waitFor(() => expect(setSizeMock).toHaveBeenLastCalledWith(new LogicalSize(480, 38)));
   });
 });
