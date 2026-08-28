@@ -16,7 +16,7 @@
     <br />
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPL--3.0-blue" alt="License: GPL-3.0" /></a>
     <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Rust-1.97%2B-dea584?logo=rust" alt="Rust 1.97+" /></a>
-    <a href="#app-download"><img src="https://img.shields.io/badge/Windows-0078D6?logo=windows&logoColor=white" alt="Windows support" /></a>
+    <a href="#app-download"><img src="https://img.shields.io/badge/Windows-0078D6?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI%2BPHBhdGggZmlsbD0iI2ZmZiIgZD0iTTIuNSAyLjVoOXY5aC05ek0xMi41IDIuNWg5djloLTl6TTIuNSAxMi41aDl2OWgtOXpNMTIuNSAxMi41aDl2OWgtOXoiLz48L3N2Zz4%3D" alt="Windows support" /></a>
     <a href="#app-download"><img src="https://img.shields.io/badge/macOS-000000?logo=apple&logoColor=white" alt="macOS support" /></a>
     <a href="#app-download"><img src="https://img.shields.io/badge/Linux-FCC624?logo=linux&logoColor=black" alt="Linux support" /></a>
   </p>
@@ -50,7 +50,7 @@ Click a button below to grab the latest installer for your system (no GitHub log
 
 | OS | Chip / Arch | Download |
 | --- | --- | --- |
-| Windows 10 / 11 | x64 | [![Download](https://img.shields.io/badge/Download-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/shenjingnan/zapmomo/releases/latest/download/ZapMomo_Windows_x64.exe) |
+| Windows 10 / 11 | x64 | [![Download](https://img.shields.io/badge/Download-0078D6?style=for-the-badge&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI%2BPHBhdGggZmlsbD0iI2ZmZiIgZD0iTTIuNSAyLjVoOXY5aC05ek0xMi41IDIuNWg5djloLTl6TTIuNSAxMi41aDl2OWgtOXpNMTIuNSAxMi41aDl2OWgtOXoiLz48L3N2Zz4%3D)](https://github.com/shenjingnan/zapmomo/releases/latest/download/ZapMomo_Windows_x64.exe) |
 | macOS 13+ | Apple Silicon (M1/M2/M3/M4) | [![Download](https://img.shields.io/badge/Download-8E8E93?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/shenjingnan/zapmomo/releases/latest/download/ZapMomo_macOS_arm64.dmg) |
 | macOS 13+ | Intel | [![Download](https://img.shields.io/badge/Download-8E8E93?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/shenjingnan/zapmomo/releases/latest/download/ZapMomo_macOS_x64.dmg) |
 | Ubuntu / Debian | amd64 | [![Download](https://img.shields.io/badge/Download-A80030?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/shenjingnan/zapmomo/releases/latest/download/ZapMomo_Linux_amd64.deb) |
