@@ -229,7 +229,7 @@ impl AnthropicProvider {
         &self,
         request: ChatRequest,
         options: &ChatOptions,
-        emit: &mut dyn FnMut(OutputItem),
+        emit: &mut (dyn FnMut(OutputItem) + Send),
         cancel: &AtomicBool,
     ) -> Result<FinishReason, LlmError> {
         let mut stream = self

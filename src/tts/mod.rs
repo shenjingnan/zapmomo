@@ -986,7 +986,7 @@ mod tests {
                 let _ = std::io::Read::read_to_string(request.as_reader(), &mut body);
                 let mut events = String::new();
                 for _ in 0..2 {
-                    let pcm: Vec<u8> = vec![0x10, 0x27]
+                    let pcm: Vec<u8> = [0x10, 0x27]
                         .iter()
                         .cycle()
                         .take(samples_per_chunk * 2)

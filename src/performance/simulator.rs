@@ -467,7 +467,7 @@ mod tests {
     #[test]
     fn typing_without_letters_falls_back_to_pool_keys() {
         // 键池无字母键（如仅 Fn/Enter）时，退路随机敲池内键，仍产出事件且键在池内
-        let keys = vec!["Fn", "Enter", "Space"];
+        let keys = ["Fn", "Enter", "Space"];
         let mut src = TypingSimulator::new(keys.iter().map(|s| s.to_string()).collect());
         let mut rng = Rng::new(5);
         let mut count = 0;

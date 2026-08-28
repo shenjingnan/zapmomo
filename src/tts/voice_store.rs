@@ -221,7 +221,7 @@ mod tests {
             // 源不存在
             assert!(save_voice("名字", &home.join("nope.wav"), "文本").is_err());
             // 非 wav（缺 RIFF 头）
-            std::fs::write(&home.join("bad.txt"), b"not a wav").unwrap();
+            std::fs::write(home.join("bad.txt"), b"not a wav").unwrap();
             assert!(save_voice("名字", &home.join("bad.txt"), "文本").is_err());
         });
     }
