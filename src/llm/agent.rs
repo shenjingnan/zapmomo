@@ -117,7 +117,7 @@ mod tests {
 
     #[test]
     fn test_agent_loop_executes_tool_then_returns_text() {
-        let agent = Agent::new(ToolRuntime::new());
+        let agent = Agent::new(ToolRuntime::new(false));
         let mut provider = MockProvider;
         let input = vec![InputItem::Message(ChatMessage::new(
             ChatRole::User,

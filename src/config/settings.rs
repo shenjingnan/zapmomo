@@ -562,7 +562,25 @@ pub struct LlmSettings {
     /// 是否启用 LLM，缺省 false
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
-    /// provider 标识，缺省 "openai"（OpenAI 兼容 API）
+    /// 是否启用 CLI 工具（run_command，允许模型执行 shell 命令），缺省 false。
+    /// 开启前请知悉风险：模型产出的命令会在本机真实执行（有危险命令拦截、
+    /// 超时与输出截断等兜底，但不是安全沙箱）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli_tools: Option<bool>,
+    /// 是否启用 prompt caching（缓存对话前缀降延迟/成本），缺省 true；
+    /// 仅 provider = "anthropic" 时生效
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache: Option<bool>,
+    /// 是否启用思考（extended thinking 开关），缺省按「是否配置了推理强度」推断：
+    /// 未显式配置时，配过 reasoning_effort 视为 true，否则 false（最快响应）。
+    /// 仅 provider = "anthropic" 时生效
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<bool>,
+    /// 思考力度（"low" / "medium" / "high" / "max"），仅 thinking 生效时发送。
+    /// 开关关闭时该值仍持久化，但运行时忽略；仅 provider = "anthropic" 时生效
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    /// provider 标识，缺省 "openai"（OpenAI 兼容 API）；可选 "anthropic"（原生 Messages API）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     /// 角色 system prompt，缺省用内置默认
@@ -595,7 +613,7 @@ pub struct LlmSettings {
     /// HTTP provider 的 API key（本地 server / Ollama 可留空）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
-    /// HTTP provider 的模型名（如 glm-4.7-flash / gpt-4o-mini）
+    /// HTTP provider 的模型名（如 glm-4.7-flash / gpt-4o-mini / claude-haiku-4-5）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
 }

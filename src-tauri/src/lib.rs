@@ -1476,6 +1476,10 @@ struct LlmConfigInfo {
     /// 前端默认 password 圆点展示，用户点小眼睛才显式明文）。
     api_key: Option<String>,
     model: Option<String>,
+    /// 是否启用思考（已 resolve 缺省推断；仅 anthropic provider 生效）
+    thinking: bool,
+    /// 思考力度（thinking 关闭时保留原值但运行时忽略）
+    reasoning_effort: Option<String>,
 }
 
 /// 加载状态事件载荷。
@@ -1552,6 +1556,8 @@ fn get_llm_config(state: State<'_, LlmState>) -> Result<LlmConfigInfo, String> {
         base_url: cfg.base_url,
         api_key: cfg.api_key,
         model: cfg.model,
+        thinking: cfg.thinking,
+        reasoning_effort: cfg.reasoning_effort,
     })
 }
 
@@ -2486,7 +2492,11 @@ fn set_llm_connection(
 ) -> Result<(), String> {
     let mut settings = settings::load_settings()?.unwrap_or_default();
     let llm = settings.llm.get_or_insert_with(LlmSettings::default);
-    llm.provider = Some("openai".to_string());
+    // provider 仅在未设置时默认 "openai"；已配置的（如 "anthropic"）保留，
+    // 避免设置页保存连接时把其他 provider 重置回 OpenAI 兼容
+    if llm.provider.is_none() {
+        llm.provider = Some("openai".to_string());
+    }
     if !base_url.trim().is_empty() {
         llm.base_url = Some(base_url.trim().to_string());
     }

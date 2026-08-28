@@ -1,11 +1,13 @@
-/// LLM 模块（OpenAI 兼容远程 API）。
+/// LLM 模块（远程 API）。
 ///
 /// 分层：
 /// - `LlmEngine`（门面）：生命周期 + worker 线程 + 命令/事件 channel，供 CLI/Tauri 使用。
 /// - `LlmProvider`（trait）：后端抽象。
 /// - `http`：`OpenAiChatProvider`，OpenAI 兼容 Chat Completions API（智谱 GLM /
 ///   DeepSeek / OpenRouter / llama-server 等）。
+/// - `anthropic`：`AnthropicProvider`，Anthropic 原生 Messages API（基于 genai crate）。
 pub mod agent;
+pub mod anthropic;
 pub mod config;
 pub mod error;
 pub mod http;
@@ -202,7 +204,8 @@ impl Drop for LlmEngine {
 
 /// 根据配置创建 provider。
 ///
-/// 只支持 OpenAI 兼容 Chat Completions（"openai" / "llamacpp-server"）。
+/// 支持 OpenAI 兼容 Chat Completions（"openai" / "llamacpp-server"）与 Anthropic
+/// 原生 Messages API（"anthropic"）。
 /// 本地 llama.cpp 推理已移除：需要本地模型请自行部署 Ollama / llama-server，
 /// 经 OpenAI 兼容 API 接入。
 pub fn create_provider(
@@ -210,6 +213,7 @@ pub fn create_provider(
 ) -> Result<Box<dyn provider::LlmProvider>, LlmError> {
     match config.provider.as_str() {
         "openai" | "llamacpp-server" => Ok(Box::new(http::OpenAiChatProvider::new(&config)?)),
+        "anthropic" => Ok(Box::new(anthropic::AnthropicProvider::new(&config)?)),
         other => Err(LlmError::UnsupportedProvider(other.to_string())),
     }
 }
@@ -228,6 +232,7 @@ fn worker_loop(
     generating: Arc<AtomicBool>,
     ready: Arc<AtomicBool>,
 ) {
+    let cli_tools = config.cli_tools;
     let mut provider = match create_provider(config) {
         Ok(p) => p,
         Err(e) => {
@@ -235,7 +240,7 @@ fn worker_loop(
             return;
         }
     };
-    let agent = Agent::new(ToolRuntime::new());
+    let agent = Agent::new(ToolRuntime::new(cli_tools));
 
     while let Ok(cmd) = cmd_rx.recv() {
         match cmd {
@@ -311,6 +316,10 @@ mod tests {
     fn engine_test_config() -> crate::llm::config::ResolvedLlmConfig {
         crate::llm::config::ResolvedLlmConfig {
             enabled: true,
+            cli_tools: false,
+            prompt_cache: true,
+            thinking: false,
+            reasoning_effort: None,
             provider: "openai".to_string(),
             system_prompt: String::new(),
             params: GenParams::default(),
