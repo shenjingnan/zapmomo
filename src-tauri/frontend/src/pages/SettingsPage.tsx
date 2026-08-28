@@ -3,6 +3,7 @@ import { CircleAlert, FolderOpen, HardDrive, Settings2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { DeviceSelect } from "@/components/DeviceSelect";
 import { ModelDialog } from "@/components/models/ModelDialog";
+import { CompanionWindowSection } from "@/components/settings/CompanionWindowSection";
 import { DshSection } from "@/components/settings/DshSection";
 import { ShortcutsSection } from "@/components/settings/ShortcutsSection";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -222,6 +223,10 @@ export function SettingsPage() {
           </div>
         )}
       </section>
+
+      {/* 伙伴窗口（层级 / 点击穿透 / 锁定 / 修饰键拖动，全局生效） */}
+      <CompanionWindowSection />
+
 
       {/* 存储位置（数据目录） */}
       <section className="overflow-hidden rounded-[16px] border border-panel-border bg-panel-background">
