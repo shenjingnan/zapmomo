@@ -1,23 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { groupKokoroVoices, isCloneRequiredTtsKind, isCloneTtsKind, ttsModelKindLabel } from "./ttsMeta";
+import { isCloneRequiredTtsKind, isCloneTtsKind, ttsModelKindLabel } from "./ttsMeta";
 import { TTS_PRESETS } from "@/hooks/useTtsModelSwitch";
-import type { TtsVoice } from "@/types/tauri";
-
-function kv(id: string, group: TtsVoice["group"], sid: number | null): TtsVoice {
-  return { id, name: id, wav_path: "", reference_text: "", custom: false, sid, group };
-}
 
 describe("ttsModelKindLabel", () => {
-  it("kokoro 有专属标签", () => {
-    expect(ttsModelKindLabel("kokoro")).toBe("Kokoro");
+  it("zipvoice 有专属标签", () => {
     expect(ttsModelKindLabel("zipvoice")).toBe("ZipVoice 克隆");
     expect(ttsModelKindLabel("unknown")).toBe("TTS");
   });
 
-  it("omnivoice 有专属标签（克隆族）", () => {
+  it("omnivoice/voxcpm2 有专属标签（克隆族）", () => {
     expect(ttsModelKindLabel("omnivoice")).toBe("OmniVoice 克隆");
     expect(ttsModelKindLabel("voxcpm2")).toBe("VoxCPM2 克隆");
-    expect(ttsModelKindLabel("pocket")).toBe("PocketTTS");
   });
 
   it("qwen3_tts 两尺寸均为 Qwen3-TTS 克隆标签", () => {
@@ -31,6 +24,7 @@ describe("isCloneTtsKind / isCloneRequiredTtsKind", () => {
     for (const kind of ["zipvoice", "omnivoice", "voxcpm2", "qwen3_tts_06", "qwen3_tts_17"]) {
       expect(isCloneTtsKind(kind), kind).toBe(true);
     }
+    // 已移除的 vits/matcha/kokoro/pocket 及未知值均非克隆族
     for (const kind of ["kokoro", "vits", "matcha", "pocket", ""]) {
       expect(isCloneTtsKind(kind), kind).toBe(false);
     }
@@ -68,40 +62,21 @@ describe("TTS_PRESETS", () => {
     expect(q17?.kind).toBe("qwen3_tts_17");
   });
 
+  it("已移除的模型不再出现在预设中", () => {
+    const removed = [
+      "tts-vits-melo-zh-en",
+      "tts-matcha-zh-baker",
+      "tts-kokoro-int8-multi-lang-v1-1",
+      "tts-kokoro-multi-lang-v1-1",
+      "tts-pocket-english-audiocpp",
+    ];
+    for (const id of removed) {
+      expect(TTS_PRESETS.find((p) => p.id === id), id).toBeUndefined();
+    }
+  });
+
   it("id 唯一（防预设重复注册）", () => {
     const ids = TTS_PRESETS.map((p) => p.id);
     expect(new Set(ids).size).toBe(ids.length);
-  });
-});
-
-describe("groupKokoroVoices", () => {
-  it("按语言分组且中文优先（女声 → 男声 → 英文）", () => {
-    const voices = [
-      kv("af_maple", "english_female", 0),
-      kv("zm_009", "chinese_male", 58),
-      kv("zf_001", "chinese_female", 3),
-      kv("zf_002", "chinese_female", 4),
-    ];
-    const groups = groupKokoroVoices(voices);
-    expect(groups.map((g) => g.group)).toEqual([
-      "chinese_female",
-      "chinese_male",
-      "english_female",
-    ]);
-    expect(groups[0].label).toBe("中文女声");
-    expect(groups[0].items.map((v) => v.id)).toEqual(["zf_001", "zf_002"]);
-    expect(groups[1].items).toHaveLength(1);
-    expect(groups[2].items).toHaveLength(1);
-  });
-
-  it("空分组被过滤；无 group 的音色（zipvoice 混入）不归入任何组", () => {
-    const voices = [kv("zf_001", "chinese_female", 3), kv("leijun-1", null, null)];
-    const groups = groupKokoroVoices(voices);
-    expect(groups).toHaveLength(1);
-    expect(groups[0].items).toHaveLength(1);
-  });
-
-  it("空列表返回空数组", () => {
-    expect(groupKokoroVoices([])).toEqual([]);
   });
 });

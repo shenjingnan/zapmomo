@@ -192,7 +192,7 @@ impl VoiceSession {
         };
         let llm_rx = llm.subscribe();
         let tts = TtsEngine::new(cfg.tts.clone())?;
-        // 合成音色参数统一解析（角色包克隆音色 > zipvoice/omnivoice 克隆 > kokoro 等 sid > audiocpp 具名）
+        // 合成音色参数统一解析（角色包克隆音色 > zipvoice/omnivoice 克隆 > 缺省兜底）
         let voice = crate::tts::voice::resolve_voice_params(
             &cfg.tts,
             cfg.voice_id.as_deref(),
@@ -1196,10 +1196,7 @@ mod tests {
         for kind in [
             TtsModelKind::Omnivoice,
             TtsModelKind::Voxcpm2,
-            TtsModelKind::Pocket,
             TtsModelKind::Zipvoice,
-            TtsModelKind::Vits,
-            TtsModelKind::Kokoro,
         ] {
             assert!(
                 matches!(

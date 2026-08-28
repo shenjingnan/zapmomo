@@ -10,10 +10,7 @@ use crate::tts::config::TtsModelKind;
 /// 音色语义（决定 [`crate::tts::TtsVoiceParams`] 到请求体字段的映射，见 client）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VoiceSemantics {
-    /// 固定具名音色（pocket）：`Named`/缺省 → 该音色；`Sid` → 默认音色；
-    /// `Reference` → 不支持（报错）。
-    FixedNamed(&'static str),
-    /// 参考音频克隆（omnivoice）：`Reference` → `voice_ref`+`reference_text`；
+    /// 参考音频克隆（omnivoice/voxcpm2）：`Reference` → `voice_ref`+`reference_text`；
     /// `Named` → 透传 `voice`；`Sid`/缺省 → 省略 voice 字段（server auto voice）。
     ReferenceClone,
     /// 强制参考音频克隆（qwen3_tts Base）：与 [`VoiceSemantics::ReferenceClone`]
@@ -37,8 +34,8 @@ pub struct AudiocppFamilyDesc {
     /// 输出采样率初值（Hz；client 首响应按 wav 头校准）。
     pub sample_rate: i32,
     /// 缺省推理后端（server `backend`）；用户显式配置 `[tts].provider` 优先。
-    /// pocket 100M 实测 CPU 快于 Metal；omnivoice 0.6B 实测 CPU RTF 6.6 不可用、
-    /// Metal RTF 0.41 达标（技术方案阶段 1 实测，2026-08-23）。
+    /// omnivoice 0.6B 实测 CPU RTF 6.6 不可用、Metal RTF 0.41 达标
+    /// （技术方案阶段 1 实测，2026-08-23）。
     pub default_provider: &'static str,
     /// 音色语义。
     pub voice_semantics: VoiceSemantics,
@@ -48,7 +45,7 @@ pub struct AudiocppFamilyDesc {
     pub allows_named_voice: bool,
     /// 是否支持 SSE 伪流式（server config `mode` 与请求体 `stream_format` 的依据）。
     /// 流式矩阵（audio.cpp release-0.6.1 实测/README）：omnivoice ✅、voxcpm2 ✅、
-    /// pocket_tts ❌、qwen3_tts ❌（上游 modes 仅 offline）、sherpa 全族 ❌
+    /// qwen3_tts ❌（上游 modes 仅 offline）、sherpa 全族 ❌
     /// （`OfflineTts` 整段合成，无 sidecar 语义）。
     /// offline-mode server 会拒绝 SSE 请求（实测 HTTP 500），故该标记同时决定
     /// server config 的 `mode:"streaming"` 翻转——两者必须同源。
@@ -58,12 +55,10 @@ pub struct AudiocppFamilyDesc {
 }
 
 impl AudiocppFamilyDesc {
-    /// server config `load_options`（pocket 需显式 language；omnivoice/voxcpm2 自动）。
+    /// server config `load_options`（当前收录族均自动推导，恒空对象；
+    /// 保留方法作为新增模型族的族差异扩展点）。
     pub fn load_options(&self) -> serde_json::Value {
-        match self.family {
-            "pocket_tts" => serde_json::json!({ "language": "english" }),
-            _ => serde_json::json!({}),
-        }
+        serde_json::json!({})
     }
 
     /// 请求体 `options` 的族差异项（整段与流式两路径都携带）。
@@ -78,24 +73,6 @@ impl AudiocppFamilyDesc {
         }
     }
 }
-
-/// PocketTTS English q8_0（固定音色 alba，CPU 友好）。
-///
-/// `POCKET_EMBEDDINGS_FILE` 单独导出供 registry role 映射引用（切片索引
-/// 不能常量提升），与 `POCKET.required_files[1]` 的一致性由测试锚定。
-pub const POCKET_EMBEDDINGS_FILE: &str = "embeddings/alba.safetensors";
-pub const POCKET: AudiocppFamilyDesc = AudiocppFamilyDesc {
-    model_id: "pocket-tts-english",
-    family: "pocket_tts",
-    gguf_file: "pocket-tts-english-q8_0.gguf",
-    required_files: &["pocket-tts-english-q8_0.gguf", POCKET_EMBEDDINGS_FILE],
-    sample_rate: 24_000,
-    default_provider: "cpu",
-    voice_semantics: VoiceSemantics::FixedNamed("alba"),
-    allows_named_voice: true,
-    supports_streaming: false,
-    registry_hint: "zapmomo tts install-model --registry-id tts-pocket-english-audiocpp",
-};
 
 /// OmniVoice q8_0（Qwen3-0.6B 基座，600+ 语种零样本克隆 + 声音设计；Metal 必需）。
 ///
@@ -169,7 +146,6 @@ pub const QWEN3_TTS_17B: AudiocppFamilyDesc = AudiocppFamilyDesc {
 /// 按模型类型查表；sherpa-only kind 返回 None（audiocpp 后端不支持该组合）。
 pub fn family_desc(kind: TtsModelKind) -> Option<&'static AudiocppFamilyDesc> {
     match kind {
-        TtsModelKind::Pocket => Some(&POCKET),
         TtsModelKind::Omnivoice => Some(&OMNIVOICE),
         TtsModelKind::Voxcpm2 => Some(&VOXCPM2),
         TtsModelKind::Qwen3Tts06 => Some(&QWEN3_TTS_06B),
@@ -182,13 +158,9 @@ pub fn family_desc(kind: TtsModelKind) -> Option<&'static AudiocppFamilyDesc> {
 mod tests {
     use super::*;
 
-    /// 表覆盖锚点：pocket/omnivoice 可查，sherpa 族与 Kitten/Supertonic 不可查。
+    /// 表覆盖锚点：omnivoice/voxcpm2/qwen3 可查，sherpa 族与 Kitten/Supertonic 不可查。
     #[test]
     fn test_family_desc_coverage() {
-        assert_eq!(
-            family_desc(TtsModelKind::Pocket).unwrap().family,
-            "pocket_tts"
-        );
         assert_eq!(
             family_desc(TtsModelKind::Omnivoice).unwrap().family,
             "omnivoice"
@@ -199,9 +171,6 @@ mod tests {
         );
         for kind in [
             TtsModelKind::Zipvoice,
-            TtsModelKind::Vits,
-            TtsModelKind::Matcha,
-            TtsModelKind::Kokoro,
             TtsModelKind::Kitten,
             TtsModelKind::Supertonic,
         ] {
@@ -209,7 +178,7 @@ mod tests {
         }
     }
 
-    /// omnivoice 单文件清单 / metal 默认后端 / 克隆语义；pocket 双文件 + cpu。
+    /// omnivoice 单文件清单 / metal 默认后端 / 克隆语义。
     #[test]
     fn test_family_records_shape() {
         let omni = family_desc(TtsModelKind::Omnivoice).unwrap();
@@ -219,19 +188,7 @@ mod tests {
         assert!(omni.supports_streaming, "omnivoice 支持 SSE 伪流式");
         assert_eq!(omni.load_options(), serde_json::json!({}));
 
-        let pocket = family_desc(TtsModelKind::Pocket).unwrap();
-        assert_eq!(pocket.required_files.len(), 2);
-        // 单独导出的 embeddings 常量与清单第 2 项一致（registry 引用它）
-        assert_eq!(pocket.required_files[1], POCKET_EMBEDDINGS_FILE);
-        assert_eq!(pocket.default_provider, "cpu");
-        assert_eq!(pocket.voice_semantics, VoiceSemantics::FixedNamed("alba"));
-        assert!(!pocket.supports_streaming, "pocket 上游无流式支持");
-        assert_eq!(
-            pocket.load_options(),
-            serde_json::json!({ "language": "english" })
-        );
         // model_id 与 registry id 提示一一对应（preflight 提示语可执行）
-        assert!(pocket.registry_hint.contains("tts-pocket-english-audiocpp"));
         assert!(omni.registry_hint.contains("tts-omnivoice-q8-audiocpp"));
 
         // voxcpm2：48kHz / 帧级流式 / Named 不透传 / retry_badcase 硬约束

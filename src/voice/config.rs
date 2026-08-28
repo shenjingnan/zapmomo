@@ -415,8 +415,8 @@ mod tests {
         run_with_temp_home(|home| {
             import_active_character(home);
             let mut cfg = resolve(None, &CliOverrides::default()).unwrap();
-            // 非克隆模型（Kokoro）→ 人设仍覆盖，音色不注入
-            cfg.tts.model_type = crate::tts::config::TtsModelKind::Kokoro;
+            // 非克隆模型（未收录二期占位 kind）→ 人设仍覆盖，音色不注入
+            cfg.tts.model_type = crate::tts::config::TtsModelKind::Kitten;
             apply_companion_overrides(&mut cfg);
             assert!(cfg.llm.system_prompt.contains("芙宁娜"));
             assert!(cfg.character_voice.is_none());

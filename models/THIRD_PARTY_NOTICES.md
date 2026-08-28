@@ -43,22 +43,6 @@
 - **许可证**: Apache-2.0（依据 sherpa-onnx 项目整体许可；如需商用请以官方模型发布页的许可说明为准）
 - **sha256**: `bcb3b970e384161c4d634f0bb9e999ff1c471b34c9bc0b1049a5014065ed3cc0`
 
-## kokoro-int8-multi-lang-v1_1
-
-- **用途**: 中英双语文本转语音（TTS，Kokoro 103 音色，int8 量化）
-- **来源**: https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-int8-multi-lang-v1_1.tar.bz2
-- **发布方**: k2-fsa（sherpa-onnx 项目；模型源自 hexgrad/Kokoro-82M-v1.1-zh）
-- **许可证**: Apache-2.0（如需商用请以官方模型发布页的许可说明为准）
-- **sha256**: `a1e94694776049035c4f2c6529f003aaece993c76aae9a78995831c3c4dcafc6`
-
-## kokoro-multi-lang-v1_1
-
-- **用途**: 中英双语文本转语音（TTS，Kokoro 103 音色，fp32 未量化）
-- **来源**: https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-multi-lang-v1_1.tar.bz2
-- **发布方**: k2-fsa（sherpa-onnx 项目；模型源自 hexgrad/Kokoro-82M-v1.1-zh）
-- **许可证**: Apache-2.0（如需商用请以官方模型发布页的许可说明为准）
-- **sha256**: `a3f4c73d043860e3fd2e5b06f36795eb81de0fc8e8de6df703245edddd87dbad`
-
 ## sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17
 
 - **用途**: 离线多语言语音识别（ASR，zh/en/ja/ko/yue，含情绪/事件标签；int8 轻量版）
@@ -115,16 +99,6 @@
 - **许可证**: MIT（Silero VAD；如需商用请以官方模型发布页的许可说明为准）
 - **sha256**: `9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6`
 
-## pocket-tts-english-q8_0.gguf + embeddings/alba.safetensors（audio.cpp TTS）
-
-- **用途**: 英文文本转语音（TTS，PocketTTS 100M，q8_0 量化，固定音色 alba），
-  由内置的 audio.cpp 引擎（sidecar 进程）驱动
-- **来源**: https://huggingface.co/audio-cpp/audio.cpp-gguf/tree/main/PocketTTS-GGUF/english
-- **发布方**: audio-cpp（audio.cpp 官方 GGUF 仓库；模型源自 Kyutai PocketTTS）
-- **许可证**: Apache-2.0（依据 audio.cpp 仓库标注；如需商用请以模型发布页的许可说明为准）
-- **sha256**: gguf `0315406421d515d9ffbde49ed998832ff2962562ef8abde440c85fa0a27d8b2a` /
-  embeddings `69c32db63ca56843d994f81f343f62e0bf2d73f7e4c9bc73e44bb1110b1d8845`
-
 ## omnivoice-q8_0.gguf（audio.cpp TTS）
 
 - **用途**: 多语种文本转语音 + 零样本声音克隆（TTS，OmniVoice，Qwen3-0.6B 基座，
@@ -158,7 +132,7 @@
 ## audiocpp_server（audio.cpp 引擎二进制，随安装包分发）
 
 - **用途**: TTS 第二推理后端（ggml 系 audio.cpp 的 HTTP server sidecar，裁剪构建
-  仅含 pocket_tts + omnivoice + voxcpm2 + qwen3_tts 模型族；编译参数见 `.github/workflows/release.yml`）
+  仅含 omnivoice + voxcpm2 + qwen3_tts 模型族；编译参数见 `.github/workflows/release.yml`）
 - **来源**: https://github.com/0xShug0/audio.cpp（版本 pin 见 release.yml 的 AUDIOCPP_REF）
 - **发布方**: ShugoAI LLC（audio.cpp 项目）
 - **许可证**: Apache-2.0。随 ZapMomo（GPL-3.0-only）以独立进程形式聚合分发，

@@ -337,7 +337,6 @@ pub(crate) fn encode_wav(samples: &[f32], sample_rate: i32) -> Result<Vec<u8>, A
 
 /// 把音色参数按族语义映射进请求体（整段与流式两条路径共用）。
 ///
-/// - 固定具名音色（pocket）：`Named`/`Sid` → `voice`；`Reference` 报错；
 /// - 参考音频克隆（omnivoice/voxcpm2）：`Reference` → `voice_ref`+`reference_text`
 ///   （本地路径，sidecar 同机可读）；`Named` → 视 `allows_named_voice` 透传
 ///   `voice`（omnivoice 走 server 端 preset/voice_dir 通道）或提前拦截（voxcpm2
@@ -351,17 +350,6 @@ fn apply_voice_fields(
     voice: &TtsVoiceParams,
 ) -> Result<(), AudiocppError> {
     match (desc.voice_semantics, voice) {
-        (VoiceSemantics::FixedNamed(_), TtsVoiceParams::Named(v)) => {
-            body["voice"] = serde_json::json!(v);
-        }
-        (VoiceSemantics::FixedNamed(default), TtsVoiceParams::Sid(_)) => {
-            body["voice"] = serde_json::json!(default);
-        }
-        (VoiceSemantics::FixedNamed(default), TtsVoiceParams::Reference { .. }) => {
-            return Err(AudiocppError::UnsupportedVoice(format!(
-                "该 audio.cpp 模型为固定音色（{default}），不支持参考音频克隆"
-            )));
-        }
         (
             VoiceSemantics::ReferenceClone,
             TtsVoiceParams::Reference {
@@ -493,14 +481,6 @@ mod tests {
     use super::*;
     use crate::tts::config::TtsBackendKind;
 
-    fn audiocpp_cfg() -> ResolvedTtsConfig {
-        ResolvedTtsConfig {
-            backend: TtsBackendKind::Audiocpp,
-            model_type: crate::tts::config::TtsModelKind::Pocket,
-            ..ResolvedTtsConfig::default()
-        }
-    }
-
     fn omnivoice_cfg() -> ResolvedTtsConfig {
         ResolvedTtsConfig {
             backend: TtsBackendKind::Audiocpp,
@@ -607,38 +587,22 @@ mod tests {
     #[test]
     fn test_synthesize_against_stub_full_request_flow() {
         let (base_url, received, _handle) = spawn_stub();
-        let tts = AudiocppTts::new_with_base_url(audiocpp_cfg(), &base_url);
+        let tts = AudiocppTts::new_with_base_url(omnivoice_cfg(), &base_url);
         let out = tts
-            .synthesize("hello world", 1.0, &TtsVoiceParams::Named("alba".into()))
+            .synthesize(
+                "hello world",
+                1.0,
+                &TtsVoiceParams::Named("demo_01_man".into()),
+            )
             .unwrap();
         assert_eq!(out.len(), 2400);
         assert_eq!(tts.sample_rate(), 24000, "首响应校准采样率");
-        // 请求体断言：OpenAI 风格三件套
+        // 请求体断言：OpenAI 风格三件套（具名音色经 omnivoice preset 通道透传）
         let reqs = received.lock().unwrap();
         let last = reqs.last().unwrap();
-        assert_eq!(last["model"], "pocket-tts-english");
+        assert_eq!(last["model"], "omnivoice");
         assert_eq!(last["input"], "hello world");
-        assert_eq!(last["voice"], "alba");
-    }
-
-    #[test]
-    fn test_synthesize_voice_param_mapping() {
-        let (base_url, _received, _handle) = spawn_stub();
-        let tts = AudiocppTts::new_with_base_url(audiocpp_cfg(), &base_url);
-        // Sid → 后端默认音色 alba
-        tts.synthesize("x", 1.0, &TtsVoiceParams::Sid(0)).unwrap();
-        // Reference → UnsupportedVoice 错误（连接前拦截，无需 stub 也可测）
-        let err = tts
-            .synthesize(
-                "x",
-                1.0,
-                &TtsVoiceParams::Reference {
-                    wav_path: std::path::PathBuf::from("/r.wav"),
-                    reference_text: "t".into(),
-                },
-            )
-            .unwrap_err();
-        assert!(err.contains("固定音色"), "err: {err}");
+        assert_eq!(last["voice"], "demo_01_man");
     }
 
     /// omnivoice（克隆族）请求体三态：Reference → voice_ref+reference_text；
@@ -731,7 +695,7 @@ mod tests {
     #[test]
     fn test_synthesize_speed_applies_resampling() {
         let (base_url, _received, _handle) = spawn_stub();
-        let tts = AudiocppTts::new_with_base_url(audiocpp_cfg(), &base_url);
+        let tts = AudiocppTts::new_with_base_url(omnivoice_cfg(), &base_url);
         // stub 返回 2400 样本（24000Hz 即 0.1s）；speed 2.0 → ≈1200 样本
         let out = tts.synthesize("x", 2.0, &TtsVoiceParams::Sid(0)).unwrap();
         assert!(
@@ -744,7 +708,7 @@ mod tests {
     #[test]
     fn test_synthesize_connection_refused_reports_connection() {
         // 连一个必然未监听的端口 → Connection 错误文案
-        let tts = AudiocppTts::new_with_base_url(audiocpp_cfg(), "http://127.0.0.1:1");
+        let tts = AudiocppTts::new_with_base_url(omnivoice_cfg(), "http://127.0.0.1:1");
         let err = tts
             .synthesize("x", 1.0, &TtsVoiceParams::Sid(0))
             .unwrap_err();
@@ -772,7 +736,7 @@ mod tests {
         };
         assert!(e.to_user_message().contains("启动超时（3s）"));
         assert!(e.to_user_message().contains("tail"));
-        let e = AudiocppError::StreamingUnsupported("pocket-tts-english".to_string());
+        let e = AudiocppError::StreamingUnsupported("qwen3-tts-0.6b".to_string());
         assert!(e.to_user_message().contains("不支持流式合成"));
         let e = AudiocppError::StreamEvent("busy".to_string());
         assert!(e.to_user_message().contains("流式合成被服务端中断"));
@@ -958,10 +922,10 @@ mod tests {
         assert!(matches!(err, AudiocppError::HttpStatus { status: 500, .. }));
     }
 
-    /// 非流式族（pocket）：连接前拦截 → StreamingUnsupported。
+    /// 非流式族（qwen3_tts）：连接前拦截 → StreamingUnsupported。
     #[test]
-    fn test_synthesize_streaming_pocket_unsupported() {
-        let tts = AudiocppTts::new_with_base_url(audiocpp_cfg(), "http://127.0.0.1:1");
+    fn test_synthesize_streaming_qwen3_unsupported() {
+        let tts = AudiocppTts::new_with_base_url(qwen3_06_cfg(), "http://127.0.0.1:1");
         assert!(!tts.supports_streaming());
         let err = tts
             .synthesize_streaming("x", &TtsVoiceParams::Sid(0), &mut |_, _| true)

@@ -6,14 +6,12 @@ import { Button } from "@/components/ui/button";
 import {
   Select,
   SelectContent,
-  SelectGroup,
   SelectItem,
-  SelectLabel,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
 import { useRuntime } from "@/providers/RuntimeContext";
-import { groupKokoroVoices, isCloneRequiredTtsKind, isCloneTtsKind, modelNameFromDir } from "./ttsMeta";
+import { isCloneRequiredTtsKind, isCloneTtsKind, modelNameFromDir } from "./ttsMeta";
 
 interface TtsBasicConfigProps {
   onTestOpen: () => void;
@@ -39,17 +37,12 @@ export function TtsBasicConfig({
   const enabled = config?.enabled ?? true;
   const modelPath = config?.model_dir ?? "";
   const modelName = modelNameFromDir(modelPath);
-  // 音色语义按模型族三分：kokoro 选预置音色（103 个，分组下拉）；
-  // vits/matcha/pocket 单说话人或固定音色（禁用占位）；zipvoice/omnivoice/voxcpm2/
-  // qwen3_tts 走参考音频克隆（共享音色库与音色管理入口；omnivoice/voxcpm2 无内置音色，
-  // 未选时走 server auto voice；qwen3_tts 为强制克隆族——上游 Base 无 auto voice
-  // 兜底，必须选择克隆音色）。
+  // 收录的 TTS 模型均为参考音频克隆族（zipvoice/omnivoice/voxcpm2/qwen3_tts），
+  // 共享音色库与音色管理入口；omnivoice/voxcpm2 无内置音色，未选时走 server
+  // auto voice；qwen3_tts 为强制克隆族——上游 Base 无 auto voice 兜底，必须选择克隆音色。
   const modelKind = config?.model_type ?? "";
-  const kokoro = modelKind === "kokoro";
   const clone = isCloneTtsKind(modelKind);
   const cloneRequired = isCloneRequiredTtsKind(modelKind);
-  const sidFixed = !!modelKind && !clone && !kokoro;
-  const voiceGroups = groupKokoroVoices(voices);
 
   return (
     <section className="overflow-hidden rounded-[16px] border border-panel-border bg-panel-background">
@@ -149,82 +142,44 @@ export function TtsBasicConfig({
         </div>
       </dl>
 
-      {/* 默认音色：kokoro 选预置音色（分组下拉，选即持久化 [tts].voice）；
-          zipvoice/omnivoice/voxcpm2/qwen3_tts 走克隆（共享音色库，所有合成默认用该音色；
-          qwen3_tts 必须选择克隆音色，无自动音色兜底）；
-          vits/matcha/pocket 音色固定，仅显示禁用占位 */}
+      {/* 默认音色：克隆族共享音色库，选即持久化 [tts].voice，所有合成默认用该音色；
+          qwen3_tts 必须选择克隆音色（无自动音色兜底） */}
       <dl>
         <div className="flex items-center justify-between gap-3.5 border-t border-divider px-3.5 py-2.5">
           <dt className="shrink-0 text-sm text-text-primary">音色</dt>
           <dd className="min-w-0">
-            {kokoro ? (
-              <Select
-                value={selectedVoice}
-                onValueChange={(v) => void setSelectedVoice(v)}
-                disabled={voices.length === 0}
-              >
-                <SelectTrigger id="tts-default-voice" aria-label="默认音色" className="h-8 w-48">
-                  <SelectValue placeholder="默认（zf_001 · 中文女声）" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="">默认（zf_001 · 中文女声）</SelectItem>
-                  {voiceGroups.map((g) => (
-                    <SelectGroup key={g.group}>
-                      <SelectLabel>{g.label}</SelectLabel>
-                      {g.items.map((v) => (
-                        <SelectItem key={v.id} value={v.id}>
-                          {v.name}
-                        </SelectItem>
-                      ))}
-                    </SelectGroup>
-                  ))}
-                </SelectContent>
-              </Select>
-            ) : sidFixed ? (
-              <Select value="fixed" disabled>
-                <SelectTrigger id="tts-default-voice" aria-label="默认音色" className="h-8 w-48">
-                  <SelectValue placeholder="默认音色（模型固定）" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="fixed">默认音色（模型固定）</SelectItem>
-                </SelectContent>
-              </Select>
-            ) : (
-              <Select
-                value={selectedVoice}
-                onValueChange={(v) => void setSelectedVoice(v)}
-                disabled={
-                  voices.length === 0 && (modelKind === "zipvoice" || cloneRequired)
-                }
-              >
-                <SelectTrigger id="tts-default-voice" aria-label="默认音色" className="h-8 w-48">
-                  <SelectValue
-                    placeholder={
-                      cloneRequired
-                        ? "必须选择克隆音色"
-                        : modelKind === "omnivoice" || modelKind === "voxcpm2"
-                          ? "默认（自动音色）"
-                          : "默认（内置 leijun）"
-                    }
-                  />
-                </SelectTrigger>
-                <SelectContent>
-                  {/* 强制克隆族（qwen3_tts）无空值默认项：空音色会被后端拦截报错 */}
-                  {!cloneRequired && (
-                    <SelectItem value="">
-                      {modelKind === "omnivoice" || modelKind === "voxcpm2"
+            <Select
+              value={selectedVoice}
+              onValueChange={(v) => void setSelectedVoice(v)}
+              disabled={voices.length === 0 && (modelKind === "zipvoice" || cloneRequired)}
+            >
+              <SelectTrigger id="tts-default-voice" aria-label="默认音色" className="h-8 w-48">
+                <SelectValue
+                  placeholder={
+                    cloneRequired
+                      ? "必须选择克隆音色"
+                      : modelKind === "omnivoice" || modelKind === "voxcpm2"
                         ? "默认（自动音色）"
-                        : "默认（内置 leijun）"}
-                    </SelectItem>
-                  )}
-                  {voices.map((v) => (
-                    <SelectItem key={v.id} value={v.id}>
-                      {v.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            )}
+                        : "默认（内置 leijun）"
+                  }
+                />
+              </SelectTrigger>
+              <SelectContent>
+                {/* 强制克隆族（qwen3_tts）无空值默认项：空音色会被后端拦截报错 */}
+                {!cloneRequired && (
+                  <SelectItem value="">
+                    {modelKind === "omnivoice" || modelKind === "voxcpm2"
+                      ? "默认（自动音色）"
+                      : "默认（内置 leijun）"}
+                  </SelectItem>
+                )}
+                {voices.map((v) => (
+                  <SelectItem key={v.id} value={v.id}>
+                    {v.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </dd>
         </div>
       </dl>
@@ -243,7 +198,7 @@ export function TtsBasicConfig({
           <Volume2 className="h-4 w-4" />
           测试语音
         </Button>
-        {!kokoro && !sidFixed && (
+        {clone && (
           <Button variant="secondary" className="shadow-none" onClick={onManageVoices}>
             <Mic className="h-4 w-4" />
             音色管理

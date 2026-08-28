@@ -90,7 +90,7 @@ impl ServerInstanceSpec {
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
-    /// ggml 推理后端（spec.provider，缺省按族：pocket cpu / 其余 metal）
+    /// ggml 推理后端（spec.provider，缺省按族：克隆族 metal）
     pub backend: String,
     pub threads: i32,
     /// eager 加载：把「模型缺失」从首次请求前移到 spawn 健康检查阶段
@@ -179,53 +179,36 @@ mod tests {
         }
     }
 
-    fn pocket_spec(model_dir: &std::path::Path) -> ServerInstanceSpec {
+    fn omnivoice_spec(model_dir: &std::path::Path) -> ServerInstanceSpec {
         let mut cfg = audiocpp_tts_cfg(model_dir);
-        cfg.model_type = crate::tts::config::TtsModelKind::Pocket;
+        cfg.model_type = crate::tts::config::TtsModelKind::Omnivoice;
+        cfg.provider = "metal".to_string();
         ServerInstanceSpec::from_tts(&cfg).unwrap()
     }
 
+    /// omnivoice 族快照：family/id/gguf 路径/空 load_options/metal provider +
+    /// server config 整体形态（host/port/threads/lazy_load）。
     #[test]
-    fn test_spec_from_tts_and_config_shape() {
-        let spec = pocket_spec(std::path::Path::new("/models/pocket-tts-english-audiocpp"));
+    fn test_spec_from_tts_omnivoice_shape() {
+        let spec = omnivoice_spec(std::path::Path::new("/models/omnivoice-audiocpp"));
         assert_eq!(spec.task, "tts");
-        let sc = build_server_config(&spec, 18123);
+        let sc = build_server_config(&spec, 18200);
         assert_eq!(sc.host, "127.0.0.1");
-        assert_eq!(sc.port, 18123);
-        assert_eq!(sc.backend, "cpu");
+        assert_eq!(sc.port, 18200);
+        assert_eq!(sc.backend, "metal");
         assert_eq!(sc.threads, 2);
         assert!(!sc.lazy_load, "默认 eager，模型缺失前移到健康检查");
         assert_eq!(sc.models.len(), 1);
         let m = &sc.models[0];
-        assert_eq!(m.id, "pocket-tts-english");
-        assert_eq!(m.family, "pocket_tts");
+        assert_eq!(m.id, "omnivoice");
+        assert_eq!(m.family, "omnivoice");
         // 路径分隔符按平台归一后断言（Windows 的 PathBuf::join 产生 `\`，
         // server 侧同为原生程序读取，分隔符不影响运行时）
         assert_eq!(
             m.path.replace('\\', "/"),
-            "/models/pocket-tts-english-audiocpp/pocket-tts-english-q8_0.gguf"
-        );
-        assert_eq!(m.task, "tts");
-        assert_eq!(m.mode, "offline", "pocket 无流式支持，mode 保持 offline");
-        assert_eq!(m.load_options["language"], "english");
-    }
-
-    /// omnivoice 族快照：family/id/gguf 路径/空 load_options/metal provider。
-    #[test]
-    fn test_spec_from_tts_omnivoice_shape() {
-        let mut cfg = audiocpp_tts_cfg(std::path::Path::new("/models/omnivoice-audiocpp"));
-        cfg.model_type = crate::tts::config::TtsModelKind::Omnivoice;
-        cfg.provider = "metal".to_string();
-        let spec = ServerInstanceSpec::from_tts(&cfg).unwrap();
-        let sc = build_server_config(&spec, 18200);
-        assert_eq!(sc.backend, "metal");
-        let m = &sc.models[0];
-        assert_eq!(m.id, "omnivoice");
-        assert_eq!(m.family, "omnivoice");
-        assert_eq!(
-            m.path.replace('\\', "/"),
             "/models/omnivoice-audiocpp/omnivoice-q8_0.gguf"
         );
+        assert_eq!(m.task, "tts");
         // 流式族 mode 翻转为 streaming（offline server 拒绝 SSE 请求，实测 HTTP 500）
         assert_eq!(m.mode, "streaming");
         assert_eq!(m.load_options, serde_json::json!({}));
@@ -277,7 +260,7 @@ mod tests {
     #[test]
     fn test_server_config_json_keys() {
         // 序列化键名与上游 example.json 对齐（schema 快照）
-        let spec = pocket_spec(std::path::Path::new("/m"));
+        let spec = omnivoice_spec(std::path::Path::new("/m"));
         let json = serde_json::to_value(build_server_config(&spec, 1)).unwrap();
         for key in ["host", "port", "backend", "threads", "lazy_load", "models"] {
             assert!(json.get(key).is_some(), "missing key: {key}");
@@ -294,7 +277,7 @@ mod tests {
         crate::test_util::run_with_temp_home(|home| {
             crate::test_util::set_custom_data_dir(home);
             // 写入前 engines 目录不存在也能创建
-            let spec = pocket_spec(base.path());
+            let spec = omnivoice_spec(base.path());
             let path = write_server_config(&spec, 19999, 42).unwrap();
             assert!(path.is_file());
             assert!(

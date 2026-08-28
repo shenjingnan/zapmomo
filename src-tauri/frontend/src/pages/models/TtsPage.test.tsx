@@ -519,33 +519,6 @@ describe("TtsPage（语音合成 TTS）", () => {
     });
   });
 
-  it("sid 模型（vits）：音色固定禁用、无音色管理入口，合成携带 sid=0 且不传 voice/reference", async () => {
-    ttsConfig = { ...ttsConfig, model_type: "vits", models_present: true };
-    const user = userEvent.setup();
-    renderTtsPage();
-    await user.click(await screen.findByRole("button", { name: "测试语音" }));
-
-    // sid 模型下音色下拉禁用、无「音色管理」入口
-    expect(screen.getByRole("combobox", { name: "音色" })).toBeDisabled();
-    expect(screen.queryByRole("button", { name: "音色管理" })).not.toBeInTheDocument();
-
-    const textarea = screen.getByLabelText("测试文本");
-    await user.clear(textarea);
-    await user.type(textarea, "测试vits模型");
-    await user.click(screen.getByRole("button", { name: "合成并播放" }));
-
-    await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("synthesize_tts", {
-        text: "测试vits模型",
-        speed: 1,
-        sid: 0,
-        voice: null,
-        referenceWav: null,
-        referenceText: null,
-      });
-    });
-  });
-
   it("qwen3_tts（强制克隆族）：主页音色下拉可选、音色管理可见、占位提示必须选择克隆音色", async () => {
     ttsConfig = {
       ...ttsConfig,

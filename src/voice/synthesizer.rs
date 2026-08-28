@@ -363,15 +363,25 @@ mod tests {
     }
 
     /// 真实 audiocpp 引擎（直连 stub，无需模型文件与真实 server 进程）。
+    /// 选 qwen3_tts（非流式族）以锚定整段合成路径；音色须配 [`stub_reference_voice`]
+    /// （qwen3 Base 拦截 Sid 兜底）。
     fn stub_engine(base_url: &str) -> TtsEngine {
         let cfg = crate::tts::config::ResolvedTtsConfig {
             backend: crate::tts::config::TtsBackendKind::Audiocpp,
-            model_type: crate::tts::config::TtsModelKind::Pocket,
+            model_type: crate::tts::config::TtsModelKind::Qwen3Tts06,
             ..crate::tts::config::ResolvedTtsConfig::default()
         };
         TtsEngine::from_audiocpp_for_test(crate::audiocpp::client::AudiocppTts::new_with_base_url(
             cfg, base_url,
         ))
+    }
+
+    /// stub 引擎用的克隆音色参数（路径不被 stub 读取，仅走请求体映射）。
+    fn stub_reference_voice() -> crate::tts::TtsVoiceParams {
+        crate::tts::TtsVoiceParams::Reference {
+            wav_path: std::path::PathBuf::from("/voices/stub.wav"),
+            reference_text: "stub".to_string(),
+        }
     }
 
     /// SwapEngine 句间语义：swap 前入队的句子用旧引擎（旧采样率），swap 后的
@@ -384,10 +394,10 @@ mod tests {
         let engine_a = stub_engine(&url_a);
         let engine_b = stub_engine(&url_b);
 
-        let h = SynthHandle::new(engine_a, crate::tts::TtsVoiceParams::Sid(0), 1.0);
+        let h = SynthHandle::new(engine_a, stub_reference_voice(), 1.0);
         // 句 1 入队（旧引擎）→ swap 排队 → 句 2 入队（新引擎）
         h.enqueue("第一句旧引擎".to_string(), 1);
-        h.swap_engine(engine_b, crate::tts::TtsVoiceParams::Sid(0));
+        h.swap_engine(engine_b, stub_reference_voice());
         h.enqueue("第二句新引擎".to_string(), 1);
 
         let mut rates = Vec::new();
@@ -410,8 +420,8 @@ mod tests {
     #[test]
     fn test_drop_after_swap_joins_cleanly() {
         let url = spawn_stub_wav(24_000);
-        let h = SynthHandle::new(stub_engine(&url), crate::tts::TtsVoiceParams::Sid(0), 1.0);
-        h.swap_engine(stub_engine(&url), crate::tts::TtsVoiceParams::Sid(0));
+        let h = SynthHandle::new(stub_engine(&url), stub_reference_voice(), 1.0);
+        h.swap_engine(stub_engine(&url), stub_reference_voice());
         h.enqueue("x".to_string(), 1);
         // 作用域结束触发 Drop（Shutdown + join）；若卡死本测试超时失败
         drop(h);
@@ -610,7 +620,7 @@ mod tests {
         assert!(matches!(first[0], SynthResult::StreamChunk { .. }));
         assert!(matches!(first[1], SynthResult::StreamDone { gen_id: 1 }));
 
-        h.swap_engine(stub_engine(&url_wav), crate::tts::TtsVoiceParams::Sid(0));
+        h.swap_engine(stub_engine(&url_wav), stub_reference_voice());
         h.enqueue("整段句".to_string(), 1);
         let second = recv_until_terminal(&h);
         assert_eq!(second.len(), 1, "非流式句恰一个终态");

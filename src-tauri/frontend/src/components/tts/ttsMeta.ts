@@ -1,4 +1,4 @@
-import type { TtsConfigInfo, TtsVoice } from "@/types/tauri";
+import type { TtsConfigInfo } from "@/types/tauri";
 
 /** 状态语义色：绿=已就绪、蓝=合成中、灰=未下载/已关闭/加载中、红=配置错误。 */
 export type TtsStatusTone = "good" | "loading" | "idle" | "error";
@@ -39,14 +39,6 @@ export function ttsModelKindLabel(kind: string): string {
   switch (kind) {
     case "zipvoice":
       return "ZipVoice 克隆";
-    case "vits":
-      return "VITS";
-    case "matcha":
-      return "Matcha";
-    case "kokoro":
-      return "Kokoro";
-    case "pocket":
-      return "PocketTTS";
     case "omnivoice":
       return "OmniVoice 克隆";
     case "voxcpm2":
@@ -80,27 +72,4 @@ export function isCloneTtsKind(kind: string): boolean {
  */
 export function isCloneRequiredTtsKind(kind: string): boolean {
   return kind === "qwen3_tts_06" || kind === "qwen3_tts_17";
-}
-
-/** Kokoro 音色分组（与后端 `KokoroVoiceGroup` serde snake_case 对应）。 */export type KokoroGroup = "english_female" | "chinese_female" | "chinese_male";
-
-/** 分组展示顺序与中文标签（中文优先：女声 → 男声 → 英文）。 */
-const KOKORO_GROUP_ORDER: Array<{ group: KokoroGroup; label: string }> = [
-  { group: "chinese_female", label: "中文女声" },
-  { group: "chinese_male", label: "中文男声" },
-  { group: "english_female", label: "英文女声" },
-];
-
-/**
- * 把 Kokoro 音色列表按语言分组（分组下拉数据源）。
- * 非分组音色（group 为空，如 zipvoice 参考音色混入）归入空分组排除。
- */
-export function groupKokoroVoices(
-  voices: TtsVoice[],
-): Array<{ group: KokoroGroup; label: string; items: TtsVoice[] }> {
-  return KOKORO_GROUP_ORDER.map(({ group, label }) => ({
-    group,
-    label,
-    items: voices.filter((v) => v.group === group),
-  })).filter((g) => g.items.length > 0);
 }

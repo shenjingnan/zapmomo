@@ -197,8 +197,8 @@ fn release_lease(config_hash: u64, generation: u64) {
 ///
 /// `task` 首字段（TTS 与 ASR 即使同 model_dir 也不撞指纹，双任务独立实例并存——
 /// 路线 A 的隔离自证）；`model_id` 覆盖模型族角色（防 external 目录同 dir 不同
-/// kind 的边角）。voice/音色不进指纹——音色随请求传（pocket 的 `voice` /
-/// omnivoice 的 `voice_ref`），换音色复用热实例。
+/// kind 的边角）。voice/音色不进指纹——音色随请求传（omnivoice 的 `voice` /
+/// `voice_ref`），换音色复用热实例。
 fn config_hash(spec: &ServerInstanceSpec, engine: &std::path::Path) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     spec.task.hash(&mut h);
@@ -448,7 +448,7 @@ class H(http.server.BaseHTTPRequestHandler):
         if self.path == '/health':
             self._ok(b'{"status":"ok"}')
         elif self.path == '/v1/models':
-            self._ok(json.dumps({"data": [{"id": "pocket-tts-english"}, {"id": "omnivoice"}]}).encode())
+            self._ok(json.dumps({"data": [{"id": "omnivoice"}]}).encode())
         else:
             self.send_error(404)
     def do_POST(self):
@@ -473,21 +473,20 @@ http.server.HTTPServer(('127.0.0.1', port), H).serve_forever()
         dir
     }
 
-    /// audiocpp 后端测试配置（HOME 隔离 + pocket 两文件齐）。
+    /// audiocpp 后端测试配置（HOME 隔离 + omnivoice 单文件齐）。
     #[cfg(all(unix, not(target_os = "macos")))]
     fn stub_ready_cfg(home: &std::path::Path) -> crate::tts::config::ResolvedTtsConfig {
         crate::test_util::set_custom_data_dir(home);
-        let model_dir = home.join("models/pocket-stub");
-        std::fs::create_dir_all(model_dir.join("embeddings")).unwrap();
+        let model_dir = home.join("models/omnivoice-stub");
+        std::fs::create_dir_all(&model_dir).unwrap();
         std::fs::write(
-            model_dir.join(super::super::families::POCKET.gguf_file),
+            model_dir.join(super::super::families::OMNIVOICE.gguf_file),
             b"x",
         )
         .unwrap();
-        std::fs::write(model_dir.join("embeddings/alba.safetensors"), b"x").unwrap();
         let mut cfg = crate::tts::config::ResolvedTtsConfig::default();
         cfg.backend = crate::tts::config::TtsBackendKind::Audiocpp;
-        cfg.model_type = crate::tts::config::TtsModelKind::Pocket;
+        cfg.model_type = crate::tts::config::TtsModelKind::Omnivoice;
         cfg.model_dir = model_dir;
         cfg
     }
@@ -582,9 +581,9 @@ http.server.HTTPServer(('127.0.0.1', port), H).serve_forever()
             let cfg = stub_ready_cfg(home);
             let engine = crate::tts::TtsEngine::new(cfg.clone())
                 .expect("门面 audiocpp 构造（内部 lease stub）");
-            assert_eq!(engine.sample_rate(), 24_000, "初值 PocketTTS 固定采样率");
+            assert_eq!(engine.sample_rate(), 24_000, "初值 omnivoice 固定采样率");
 
-            // Named 音色合成成功（请求体 voice=alba）
+            // Named 音色合成成功（请求体 voice=alba，omnivoice preset 通道透传）
             let out = engine
                 .synthesize(
                     "hello",
@@ -594,8 +593,8 @@ http.server.HTTPServer(('127.0.0.1', port), H).serve_forever()
                 .unwrap();
             assert_eq!(out.len(), 2400);
 
-            // Reference 在 audiocpp 臂报错（连接前拦截）
-            let err = engine
+            // Reference 克隆音色合成成功（voice_ref + reference_text 映射）
+            let out = engine
                 .synthesize(
                     "x",
                     1.0,
@@ -604,8 +603,8 @@ http.server.HTTPServer(('127.0.0.1', port), H).serve_forever()
                         reference_text: "t".into(),
                     },
                 )
-                .unwrap_err();
-            assert!(err.contains("固定音色"), "err: {err}");
+                .unwrap();
+            assert_eq!(out.len(), 2400);
 
             // 进度回调返回 false → 请求前取消（不发请求）
             let err = engine
@@ -665,7 +664,7 @@ http.server.HTTPServer(('127.0.0.1', port), H).serve_forever()
             let cfg_a = stub_ready_cfg(home);
             // 实例 B：仅模型目录不同（指纹不同；stub 引擎不读模型文件）
             let mut cfg_b = cfg_a.clone();
-            cfg_b.model_dir = home.join("models/pocket-stub-b");
+            cfg_b.model_dir = home.join("models/omnivoice-stub-b");
             let spec_a = ServerInstanceSpec::from_tts(&cfg_a).unwrap();
             let spec_b = ServerInstanceSpec::from_tts(&cfg_b).unwrap();
 
@@ -685,7 +684,7 @@ http.server.HTTPServer(('127.0.0.1', port), H).serve_forever()
     #[test]
     fn test_config_hash_distinguishes_dimensions() {
         let mut cfg = crate::tts::config::ResolvedTtsConfig::default();
-        cfg.model_type = crate::tts::config::TtsModelKind::Pocket;
+        cfg.model_type = crate::tts::config::TtsModelKind::Voxcpm2;
         let engine = std::path::Path::new("/engines/audiocpp_server");
         let spec = ServerInstanceSpec::from_tts(&cfg).unwrap();
         let h1 = config_hash(&spec, engine);

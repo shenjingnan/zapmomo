@@ -1119,7 +1119,7 @@ impl Default for TtsDownloadState {
 /// GUI 展示用的 TTS 配置信息。
 #[derive(Serialize)]
 struct TtsConfigInfo {
-    /// 模型类型（zipvoice/vits/matcha/...），前端据此切换音色语义
+    /// 模型类型（zipvoice/omnivoice/...），前端据此切换音色语义
     model_type: String,
     /// 推理后端（sherpa/audiocpp），前端据此显示引擎徽标
     backend: String,
@@ -1214,28 +1214,13 @@ fn synthesize_inner(
     Ok(())
 }
 
-/// 列出可用音色：ZipVoice/OmniVoice 返回参考音色（模型包内置 + 用户自定义
-/// 音色库；omnivoice 无内置仅自定义库）；Kokoro 返回 103 个预置音色（sid +
-/// 语言分组）；vits/matcha/pocket 等固定音色模型返回空列表。
+/// 列出可用音色：克隆族返回参考音色（模型包内置 + 用户自定义音色库；
+/// omnivoice/voxcpm2 无内置仅自定义库）；非克隆模型返回空列表。
 #[tauri::command]
 fn list_tts_voices() -> Result<Vec<zapmomo::tts::TtsVoice>, String> {
     let settings = zapmomo::config::settings::load_settings()?;
     let tts_settings = settings.as_ref().and_then(|s| s.tts.clone());
     let cfg = zapmomo::tts::config::resolve(tts_settings.as_ref(), None)?;
-    if cfg.model_type == zapmomo::tts::config::TtsModelKind::Kokoro {
-        return Ok(zapmomo::tts::kokoro_voices::list_voices()
-            .iter()
-            .map(|v| zapmomo::tts::TtsVoice {
-                id: v.id.to_string(),
-                name: v.name.to_string(),
-                wav_path: PathBuf::new(),
-                reference_text: String::new(),
-                custom: false,
-                sid: Some(v.sid),
-                group: Some(v.group),
-            })
-            .collect());
-    }
     if !cfg.model_type.uses_reference_audio() {
         return Ok(Vec::new());
     }
@@ -1906,8 +1891,7 @@ fn collect_asr_preflight_files(
 
 /// 按 TTS `model_type` 收集预检文件清单（族感知，对齐 `collect_asr_preflight_files`）。
 ///
-/// zipvoice 五件套 / vits model+tokens+lexicon / matcha 声学模型+声码器+tokens+lexicon；
-/// 未收录的 kind（kitten/pocket/supertonic）返回空清单，交由引擎构造时报错。
+/// zipvoice 五件套；未收录的 kind（kitten/supertonic）返回空清单，交由引擎构造时报错。
 fn collect_tts_preflight_files(
     cfg: &zapmomo::tts::config::ResolvedTtsConfig,
 ) -> Result<Vec<(&'static str, &std::path::Path)>, String> {
@@ -1920,42 +1904,6 @@ fn collect_tts_preflight_files(
             ("TTS tokens", cfg.tokens.as_path()),
             ("TTS lexicon", cfg.lexicon.as_path()),
         ],
-        TtsModelKind::Vits => vec![
-            (
-                "TTS model",
-                cfg.model
-                    .as_deref()
-                    .ok_or_else(|| "VITS 主模型未解析".to_string())?,
-            ),
-            ("TTS tokens", cfg.tokens.as_path()),
-            ("TTS lexicon", cfg.lexicon.as_path()),
-        ],
-        TtsModelKind::Matcha => vec![
-            (
-                "TTS acoustic model",
-                cfg.acoustic_model
-                    .as_deref()
-                    .ok_or_else(|| "Matcha 声学模型未解析".to_string())?,
-            ),
-            ("TTS vocoder", cfg.vocoder.as_path()),
-            ("TTS tokens", cfg.tokens.as_path()),
-            ("TTS lexicon", cfg.lexicon.as_path()),
-        ],
-        TtsModelKind::Kokoro => vec![
-            (
-                "TTS model",
-                cfg.model
-                    .as_deref()
-                    .ok_or_else(|| "Kokoro 主模型未解析".to_string())?,
-            ),
-            (
-                "TTS voices",
-                cfg.voices
-                    .as_deref()
-                    .ok_or_else(|| "Kokoro voices.bin 未解析".to_string())?,
-            ),
-            ("TTS tokens", cfg.tokens.as_path()),
-        ],
         _ => vec![],
     })
 }
@@ -1967,8 +1915,8 @@ fn collect_tts_preflight_files(
 /// encoder+decoder+tokens / Qwen3-ASR conv_frontend+encoder+decoder，tokenizer 目录
 /// 单独校验）；audiocpp 走 `asr::config::preflight` 按族清单校验（单 GGUF 包，不查
 /// sherpa 的 ONNX 清单，否则 Qwen3Asr 会误报缺 conv_frontend）。
-/// TTS 按 backend 分派：sherpa 走逐文件收集（含 Kokoro 主模型/voices）；audiocpp 走
-/// `tts::config::preflight`（固定两文件，不查 sherpa 清单）。
+/// TTS 按 backend 分派：sherpa 走逐文件收集；audiocpp 走
+/// `tts::config::preflight`（按族清单，不查 sherpa 清单）。
 fn preflight_voice_models(
     cfg: &zapmomo::voice::config::ResolvedSessionConfig,
 ) -> Result<(), String> {
