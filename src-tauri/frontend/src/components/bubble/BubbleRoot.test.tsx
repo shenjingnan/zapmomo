@@ -60,13 +60,14 @@ describe("BubbleRoot（气泡窗口根组件）", () => {
     await waitFor(() => expect(setIgnoreMock).toHaveBeenCalledWith(false));
   });
 
-  it("打断（state 回 armed）清空内容并恢复点穿", async () => {
+  it("打断（state 回 armed）保留内容静置，保持接收鼠标（等用户点击关闭）", async () => {
     render(<BubbleRoot />);
     emit("voice-session-token", { delta: "被打断" });
     expect(screen.getByText("被打断")).toBeTruthy();
     emit("voice-session-state", { running: true, state: "armed" });
-    expect(screen.queryByText("被打断")).toBeNull();
-    await waitFor(() => expect(setIgnoreMock).toHaveBeenLastCalledWith(true));
+    // 打断不清场：内容静置保留，窗口保持接收鼠标（点穿只由点击关闭触发）
+    expect(screen.getByText("被打断")).toBeTruthy();
+    await waitFor(() => expect(setIgnoreMock).toHaveBeenLastCalledWith(false));
   });
 
   it("拖动停止后以逻辑像素回写位置（save_bubble_position）", async () => {

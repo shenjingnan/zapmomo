@@ -1,87 +1,53 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useRef, useState } from "react";
 import { api } from "@/lib/tauri";
-import type { VoiceSessionPhase } from "@/types/tauri";
 
-/** 回复完结后气泡定格时长（毫秒），之后进入淡出。 */
-const HOLD_MS = 5000;
-/** 淡出过渡时长（毫秒，与 opacity 过渡 duration-500 一致），结束后移除内容。 */
-const FADE_MS = 500;
+/** 拖动判定位移阈值（CSS 像素）：超过视为拖动，未超过松开视为点击关闭。 */
+const DRAG_THRESHOLD_PX = 5;
 /** 插播新鲜期（毫秒）：被流式回复压制超过此时长的插播到期丢弃，完结后不再补展示。 */
 const ANNOUNCEMENT_FRESH_MS = 5000;
 
-/** 当前展示内容的来源（决定 text 清空后的清场语义归属）。 */
+/** 当前展示内容的来源。 */
 type ContentSource = "reply" | "announcement";
 
 /**
  * 聊天气泡（独立 bubble 窗口的唯一内容视图，有且只有一个聊天气泡）。
  *
  * 内容两路共用同一气泡，流式回复优先级恒高于插播：
- * - `text`：语音/文字对话的流式回复（token 累积 = 天然打字机）。清空分两义：
- *   正常完结（reply-finished，此刻 phase 仍在 thinking/speaking）→ 定格 HOLD_MS
- *   后淡出；打断/停止（phase 已回 armed/idle）→ 立即消失。定格期内的 phase
- *   迁移（如播完回 armed）不打断定格。
+ * - `text`：语音/文字对话的流式回复（token 累积 = 天然打字机）。text 清空
+ *   （正常完结或被打断/停止）后内容静置保留，不自动消失。
  * - `announcement`：dsh（DeepSeek Harness）事件播报台词。被流式回复压制时暂存，
- *   回复完结后新鲜期内补展示，超期丢弃；展示中新插播替换旧插播（最新发言胜出）；
- *   不随会话打断消失（与会话状态无关），按自身定时定格→淡出。
+ *   回复完结后新鲜期内补展示，超期丢弃；展示中新插播替换旧插播（最新发言胜出）。
  *
- * 整个气泡面按住左键即可拖动窗口（纯展示组件、无输入/选择交互，故文本不可选中）。
+ * 内容一旦出现即静置常驻，唯一消失途径是用户点击气泡（新一轮文本/插播到达时
+ * 自然顶替除外）——「想看的内容不被程序收走」。点击与拖动共用气泡面：按住后
+ * 位移超过阈值才交给 OS 拖动窗口，未超阈值松开视为点击关闭。
+ *
+ * 整个气泡面按住左键拖动窗口（纯展示组件、无输入/选择交互，故文本不可选中）。
  * 可见性变化经 `onVisibleChange` 上报，窗口根组件据此切换点击穿透：
- * 有内容时可拖动，无内容时透明区域穿透到下方窗口。
+ * 有内容时可交互，无内容时透明区域穿透到下方窗口。
  */
 export function VoiceReplyBubble({
   text,
-  phase,
   announcement = "",
   onVisibleChange,
 }: {
   text: string;
-  phase: VoiceSessionPhase;
   /** dsh 事件播报台词（空串表示无插播） */
   announcement?: string;
   onVisibleChange?: (visible: boolean) => void;
 }) {
   const [visibleText, setVisibleText] = useState("");
-  const [fading, setFading] = useState(false);
-  const timerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  // 定格/淡出标志、展示来源与最新文本走 ref：effect 依赖只挂 text/phase/announcement，
-  // 定格计时器不被自身状态变化重置。holdingRef 标记「已进入定格→淡出生命周期」，
-  // 防止定格期内 phase 重入（如播完回 armed）误清内容。
-  const fadingRef = useRef(false);
-  const holdingRef = useRef(false);
   const sourceRef = useRef<ContentSource | null>(null);
   const visibleTextRef = useRef("");
   // 被流式回复压制期间暂存的插播（含到达时间，用于新鲜期判定）
   const pendingAnnouncementRef = useRef<{ text: string; at: number } | null>(null);
   const lastAnnouncementRef = useRef("");
   const freshTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  // 按住状态（pointer down 起点与拖动标记），ref 不触发渲染
+  const pressRef = useRef<{ x: number; y: number; moved: boolean } | null>(null);
 
   useEffect(() => {
-    const clearDisplay = () => {
-      clearTimeout(timerRef.current);
-      holdingRef.current = false;
-      fadingRef.current = false;
-      setFading(false);
-      sourceRef.current = null;
-      visibleTextRef.current = "";
-      setVisibleText("");
-    };
-    /** 展示当前内容：取消在途定时 → 定格 HOLD_MS → 淡出 FADE_MS → 移除。 */
-    const show = (content: string, source: ContentSource) => {
-      clearTimeout(timerRef.current);
-      holdingRef.current = true;
-      fadingRef.current = false;
-      setFading(false);
-      sourceRef.current = source;
-      visibleTextRef.current = content;
-      setVisibleText(content);
-      timerRef.current = setTimeout(() => {
-        fadingRef.current = true;
-        setFading(true);
-        timerRef.current = setTimeout(clearDisplay, FADE_MS);
-      }, HOLD_MS);
-    };
-
     // 新插播登记（同一条不重复处理）；暂存后视流式状态决定立即展示或等待补展示
     if (announcement !== lastAnnouncementRef.current) {
       lastAnnouncementRef.current = announcement;
@@ -96,44 +62,31 @@ export function VoiceReplyBubble({
     }
 
     if (text) {
-      // 流式更新中：跟随最新文本，取消任何待定的淡出/插播展示
-      clearTimeout(timerRef.current);
-      holdingRef.current = false;
-      fadingRef.current = false;
-      setFading(false);
+      // 流式更新中：跟随最新文本
       sourceRef.current = "reply";
       visibleTextRef.current = text;
       setVisibleText(text);
       return;
     }
 
-    // 无流式文本 → 有新鲜插播则展示（覆盖定格/淡出中的旧内容，最新发言胜出）
+    // 无流式文本 → 有新鲜插播则展示（覆盖静置中的旧内容，最新发言胜出）
     const pending = pendingAnnouncementRef.current;
     if (pending && Date.now() - pending.at <= ANNOUNCEMENT_FRESH_MS) {
       clearTimeout(freshTimerRef.current);
       pendingAnnouncementRef.current = null;
-      show(pending.text, "announcement");
+      sourceRef.current = "announcement";
+      visibleTextRef.current = pending.text;
+      setVisibleText(pending.text);
       return;
     }
 
-    // 回复文本清空后的语义（插播展示由自身定时管理，不归此处管）
-    if (sourceRef.current !== "reply" || !visibleTextRef.current) return;
-    if (holdingRef.current || fadingRef.current) return; // 定格/淡出中：phase 变化不打断（播完回 armed 属正常）
-    if (phase === "armed" || phase === "idle") {
-      // 打断 / 停止：立即消失
-      clearDisplay();
-      return;
-    }
-    // 正常完结：定格后淡出。**不返回 cleanup**——text/phase 变化触发的 effect 重跑
-    // 不应清掉定格计时器（定格期内 phase 回 armed 属正常播完路径）；计时器只被
-    // 新一轮文本/插播（上方分支）或卸载（下方独立 effect）清除。
-    show(visibleTextRef.current, "reply");
-  }, [text, phase, announcement]);
+    // text 清空（正常完结 / 打断 / 停止）：内容静置保留，等用户点击关闭。
+    // 同 props 重渲染不复活——展示仅由新内容或点击关闭驱动。
+  }, [text, announcement]);
 
   // 卸载时清理定时器
   useEffect(
     () => () => {
-      clearTimeout(timerRef.current);
       clearTimeout(freshTimerRef.current);
     },
     [],
@@ -146,24 +99,49 @@ export function VoiceReplyBubble({
 
   if (!visibleText) return null;
 
+  /** 点击关闭：清空展示（ref 与 state 同步），气泡随之消失、窗口回到点穿态。 */
+  const dismiss = () => {
+    sourceRef.current = null;
+    visibleTextRef.current = "";
+    setVisibleText("");
+  };
+
   return (
-    // 纯展示气泡无输入/选择交互，整个可视面按住左键即拖动窗口（代价：文本不可选中）。
-    // biome-ignore lint/a11y/noStaticElementInteractions: 气泡面即拖动把手（startDragging），无键盘等价交互（窗口拖动由 OS 承载）
+    // 纯展示气泡无输入/选择交互，气泡面即交互面：点击关闭，按住拖动窗口
+    // （startDragging 延迟到位移超阈值，避免 OS 拖动吞掉 click 语义）。
     <div
       className="w-full cursor-grab touch-none select-none active:cursor-grabbing"
-      onMouseDown={(e) => {
+      title="点击关闭 · 按住拖动"
+      onPointerDown={(e) => {
         if (e.button !== 0) return;
-        void api.bubbleDebugLog({ message: "气泡 mousedown 到达 → startDragging" });
+        // capture 保证按住移出气泡面后仍能收到 move/up（拖动必然移出）
+        e.currentTarget.setPointerCapture(e.pointerId);
+        pressRef.current = { x: e.clientX, y: e.clientY, moved: false };
+      }}
+      onPointerMove={(e) => {
+        const press = pressRef.current;
+        if (!press || press.moved) return;
+        if (Math.hypot(e.clientX - press.x, e.clientY - press.y) < DRAG_THRESHOLD_PX) return;
+        press.moved = true;
+        void api.bubbleDebugLog({ message: "气泡拖动判定命中 → startDragging" });
         getCurrentWindow()
           .startDragging()
           .catch((err) => void api.bubbleDebugLog({ message: `startDragging 失败: ${err}` }));
       }}
+      onPointerUp={(e) => {
+        if (e.button !== 0) return; // 只认左键释放（press 也只登记左键）
+        const press = pressRef.current;
+        pressRef.current = null;
+        if (!press || press.moved) return;
+        if (text) return; // 流式进行中内容未定稿，点击不响应（点了也会被下一 token 顶回）
+        void api.bubbleDebugLog({ message: "气泡点击 → 关闭" });
+        dismiss();
+      }}
+      onPointerCancel={() => {
+        pressRef.current = null;
+      }}
     >
-      <div
-        className={`max-h-32 w-full overflow-hidden rounded-xl border border-border bg-popover px-4 py-2.5 text-sm text-text-primary shadow-lg transition-opacity duration-500 ${
-          fading ? "opacity-0" : "opacity-100"
-        }`}
-      >
+      <div className="max-h-32 w-full overflow-hidden rounded-xl border border-border bg-popover px-4 py-2.5 text-sm text-text-primary shadow-lg">
         <p className="line-clamp-4 whitespace-pre-wrap break-words">{visibleText}</p>
       </div>
     </div>
