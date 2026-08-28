@@ -12,6 +12,7 @@ const { state } = vi.hoisted(() => {
     records: [],
     pendingReply: "",
     turnUserText: "",
+    turnSeq: 0,
     replyDone: false,
     queuedSentences: [],
     currentSentence: null,

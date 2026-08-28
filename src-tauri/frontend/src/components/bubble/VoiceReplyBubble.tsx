@@ -14,8 +14,11 @@ const AWAITING_REPLY_PATIENCE_MS = 5000;
  * 聊天气泡（独立 bubble 窗口的唯一内容视图，有且只有一个聊天气泡）。
  *
  * 内容三路共用同一气泡，构成「一轮对话视图」（先用户句、后回复）：
- * - `userText`：当前轮用户句。到达即上屏（消除首 token 前的空窗）；新一轮到达
- *   顶掉旧轮全部内容（含静置旧回复与展示中插播）。
+ * - `userText`：当前轮用户句。到达即上屏（消除首 token 前的空窗）；新一轮
+ *   （turnSeq 变化，未传时按 userText 值判新）顶掉旧轮全部内容（含静置旧回复
+ *   与展示中插播）。
+ * - `turnSeq`：当前轮序号（hook 端每个 is_final 自增），变化即新轮——同文本
+ *   连发（「继续」「嗯」）也能判出；未传时退化为按 userText 值判新。
  * - `text`：语音/文字对话的流式回复（token 累积 = 天然打字机），追加在用户句
  *   下方。text 清空（正常完结或被打断/停止）后内容静置保留，不自动消失。
  * - `announcement`：dsh（DeepSeek Harness）事件播报台词。被流式回复或「用户句
@@ -33,12 +36,15 @@ const AWAITING_REPLY_PATIENCE_MS = 5000;
  */
 export function VoiceReplyBubble({
   userText,
+  turnSeq,
   text,
   announcement = "",
   onVisibleChange,
 }: {
   /** 当前轮用户句（新一轮到达顶掉旧轮内容；空串表示无） */
   userText?: string;
+  /** 当前轮序号，变化即新轮；未传时退化为按 userText 值判新 */
+  turnSeq?: number;
   text: string;
   /** dsh 事件播报台词（空串表示无插播） */
   announcement?: string;
@@ -50,8 +56,9 @@ export function VoiceReplyBubble({
   const pendingAnnouncementRef = useRef<{ text: string; at: number } | null>(null);
   const lastAnnouncementRef = useRef("");
   const freshTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  // 用户新到判定 + 「等回复」压制窗口（耐心窗口内压制插播，回复开始或窗口到期即解除）
-  const lastUserTextRef = useRef("");
+  // 新轮判定基线：turnSeq 有值比序号（同文本连发也能判出）；缺省退化比 userText 值
+  const lastTurnRef = useRef<{ seq: number; userText: string }>({ seq: 0, userText: "" });
+  // 「等回复」压制窗口（耐心窗口内压制插播，回复开始或窗口到期即解除）
   const awaitingReplyRef = useRef(false);
   const awaitingSinceRef = useRef(0);
   const patienceTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -75,9 +82,15 @@ export function VoiceReplyBubble({
       }
     }
 
-    // 新用户句登记：开启新一轮，顶掉旧轮全部内容（含静置旧回复与展示中插播）
-    if (userText !== lastUserTextRef.current) {
-      lastUserTextRef.current = userText ?? "";
+    // 新一轮登记：turnSeq 变化即新轮（同文本连发也能判出），未传时退化为按
+    // userText 值判新。开启新一轮，顶掉旧轮全部内容（含静置旧回复与展示中插播）
+    const seq = turnSeq ?? 0;
+    const isNewTurn =
+      turnSeq === undefined
+        ? (userText ?? "") !== lastTurnRef.current.userText
+        : seq !== lastTurnRef.current.seq;
+    if (isNewTurn) {
+      lastTurnRef.current = { seq, userText: userText ?? "" };
       if (userText) {
         awaitingReplyRef.current = true;
         awaitingSinceRef.current = Date.now();
@@ -102,10 +115,9 @@ export function VoiceReplyBubble({
     }
 
     // 用户句在屏、回复未始：耐心窗口内压制插播（用户主动对话优先，暂存等补展示）。
-    // 读 lastUserTextRef 而非 visibleUser：同批登记时 state 尚未提交，ref 判定无竞态。
+    // awaitingReplyRef 为同步 ref：置位时用户句必然已上屏，同批登记无 state 竞态。
     if (
       awaitingReplyRef.current &&
-      lastUserTextRef.current !== "" &&
       Date.now() - awaitingSinceRef.current <= AWAITING_REPLY_PATIENCE_MS
     ) {
       return;
@@ -124,7 +136,7 @@ export function VoiceReplyBubble({
 
     // text 清空（正常完结 / 打断 / 停止）：内容静置保留，等用户点击关闭。
     // 同 props 重渲染不复活——展示仅由新内容或点击关闭驱动。
-  }, [text, announcement, userText, patienceTick]);
+  }, [text, announcement, userText, turnSeq, patienceTick]);
 
   // 卸载时清理定时器
   useEffect(

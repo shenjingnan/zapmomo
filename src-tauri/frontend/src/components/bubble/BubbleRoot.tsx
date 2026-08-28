@@ -125,6 +125,7 @@ export function BubbleRoot() {
           <VoiceReplyBubble
             text={voice.pendingReply}
             userText={voice.turnUserText}
+            turnSeq={voice.turnSeq}
             announcement={announcement}
             onVisibleChange={setBubbleVisible}
           />

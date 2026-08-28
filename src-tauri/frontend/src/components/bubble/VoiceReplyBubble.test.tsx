@@ -391,4 +391,20 @@ describe("VoiceReplyBubble（回复气泡）", () => {
     expect(screen.getByText("我：问题")).toBeTruthy();
     expect(screen.getByText("部分回复")).toBeTruthy();
   });
+
+  it("同文本连发（turnSeq 递增）开启新一轮并顶掉旧内容", () => {
+    const { rerender } = render(<VoiceReplyBubble text="" userText="继续" turnSeq={1} />);
+    rerender(<VoiceReplyBubble text="好的，继续推进" userText="继续" turnSeq={1} />);
+    rerender(<VoiceReplyBubble text="" userText="继续" turnSeq={2} />);
+    expect(screen.getByText("我：继续")).toBeTruthy();
+    expect(screen.queryByText("好的，继续推进")).toBeNull();
+  });
+
+  it("同文本同 turnSeq 重渲染不重复登记（不触发清场）", () => {
+    const { rerender } = render(<VoiceReplyBubble text="" userText="继续" turnSeq={1} />);
+    rerender(<VoiceReplyBubble text="回复中" userText="继续" turnSeq={1} />);
+    rerender(<VoiceReplyBubble text="" userText="继续" turnSeq={1} />);
+    expect(screen.getByText("回复中")).toBeTruthy(); // 静置保留，未因重渲染清场
+    expect(screen.getByText("我：继续")).toBeTruthy();
+  });
 });
