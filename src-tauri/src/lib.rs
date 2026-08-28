@@ -4123,11 +4123,19 @@ fn current_companion_click_through() -> bool {
     }
 }
 
-/// 读当前文字输入条可见性（读失败或缺省回退 false）。
+/// 解析文字输入条可见性（未配置 → 默认显示）。
+///
+/// 「缺省 = 显示」承载首次启动体验：角色出现时输入条一同出现。用户一旦显式
+/// 关闭（托盘/右键取消勾选 / Esc），`visible` 持久化为 false，之后启动均尊重。
+fn resolve_chatbox_visible(chatbox: Option<&ChatboxSettings>) -> bool {
+    chatbox.and_then(|c| c.visible).unwrap_or(true)
+}
+
+/// 读当前文字输入条可见性（读失败/无文件视为未配置，与启动缺省一致：显示）。
 fn current_chatbox_visible() -> bool {
     match settings::load_settings() {
-        Ok(Some(s)) => s.chatbox.as_ref().and_then(|c| c.visible).unwrap_or(false),
-        _ => false,
+        Ok(Some(s)) => resolve_chatbox_visible(s.chatbox.as_ref()),
+        _ => true,
     }
 }
 
@@ -5697,8 +5705,9 @@ pub fn run() {
             }
             settings.build()?;
 
-            // 文字输入条窗口：默认隐藏，由托盘/右键菜单「文字输入条」勾选打开；
-            // 关闭走全局 CloseRequested → hide。macOS 建窗后转为非激活面板
+            // 文字输入条窗口：显隐走持久化开关（缺省显示——首次启动随角色一同
+            // 出现），托盘/右键菜单「文字输入条」可勾选开关；关闭走全局
+            // CloseRequested → hide。macOS 建窗后转为非激活面板
             // （见下方 to_panel::<ChatboxPanel>）：聚焦输入不激活应用，IME 行为
             // 由 can_become_key_window 保证；其它平台保持普通可激活窗口。
             let chatbox_cfg = loaded.as_ref().and_then(|s| s.chatbox.clone());
@@ -5753,11 +5762,8 @@ pub fn run() {
                     panel.set_level(MACOS_OVERLAY_PANEL_LEVEL);
                 }
             }
-            // 恢复持久化的可见性（缺省隐藏）
-            if chatbox_cfg
-                .as_ref()
-                .and_then(|c| c.visible)
-                .unwrap_or(false)
+            // 恢复持久化的可见性（缺省显示：首次启动输入条随角色一同出现）
+            if resolve_chatbox_visible(chatbox_cfg.as_ref())
                 && let Some(window) = app.get_webview_window("chatbox")
             {
                 let _ = window.show();
@@ -5983,6 +5989,33 @@ mod companion_locked_tests {
         };
         assert!(resolve_locked(Some(&on)));
         assert!(!resolve_locked(Some(&off)));
+    }
+}
+
+#[cfg(test)]
+mod chatbox_visible_tests {
+    use super::resolve_chatbox_visible;
+    use zapmomo::config::settings::ChatboxSettings;
+
+    #[test]
+    fn test_resolve_chatbox_visible_missing_defaults_true() {
+        // 首次启动（无 [chatbox] 段）：输入条随角色默认显示
+        assert!(resolve_chatbox_visible(None));
+        assert!(resolve_chatbox_visible(Some(&ChatboxSettings::default())));
+    }
+
+    #[test]
+    fn test_resolve_chatbox_visible_reads_flag() {
+        let on = ChatboxSettings {
+            visible: Some(true),
+            ..Default::default()
+        };
+        let off = ChatboxSettings {
+            visible: Some(false),
+            ..Default::default()
+        };
+        assert!(resolve_chatbox_visible(Some(&on)));
+        assert!(!resolve_chatbox_visible(Some(&off)));
     }
 }
 
