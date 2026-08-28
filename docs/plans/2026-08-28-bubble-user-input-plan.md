@@ -468,3 +468,7 @@ git commit -m "feat(bubble): BubbleRoot 接通 turnUserText，气泡呈现一轮
 
 - 压制分支初版为无界压制（`awaitingReplyRef` 无时间上限），与「用户句静置期间插播正
   常补展示」测试预期矛盾（TDD 红灯暴露）；修订为 5s 耐心窗口，设计文档 §3.4 已同步。
+- 耐心窗口的时间释放需要渲染触发点：到期经定时器 bump tick state 强制 effect 重评，
+  否则「窗口内暂存的插播」在回复始终未始时永不展示（质量评审 Important，已修）。
+- 勘误版第 5 个用例中 `advanceTimersByTime(0)` + 多余一次 rerender 属冗余（依赖
+  announcement prop 变化触发 effect 即可），实现时已删，行为等价。
