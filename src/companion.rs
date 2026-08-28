@@ -2665,12 +2665,14 @@ mod tests {
             let root = get_companions_dir();
             let id = "companion-abc";
             make_valid_model(&root.join(id), "cat.model3.json");
+            // 路径须经 JSON 字符串转义后再拼入，否则 Windows 反斜杠路径是非法 JSON。
+            let json_path = |p: &Path| serde_json::to_string(&p.display().to_string()).unwrap();
             std::fs::write(
                 root.join(LIBRARY_FILE),
                 format!(
-                    r#"{{"schema_version":1,"models":[{{"id":"{id}","name":"cat","model_dir":"{}","model_file":"{}","format":"cubism3","imported_at":"t"}}],"active_model_id":"{id}"}}"#,
-                    root.join(id).display(),
-                    root.join(id).join("cat.model3.json").display()
+                    r#"{{"schema_version":1,"models":[{{"id":"{id}","name":"cat","model_dir":{},"model_file":{},"format":"cubism3","imported_at":"t"}}],"active_model_id":"{id}"}}"#,
+                    json_path(&root.join(id)),
+                    json_path(&root.join(id).join("cat.model3.json"))
                 ),
             )
             .unwrap();
