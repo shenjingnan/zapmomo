@@ -154,14 +154,25 @@ it("userText 等回复期间插播被压制，回复完结后补展示且清用�
   expect(screen.queryByText("我：问题")).toBeNull();
 });
 
-it("userText 静置（无回复）期间到达的新鲜插播正常补展示", () => {
+it("等回复耐心窗口内插播被压制", () => {
   const { rerender } = render(<VoiceReplyBubble text="" userText="问题" />);
   act(() => {
-    vi.advanceTimersByTime(1000);
+    vi.advanceTimersByTime(3000);
   });
-  // 回复始终未开始（等过 awaiting 窗口后 text 仍空）——用新一轮插播直接验证顶替
+  rerender(<VoiceReplyBubble text="" userText="问题" announcement="插播台词" />);
+  expect(screen.getByText("我：问题")).toBeTruthy();
+  expect(screen.queryByText("插播台词")).toBeNull();
+});
+
+it("等回复耐心窗口过期后（回复始终未始），插播到达正常展示", () => {
+  const { rerender } = render(<VoiceReplyBubble text="" userText="问题" />);
+  expect(screen.getByText("我：问题")).toBeTruthy();
+  act(() => {
+    vi.advanceTimersByTime(6000);
+  });
   rerender(<VoiceReplyBubble text="" userText="问题" announcement="插播台词" />);
   expect(screen.getByText("插播台词")).toBeTruthy();
+  expect(screen.queryByText("我：问题")).toBeNull();
 });
 
 it("点击关闭一次性清空用户句与回复", () => {
@@ -232,6 +243,14 @@ Expected: FAIL —— `userText` prop 不存在（TS 报错/用例失败）。
 
 `VoiceReplyBubble.tsx` 改动：
 
+a0) 新常量（`ANNOUNCEMENT_FRESH_MS` 旁）：
+
+```tsx
+/** 等回复耐心窗口（毫秒）：用户句落屏后此窗口内压制插播；回复始终未始（如 LLM 出错）
+ * 超过窗口则插播恢复正常展示（最新发言胜出）。 */
+const AWAITING_REPLY_PATIENCE_MS = 5000;
+```
+
 a) props 新增 `userText`（`text` 之前），组件 doc 注释同步：
 
 ```tsx
@@ -264,6 +283,8 @@ const freshTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefine
 // 用户新到判定 + 「等回复」压制窗口（userText 落屏到本轮回复开始前）
 const lastUserTextRef = useRef("");
 const awaitingReplyRef = useRef(false);
+// 耐心窗口打点：压制带 5s 上限，回复始终未始时插播恢复正常展示
+const awaitingSinceRef = useRef(0);
 // 按住状态（不变）
 const pressRef = useRef<{ x: number; y: number; moved: boolean } | null>(null);
 ```
@@ -291,6 +312,7 @@ useEffect(() => {
     lastUserTextRef.current = userText;
     if (userText) {
       awaitingReplyRef.current = true;
+      awaitingSinceRef.current = Date.now();
       sourceRef.current = "turn";
       setVisibleUser(userText);
       // 同批已有首 token 则不清场（直接被下方 text 分支覆盖为新回复）
@@ -306,8 +328,13 @@ useEffect(() => {
     return;
   }
 
-  // 用户句在屏、回复未始：压制插播（用户主动对话优先，暂存等补展示）
-  if (awaitingReplyRef.current && visibleUser !== "") {
+  // 用户句在屏、回复未始：耐心窗口内压制插播（用户主动对话优先，暂存等补展示；
+  // 窗口过期——回复始终未来——则放行到下方插播展示，最新发言胜出）
+  if (
+    awaitingReplyRef.current &&
+    visibleUser !== "" &&
+    Date.now() - awaitingSinceRef.current <= AWAITING_REPLY_PATIENCE_MS
+  ) {
     return;
   }
 
@@ -434,5 +461,10 @@ git commit -m "feat(bubble): BubbleRoot 接通 turnUserText，气泡呈现一轮
 
 - 改动集中在 3 个文件，旧用例零改动全绿是回归底线；任何旧用例变红说明语义被破坏，
   修实现而非改用例。
-- 插播压制新增 `awaitingReplyRef` 窗口：若手测发现插播长期不补展示，优先检查该 ref
-  是否在 text 非空分支正确复位。
+- 插播压制带 5s 耐心窗口（`awaitingReplyRef` + `awaitingSinceRef` 惰性判定）：若手测
+  发现插播长期不补展示，优先检查窗口判定条件与 `awaitingSinceRef` 打点位置。
+
+## 实施期勘误记录
+
+- 压制分支初版为无界压制（`awaitingReplyRef` 无时间上限），与「用户句静置期间插播正
+  常补展示」测试预期矛盾（TDD 红灯暴露）；修订为 5s 耐心窗口，设计文档 §3.4 已同步。
