@@ -8,6 +8,20 @@ export interface ModelBounds {
   height: number;
 }
 
+/** 单个矩形（模型局部 / stage 坐标），几何形状与协议类型 `HitRect` 相同。 */
+export interface ModelRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** 智能穿透上报的部件数上限：按面积降序截断，限制 payload 与 Rust 点查成本。 */
+export const MAX_HIT_RECTS = 32;
+
+/** drawable 透明度低于该值视为隐藏（换装/水印部件不产生幽灵命中区）。 */
+export const DRAWABLE_OPACITY_MIN = 0.05;
+
 /**
  * 遍历所有 drawable，合并边界得到角色真实最小包围盒（AABB）。
  *
@@ -65,4 +79,46 @@ export function layoutModel(model: Live2DModel, width: number, height: number, m
   model.scale.set(scale);
   model.anchor.set(0, 0);
   model.position.set(width / 2 - b.cx * scale, height / 2 - b.cy * scale);
+}
+
+/**
+ * 逐 drawable 输出可见包围盒（模型局部坐标，已乘 layout 缩放因子 sx/sy），
+ * 供智能穿透把角色画面映射为窗口内的命中矩形集（见 SMART_CLICK_THROUGH_DESIGN.md）。
+ *
+ * 复用 [`computeModelBounds`] 的 NaN 防线（moc3 v5 惰性填充 mesh）；另按
+ * `coreModel.getDrawableOpacity` 过滤隐藏部件——不用 `DrawableFlags.IsVisible`，
+ * 眨眼等瞬时隐藏会把眼睛的 rect 抖掉；取不到 opacity（测试桩/旧 core）视为可见。
+ *
+ * 结果按面积降序截断到 `maxRects`：保留视觉上最大的部件，限制上报体积。
+ */
+export function computeModelHitRects(model: Live2DModel, maxRects = MAX_HIT_RECTS): ModelRect[] {
+  const im = model.internalModel;
+  const sx = im.width / im.originalWidth;
+  const sy = im.height / im.originalHeight;
+  const rects: ModelRect[] = [];
+  for (const id of im.getDrawableIDs()) {
+    const index = im.getDrawableIndex(id);
+    const b = im.getDrawableBounds(index);
+    if (
+      !Number.isFinite(b.x) ||
+      !Number.isFinite(b.y) ||
+      !Number.isFinite(b.width) ||
+      !Number.isFinite(b.height)
+    ) {
+      continue;
+    }
+    if (b.width <= 0 || b.height <= 0) {
+      continue;
+    }
+    // coreModel 静态类型是 object（跨运行时基类）；窄化出本次需要的可选方法，
+    // 取不到（测试桩/旧 core）视为可见。
+    const core = im.coreModel as { getDrawableOpacity?(index: number): number } | undefined;
+    const opacity = core?.getDrawableOpacity?.(index) ?? 1;
+    if (opacity < DRAWABLE_OPACITY_MIN) {
+      continue;
+    }
+    rects.push({ x: b.x * sx, y: b.y * sy, width: b.width * sx, height: b.height * sy });
+  }
+  rects.sort((a, b) => b.width * b.height - a.width * a.height);
+  return rects.length > maxRects ? rects.slice(0, maxRects) : rects;
 }

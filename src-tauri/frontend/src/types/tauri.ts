@@ -130,6 +130,18 @@ export type CompanionWindowLayer = "front" | "back";
 /** 角色窗口拖拽模式：direct（左键直接拖动，默认）/ modifier（需按住 cmd/Ctrl） */
 export type CompanionDragMode = "direct" | "modifier";
 
+/**
+ * 角色窗口可命中矩形（窗口内逻辑像素，原点 = 窗口左上角）。
+ * 与 Rust 侧 `zapmomo::companion_click_through::HitRect` 一一对应；
+ * 智能穿透用它判定光标是否落在角色画面上。
+ */
+export interface HitRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 /** BongoCat 表演道具资源（非 BongoCat 模型为 null） */
 export interface PerformancePropsInfo {
   /** 键盘背景图绝对路径（resources/background.png） */
@@ -157,6 +169,8 @@ export interface Live2dConfigInfo {
   window_scale: number | null;
   window_opacity: number | null;
   click_through: boolean | null;
+  /** 智能穿透（null = 旧后端未返回，视为开启——其缺省值） */
+  smart_click_through: boolean | null;
   window_layer: CompanionWindowLayer | null;
   /** 位置锁定（禁止拖动窗口；null = 旧后端未返回，视为未锁定） */
   locked: boolean | null;
