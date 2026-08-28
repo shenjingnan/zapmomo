@@ -32,6 +32,7 @@ import type {
   Live2dModelInfo,
   LlmConfigInfo,
   LlmFinishReason,
+  LlmParamsPatch,
   LlmStatus,
   LlmToken,
   PerformanceScene,
@@ -96,6 +97,8 @@ export const api = {
   renameCompanion: (args: { id: string; name: string }) =>
     invoke<CompanionLibraryView>("rename_companion", args),
   removeCompanion: (args: { id: string }) => invoke<CompanionLibraryView>("remove_companion", args),
+  /** 在文件管理器中打开伙伴的托管资产目录（可自行调整音色参考等资产）。 */
+  openCompanionDir: (args: { id: string }) => invoke<void>("open_companion_dir", args),
   saveCoverImage: (args: { id: string; png: number[] }) =>
     invoke<CompanionLibraryView>("save_cover_image", args),
   getTtsConfig: () => invoke<TtsConfigInfo>("get_tts_config"),
@@ -131,6 +134,8 @@ export const api = {
   setLlmConnection: (args: { baseUrl: string; apiKey?: string | null; model: string }) =>
     invoke<void>("set_llm_connection", args),
   setLlmSystemPrompt: (args: { prompt: string }) => invoke<void>("set_llm_system_prompt", args),
+  /** 批量保存 LLM 参数补丁（含 thinking / reasoning_effort）；None 字段保持不变 */
+  setLlmParams: (args: { params: LlmParamsPatch }) => invoke<void>("set_llm_params", args),
   // ---- 语音会话（KWS→ASR→LLM→TTS 全链路）----
   startVoiceSession: () => invoke<void>("start_voice_session"),
   stopVoiceSession: () => invoke<void>("stop_voice_session"),

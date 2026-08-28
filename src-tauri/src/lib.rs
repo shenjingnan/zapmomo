@@ -1476,6 +1476,10 @@ struct LlmConfigInfo {
     /// 前端默认 password 圆点展示，用户点小眼睛才显式明文）。
     api_key: Option<String>,
     model: Option<String>,
+    /// 是否启用思考（已 resolve 缺省推断；仅 anthropic provider 生效）
+    thinking: bool,
+    /// 思考力度（thinking 关闭时保留原值但运行时忽略）
+    reasoning_effort: Option<String>,
 }
 
 /// 加载状态事件载荷。
@@ -1552,6 +1556,8 @@ fn get_llm_config(state: State<'_, LlmState>) -> Result<LlmConfigInfo, String> {
         base_url: cfg.base_url,
         api_key: cfg.api_key,
         model: cfg.model,
+        thinking: cfg.thinking,
+        reasoning_effort: cfg.reasoning_effort,
     })
 }
 
@@ -2486,7 +2492,11 @@ fn set_llm_connection(
 ) -> Result<(), String> {
     let mut settings = settings::load_settings()?.unwrap_or_default();
     let llm = settings.llm.get_or_insert_with(LlmSettings::default);
-    llm.provider = Some("openai".to_string());
+    // provider 仅在未设置时默认 "openai"；已配置的（如 "anthropic"）保留，
+    // 避免设置页保存连接时把其他 provider 重置回 OpenAI 兼容
+    if llm.provider.is_none() {
+        llm.provider = Some("openai".to_string());
+    }
     if !base_url.trim().is_empty() {
         llm.base_url = Some(base_url.trim().to_string());
     }
@@ -5128,6 +5138,35 @@ fn open_storage_dir() -> Result<(), String> {
     open_path(&zapmomo::config::settings::get_models_dir())
 }
 
+/// 从伙伴清单定位要打开的托管资产目录：未知 id 或目录已缺失均报错。
+///
+/// 返回清单中的 `model_dir`（绝对路径字符串），打开前校验目录真实存在，
+/// 避免文件管理器弹系统级错误。
+fn resolve_companion_dir<'a>(
+    models: &'a [zapmomo::companion::CompanionModel],
+    id: &str,
+) -> Result<&'a str, String> {
+    let model = models
+        .iter()
+        .find(|m| m.id == id)
+        .ok_or_else(|| format!("未知的伙伴：{id}"))?;
+    if !Path::new(&model.model_dir).is_dir() {
+        return Err(format!(
+            "伙伴「{}」的资产目录不存在，可能已被移动或删除",
+            model.name
+        ));
+    }
+    Ok(&model.model_dir)
+}
+
+/// 在文件管理器中打开指定伙伴的托管资产目录（用户可自行调整音色参考等资产）。
+#[tauri::command]
+fn open_companion_dir(id: String) -> Result<(), String> {
+    let lib = zapmomo::companion::load_library_fast()?;
+    let dir = resolve_companion_dir(&lib.models, &id)?;
+    open_path(Path::new(dir))
+}
+
 /// 角色窗口初始尺寸（逻辑像素，与 `setup` 中的 `inner_size` 保持一致）。
 const COMPANION_INITIAL_W: f64 = 360.0;
 const COMPANION_INITIAL_H: f64 = 480.0;
@@ -5334,6 +5373,7 @@ pub fn run() {
             set_active_companion,
             rename_companion,
             remove_companion,
+            open_companion_dir,
             save_cover_image,
             save_companion_position,
             save_chatbox_position,
@@ -6023,6 +6063,58 @@ mod companion_menu_tests {
         assert_eq!(entries[0].label, "mochi");
         assert!(!entries[0].checked);
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod companion_open_dir_tests {
+    use super::resolve_companion_dir;
+    use std::path::Path;
+    use zapmomo::companion::CompanionModel;
+
+    fn model(id: &str, name: &str, model_dir: &Path) -> CompanionModel {
+        let manifest = model_dir.join(format!("{name}.model3.json"));
+        CompanionModel {
+            id: id.to_string(),
+            name: name.to_string(),
+            source_path: None,
+            model_dir: model_dir.display().to_string(),
+            model_file: manifest.display().to_string(),
+            format: "cubism3".to_string(),
+            imported_at: "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_resolve_companion_dir_returns_managed_dir() {
+        // 托管目录真实存在 → 返回目录路径（交给 open_path 打开）。
+        let dir = std::env::temp_dir().join("zapmomo-companion-open-dir-hit");
+        std::fs::create_dir_all(&dir).unwrap();
+        let m = model("companion-aaa", "大月下", &dir);
+        assert_eq!(
+            resolve_companion_dir(&[m], "companion-aaa").unwrap(),
+            dir.display().to_string()
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_resolve_companion_dir_unknown_id_errors() {
+        let dir = std::env::temp_dir().join("zapmomo-companion-open-dir-miss");
+        std::fs::create_dir_all(&dir).unwrap();
+        let m = model("companion-aaa", "大月下", &dir);
+        let err = resolve_companion_dir(&[m], "companion-bbb").unwrap_err();
+        assert!(err.contains("companion-bbb"), "错误需包含未知 id：{err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_resolve_companion_dir_missing_dir_errors() {
+        // 托管目录被用户删掉/移动 → 报错而非让文件管理器弹错。
+        let missing = Path::new("/nonexistent/zapmomo/aaa");
+        let m = model("companion-aaa", "大月下", missing);
+        let err = resolve_companion_dir(&[m], "companion-aaa").unwrap_err();
+        assert!(err.contains("不存在"), "错误需说明目录缺失：{err}");
     }
 }
 

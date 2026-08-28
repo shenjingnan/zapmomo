@@ -1,6 +1,7 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   CircleAlert,
+  FolderOpen,
   Image as ImageIcon,
   Pencil,
   Sparkles,
@@ -54,7 +55,7 @@ function canvasToPngBytes(canvas: HTMLCanvasElement, maxSize = 256): number[] {
   return Array.from(bytes);
 }
 
-/** 左侧列表项：placeholder 缩略图 + 名称 + 重命名/移除 + active Badge + selected 高亮。 */
+/** 左侧列表项：placeholder 缩略图 + 名称 + 打开资产/重命名/移除 + active Badge + selected 高亮。 */
 function CompanionListItem({
   model,
   selected,
@@ -62,6 +63,7 @@ function CompanionListItem({
   onSelect,
   onRename,
   onRequestRemove,
+  onOpenAssets,
 }: {
   model: CompanionModelInfo;
   selected: boolean;
@@ -69,6 +71,7 @@ function CompanionListItem({
   onSelect: () => void;
   onRename: (id: string, name: string) => void;
   onRequestRemove: (model: CompanionModelInfo) => void;
+  onOpenAssets: (id: string) => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(model.name);
@@ -168,6 +171,21 @@ function CompanionListItem({
           )}
         </span>
       </button>
+
+      {!editing && (
+        <button
+          type="button"
+          aria-label={`打开「${model.name}」的资产文件夹`}
+          title="在文件管理器中打开资产目录，可自行替换音色参考等文件"
+          onClick={(e) => {
+            e.stopPropagation();
+            onOpenAssets(model.id);
+          }}
+          className="shrink-0 rounded p-1 text-muted-foreground opacity-60 transition-opacity group-hover:opacity-100 hover:text-text-primary focus:opacity-100"
+        >
+          <FolderOpen className="h-3.5 w-3.5" />
+        </button>
+      )}
 
       {!editing && (
         <button
@@ -343,8 +361,17 @@ function MotionCatalogPanel({
  * `activeModelId`（后端 `library.json` 持久化，真正驱动桌宠窗口）。
  */
 export function CompanionPage() {
-  const { library, loading, error, importModel, setActive, rename, remove, saveCover } =
-    useCompanionLibrary();
+  const {
+    library,
+    loading,
+    error,
+    importModel,
+    setActive,
+    rename,
+    remove,
+    openAssetsDir,
+    saveCover,
+  } = useCompanionLibrary();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [stageError, setStageError] = useState<string | null>(null);
   const [previewSize, setPreviewSize] = useState({ width: 0, height: 0 });
@@ -544,6 +571,7 @@ export function CompanionPage() {
                     onSelect={() => selectModel(model.id)}
                     onRename={(id, name) => void rename(id, name)}
                     onRequestRemove={setRemoveTarget}
+                    onOpenAssets={(id) => void openAssetsDir(id)}
                   />
                 ))}
               </div>

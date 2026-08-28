@@ -136,6 +136,13 @@ pub struct LlmParamsPatch {
     pub repeat_penalty: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed: Option<u32>,
+    /// 是否启用思考（thinking 开关）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<bool>,
+    /// 思考力度（low / medium / high / max；仅 thinking 开启时生效。
+    /// 开关关闭时该值仍持久化保留，只是运行时忽略——GUI 置灰保留选择的语义）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
 
 impl LlmParamsPatch {
@@ -193,6 +200,17 @@ impl LlmParamsPatch {
         }
         if let Some(v) = self.seed {
             llm.seed = Some(v);
+        }
+        if let Some(v) = self.thinking {
+            llm.thinking = Some(v);
+        }
+        if let Some(v) = &self.reasoning_effort {
+            let lowered = v.trim().to_lowercase();
+            // 与 anthropic.rs 的 parse_reasoning_effort 保持同一合法集（low/medium/high/max）
+            if !matches!(lowered.as_str(), "low" | "medium" | "high" | "max") {
+                return Err(format!("推理强度需为 low / medium / high / max，当前 {v}"));
+            }
+            llm.reasoning_effort = Some(lowered);
         }
         Ok(())
     }
@@ -252,6 +270,8 @@ mod tests {
             min_p: Some(0.1),
             repeat_penalty: Some(1.2),
             seed: Some(42),
+            thinking: Some(true),
+            reasoning_effort: Some("High".to_string()), // 大小写归一化
         }
     }
 
@@ -266,6 +286,8 @@ mod tests {
         assert_eq!(llm.min_p, Some(0.1));
         assert_eq!(llm.repeat_penalty, Some(1.2));
         assert_eq!(llm.seed, Some(42));
+        assert_eq!(llm.thinking, Some(true));
+        assert_eq!(llm.reasoning_effort.as_deref(), Some("high"));
     }
 
     #[test]
@@ -326,6 +348,13 @@ mod tests {
                 },
                 "重复惩罚",
             ),
+            (
+                LlmParamsPatch {
+                    reasoning_effort: Some("extreme".to_string()),
+                    ..Default::default()
+                },
+                "推理强度",
+            ),
         ];
         for (patch, label) in cases {
             let mut llm = LlmSettings::default();
@@ -380,8 +409,10 @@ mod tests {
     #[test]
     fn test_patch_resolve_roundtrip() {
         crate::test_util::run_with_temp_home(|_home| {
-            let mut llm = LlmSettings::default();
-            llm.system_prompt = Some("自定义提示词".to_string());
+            let mut llm = LlmSettings {
+                system_prompt: Some("自定义提示词".to_string()),
+                ..Default::default()
+            };
             patch_with_all().apply_to(&mut llm).unwrap();
 
             let cfg = crate::llm::config::resolve(Some(&llm)).unwrap();
@@ -389,6 +420,9 @@ mod tests {
             assert_eq!(cfg.params.temperature, 0.9);
             assert_eq!(cfg.params.top_p, 0.95);
             assert_eq!(cfg.params.max_tokens, 1024);
+            // patch → settings → resolve 全链路透传
+            assert!(cfg.thinking);
+            assert_eq!(cfg.reasoning_effort.as_deref(), Some("high"));
         });
     }
 }

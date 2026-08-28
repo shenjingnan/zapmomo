@@ -81,6 +81,8 @@ function makeLlmConfig() {
     base_url: null as string | null,
     api_key: null as string | null,
     model: null as string | null,
+    thinking: false,
+    reasoning_effort: null as string | null,
     params: { ...DEFAULT_PARAMS },
   };
 }
