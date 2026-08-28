@@ -350,7 +350,7 @@ mod tests {
             tiny_http::ListenAddr::Unix(_) => unreachable!("显式绑定 127.0.0.1"),
         };
         std::thread::spawn(move || {
-            for mut request in server.incoming_requests() {
+            for request in server.incoming_requests() {
                 let samples = vec![0.2f32; (sample_rate / 10) as usize]; // 0.1s
                 let base = tempfile::tempdir().unwrap();
                 let path = base.path().join("resp.wav");

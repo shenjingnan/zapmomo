@@ -806,7 +806,7 @@ pub(crate) mod tests {
 
         let mut stages = Vec::new();
         install_asset_to(
-            &default_asset(),
+            default_asset(),
             &dest,
             false,
             &mut |p| stages.push(p.stage),

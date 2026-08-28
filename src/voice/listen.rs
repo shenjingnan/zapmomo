@@ -166,7 +166,7 @@ mod tests {
     fn test_accumulator_zero_chunk_size_clamped() {
         let mut acc = ChunkAccumulator::new(0);
         let mut out = Vec::new();
-        acc.push(&vec![0.0; 10], &mut out);
+        acc.push(&[0.0; 10], &mut out);
         assert_eq!(acc.chunk_size, 1);
         assert_eq!(out.len(), 10);
     }

@@ -923,7 +923,7 @@ mod tests {
     fn test_synthesize_streaming_error_event() {
         let events = format!(
             "{}data: {}\n\n",
-            sse_delta(&vec![0i16; 8]),
+            sse_delta(&[0i16; 8]),
             serde_json::json!({"type": "error", "message": "busy timeout"})
         );
         let (base_url, _received, _handle) = spawn_stub_sse(events);

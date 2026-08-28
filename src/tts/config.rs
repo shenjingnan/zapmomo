@@ -1012,7 +1012,7 @@ mod tests {
                     .map(|s| s.to_string_lossy().to_string()),
                 Some("model.onnx".to_string())
             );
-            assert_eq!(cfg.dict_dir.is_some(), true);
+            assert!(cfg.dict_dir.is_some());
         });
     }
 
@@ -1216,7 +1216,7 @@ mod tests {
         assert!(!cfg.uses_reference_audio());
 
         // audiocpp + qwen3_tts -> true（克隆族，backend 感知）
-        let mut cfg = ResolvedTtsConfig {
+        let cfg = ResolvedTtsConfig {
             backend: TtsBackendKind::Audiocpp,
             model_type: TtsModelKind::Qwen3Tts06,
             ..ResolvedTtsConfig::default()
