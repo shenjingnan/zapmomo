@@ -7073,7 +7073,7 @@ version = "0.1.18"
 dependencies = [
  "anyhow",
  "async-openai",
- "base64 0.22.1",
+ "base64 0.23.1",
  "block2",
  "bzip2 0.6.1",
  "chrono",

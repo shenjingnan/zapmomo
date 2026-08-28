@@ -39,7 +39,7 @@ sherpa-onnx = "1.13"
 hound = "3.5"
 
 # base64 解码（audio.cpp SSE 流式 delta 载荷；纯 Rust 零传递依赖）
-base64 = "0.22"
+base64 = "0.23"
 
 # HTTP 客户端（OpenAI 兼容 Responses / llama.cpp-server / audio.cpp sidecar；
 # multipart 供 ASR 转写上传 wav）
