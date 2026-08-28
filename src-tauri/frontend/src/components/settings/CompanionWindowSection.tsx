@@ -7,13 +7,14 @@ import type { CompanionDragMode, CompanionWindowLayer } from "@/types/tauri";
 /**
  * 设置页「伙伴窗口」区块。
  *
- * 层级 / 点击穿透 / 锁定位置 / 修饰键拖动四个窗口级行为（全局生效，
+ * 层级 / 强制穿透 / 智能穿透 / 锁定位置 / 修饰键拖动五个窗口级行为（全局生效，
  * 对所有伙伴一致），从伙伴页迁入。挂载时经 get_live2d_config 恢复，
  * 切换乐观更新，写配置失败时回滚到原值。
  */
 export function CompanionWindowSection() {
   const [layer, setLayer] = useState<CompanionWindowLayer>("front");
   const [clickThrough, setClickThrough] = useState(false);
+  const [smartClickThrough, setSmartClickThrough] = useState(true);
   const [locked, setLocked] = useState(false);
   const [dragMode, setDragMode] = useState<CompanionDragMode>("direct");
 
@@ -21,9 +22,10 @@ export function CompanionWindowSection() {
     void api
       .getLive2dConfig()
       .then((cfg) => {
-        // 旧后端 / 测试桩可能不返回该字段，兜底为关闭。
+        // 旧后端 / 测试桩可能不返回该字段，兜底为关闭（智能穿透兜底为开启，是其缺省值）。
         if (cfg.window_layer) setLayer(cfg.window_layer);
         setClickThrough(cfg.click_through ?? false);
+        setSmartClickThrough(cfg.smart_click_through ?? true);
         setLocked(cfg.locked ?? false);
         setDragMode(cfg.drag_mode ?? "direct");
       })
@@ -41,6 +43,11 @@ export function CompanionWindowSection() {
   const handleToggleClickThrough = useCallback((enabled: boolean) => {
     setClickThrough(enabled);
     void api.setCompanionClickThrough({ enabled }).catch(() => setClickThrough(!enabled));
+  }, []);
+
+  const handleToggleSmartClickThrough = useCallback((enabled: boolean) => {
+    setSmartClickThrough(enabled);
+    void api.setCompanionSmartClickThrough({ enabled }).catch(() => setSmartClickThrough(!enabled));
   }, []);
 
   const handleToggleLocked = useCallback((enabled: boolean) => {
@@ -87,15 +94,29 @@ export function CompanionWindowSection() {
 
         <div className="flex items-center justify-between gap-3.5 px-3.5 py-2.5">
           <div className="min-w-0">
-            <dt className="text-sm text-text-primary">点击穿透</dt>
+            <dt className="text-sm text-text-primary">强制穿透</dt>
             <dd className="mt-0.5 text-xs text-text-muted">
-              鼠标点击穿过窗口直达背后内容（可从托盘菜单关闭）
+              整窗对所有鼠标事件透明，优先于智能穿透（可从托盘菜单关闭）
             </dd>
           </div>
           <Switch
-            aria-label="点击穿透"
+            aria-label="强制穿透"
             checked={clickThrough}
             onCheckedChange={handleToggleClickThrough}
+          />
+        </div>
+
+        <div className="flex items-center justify-between gap-3.5 px-3.5 py-2.5">
+          <div className="min-w-0">
+            <dt className="text-sm text-text-primary">智能穿透</dt>
+            <dd className="mt-0.5 text-xs text-text-muted">
+              鼠标悬停在角色画面上时可交互，其余区域点击穿透到身后窗口
+            </dd>
+          </div>
+          <Switch
+            aria-label="智能穿透"
+            checked={smartClickThrough}
+            onCheckedChange={handleToggleSmartClickThrough}
           />
         </div>
 

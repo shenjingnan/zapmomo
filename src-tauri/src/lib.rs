@@ -16,13 +16,17 @@ use tauri::menu::PredefinedMenuItem;
 use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
 use tauri::{
-    AppHandle, Emitter, LogicalPosition, Manager, State, WebviewUrl, WebviewWindowBuilder,
-    WindowEvent,
+    AppHandle, Emitter, LogicalPosition, Manager, PhysicalPosition, PhysicalSize, State,
+    WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
 use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
 use zapmomo::asr::config::AsrParamsPatch;
 use zapmomo::asr::{AsrReaction, AsrResult};
+use zapmomo::companion_click_through::{
+    CompanionPointerPolicy, EXIT_MARGIN_PX, HitRect, cursor_hit, desired_ignore_cursor_events,
+    next_hold, resolve_smart_click_through,
+};
 use zapmomo::config::settings::{
     self, AsrSettings, BubbleSettings, ChatboxSettings, CompanionDragMode, CompanionWindowLayer,
     CompanionWindowPosition, KwsSettings, Live2dSettings, LlmSettings, TtsSettings,
@@ -2728,6 +2732,7 @@ struct Live2dConfigInfo {
     window_scale: Option<f64>,
     window_opacity: Option<f64>,
     click_through: Option<bool>,
+    smart_click_through: Option<bool>,
     window_layer: Option<CompanionWindowLayer>,
     locked: Option<bool>,
     drag_mode: Option<CompanionDragMode>,
@@ -2783,6 +2788,7 @@ fn get_live2d_config(app: AppHandle) -> Result<Live2dConfigInfo, String> {
         .or_else(|| live2d_settings.as_ref().and_then(|l| l.window_scale));
     let window_opacity = live2d_settings.as_ref().and_then(|l| l.window_opacity);
     let click_through = live2d_settings.as_ref().and_then(|l| l.click_through);
+    let smart_click_through = live2d_settings.as_ref().and_then(|l| l.smart_click_through);
     let window_layer = live2d_settings.as_ref().and_then(|l| l.window_layer);
     let locked = live2d_settings.as_ref().and_then(|l| l.locked);
     let drag_mode = live2d_settings.as_ref().and_then(|l| l.drag_mode);
@@ -2795,6 +2801,7 @@ fn get_live2d_config(app: AppHandle) -> Result<Live2dConfigInfo, String> {
         window_scale,
         window_opacity,
         click_through,
+        smart_click_through,
         window_layer,
         locked,
         drag_mode,
@@ -3261,31 +3268,255 @@ fn apply_companion_opacity(app: &AppHandle, opacity: f64) -> Result<(), String> 
     Ok(())
 }
 
-/// 保存并应用角色窗口点击穿透（内部实现，供 command 与原生菜单事件共用）。
+/// 智能穿透轮询周期（≈30Hz）：每 tick 一次 OS 光标直读 + 线程本地计算。
+const POINTER_TICK: std::time::Duration = std::time::Duration::from_millis(33);
+/// 拖动保护期：窗口移动后保持可交互的时长（拖动中切穿透会打断 startDragging
+/// 的系统拖动循环，是此类实现翻车头号原因）。
+const DRAG_HOLD: std::time::Duration = std::time::Duration::from_millis(600);
+/// 右键菜单保护期：原生菜单无关闭回调，定时兜底（期间强制可交互）。
+const MENU_HOLD: std::time::Duration = std::time::Duration::from_millis(4000);
+
+/// 角色窗口指针穿透状态：智能穿透轮询与单一写点共享的全部输入缓存。
+///
+/// policy 由各 `apply_companion_*` 与启动路径刷新（读 settings）；region 由前端经
+/// `set_companion_hit_region` 上报；origin/size/scale 由窗口事件缓存（轮询每 tick
+/// 仅做 OS 光标直读与一次 `is_visible`，不走 dispatcher getter 往返）；
+/// ignore_written 是已写入系统的值，写点据此跳过冗余系统调用。
+struct CompanionPointerState {
+    policy: Mutex<CompanionPointerPolicy>,
+    /// 前端上报的角色可交互矩形（窗口内逻辑像素）；`None` = 前端未就绪
+    /// （启动/加载中/加载失败 → fail-open 判可交互）；`Some([])` = 清屏（穿透）。
+    region: Mutex<Option<Vec<HitRect>>>,
+    /// 窗口外框左上角（全局物理像素；`Moved` 事件缓存）。
+    origin: Mutex<Option<PhysicalPosition<f64>>>,
+    /// 窗口外框尺寸（物理像素；`Resized`/`ScaleFactorChanged` 事件缓存）。
+    size: Mutex<Option<PhysicalSize<f64>>>,
+    /// 窗口所在屏缩放（`ScaleFactorChanged` 事件缓存）。
+    scale: Mutex<f64>,
+    /// 最后一次窗口移动时刻（`DRAG_HOLD` 内视为拖动中，保护期持续顺延）。
+    last_move_at: Mutex<Option<std::time::Instant>>,
+    /// 保护期截止时刻（拖动/右键菜单期间强制可交互）。
+    hold_until: Mutex<Option<std::time::Instant>>,
+    /// 已写入系统的 ignore_cursor_events 值；写点据此跳过冗余系统调用
+    /// （Windows GWL_EXSTYLE 改写 / macOS 属性重排都不便宜）。
+    ignore_written: AtomicBool,
+}
+
+impl CompanionPointerState {
+    fn new() -> Self {
+        Self {
+            policy: Mutex::new(CompanionPointerPolicy {
+                visible: true,
+                layer: CompanionWindowLayer::Front,
+                force_click_through: false,
+                smart_enabled: true,
+            }),
+            region: Mutex::new(None),
+            origin: Mutex::new(None),
+            size: Mutex::new(None),
+            scale: Mutex::new(1.0),
+            last_move_at: Mutex::new(None),
+            hold_until: Mutex::new(None),
+            ignore_written: AtomicBool::new(false),
+        }
+    }
+}
+
+/// 从 settings 刷新穿透策略快照（`visible` 不在此列：写点处现查窗口实况）。
+fn refresh_companion_pointer_policy(app: &AppHandle) {
+    let (force, smart) = match settings::load_settings() {
+        Ok(Some(s)) => (
+            resolve_click_through(s.live2d.as_ref()),
+            resolve_smart_click_through(s.live2d.as_ref()),
+        ),
+        _ => (false, true),
+    };
+    let state = app.state::<CompanionPointerState>();
+    *state.policy.lock().unwrap_or_else(|e| e.into_inner()) = CompanionPointerPolicy {
+        visible: true,
+        layer: current_companion_layer(),
+        force_click_through: force,
+        smart_enabled: smart,
+    };
+}
+
+/// 单一权威写点：按策略快照 + 光标命中 + 保护期重算穿透并应用（值不变跳过系统调用）。
+///
+/// 全平台统一走 tauri `set_ignore_cursor_events`——macOS 上与 tauri-nspanel 的
+/// `setIgnoresMouseEvents:` 打到同一 NSWindow/NSPanel selector，companion 转面板后
+/// 依然有效（历史上两条路径已在同一窗口双用）。这是唯一调用该 API 的地方：
+/// 手动穿透、层级切换（含 Windows 置底点穿）、智能穿透轮询全部经此收敛，
+/// 消除多点写入竞争（含层级切换静默清掉手动穿透的既有 bug）。
+fn sync_companion_ignore_cursor_events_hit(app: &AppHandle, cursor_hit: bool, holding: bool) {
+    let Some(window) = app.get_webview_window("companion") else {
+        return;
+    };
+    let state = app.state::<CompanionPointerState>();
+    let mut policy = *state.policy.lock().unwrap_or_else(|e| e.into_inner());
+    policy.visible = window.is_visible().unwrap_or(false);
+    let desired = desired_ignore_cursor_events(policy, cursor_hit, holding);
+    if state.ignore_written.swap(desired, Ordering::Relaxed) != desired {
+        let _ = window.set_ignore_cursor_events(desired);
+    }
+}
+
+/// 无光标上下文的 push 路径（开关/层级/显隐）共用的 sync：
+/// fail-open 判命中（可交互），轮询 tick 至多 33ms 后按实况纠偏。
+fn sync_companion_ignore_cursor_events(app: &AppHandle) {
+    sync_companion_ignore_cursor_events_hit(app, true, false);
+}
+
+/// 智能穿透轮询单 tick：读光标 → 窗口内逻辑坐标 → 命中判定 → hold 推进 → 单一写点。
+///
+/// smart 关闭时空转早退（写点由 push 路径负责）；`is_visible` 是每 tick 唯一的
+/// dispatcher getter，`cursor_position` 为 OS 直读（无主线程往返），其余输入全部
+/// 来自事件缓存。不直接写 `set_ignore_cursor_events` 之外的窗口属性。
+fn companion_pointer_tick(app: &AppHandle) {
+    let state = app.state::<CompanionPointerState>();
+    if !state
+        .policy
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .smart_enabled
+    {
+        return;
+    }
+    let Some(window) = app.get_webview_window("companion") else {
+        return;
+    };
+    let visible = window.is_visible().unwrap_or(false);
+    let Ok(cursor) = app.cursor_position() else {
+        return;
+    };
+    // 几何缓存未就绪（启动极早期首个 tick）→ 跳过，下一 tick 再判。
+    let origin = *state.origin.lock().unwrap_or_else(|e| e.into_inner());
+    let size = *state.size.lock().unwrap_or_else(|e| e.into_inner());
+    let scale = *state.scale.lock().unwrap_or_else(|e| e.into_inner());
+    let (Some(origin), Some(size)) = (origin, size) else {
+        return;
+    };
+    let local_x = cursor.x - origin.x;
+    let local_y = cursor.y - origin.y;
+    // 窗口盒 clamp：光标明确在窗外（±离开阈值的物理量）直接判未命中。防御混合 DPI
+    // 显示器下 cursor_position（tao 按主屏 scale 折算）与 outer_position（按所在屏
+    // scale）的偏差，避免光标在另一块屏时误判命中。
+    let margin = EXIT_MARGIN_PX * scale;
+    let in_window = local_x >= -margin
+        && local_y >= -margin
+        && local_x <= size.width + margin
+        && local_y <= size.height + margin;
+    let current_ignore = state.ignore_written.load(Ordering::Relaxed);
+    let region = state
+        .region
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let hit = in_window
+        && cursor_hit(
+            region.as_deref(),
+            local_x / scale,
+            local_y / scale,
+            current_ignore,
+        );
+    // hold 推进：窗口刚移动过（拖动中）顺延保护期；右键菜单保护期未过期保持。
+    let now = std::time::Instant::now();
+    let moved = state
+        .last_move_at
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_some_and(|t| now.duration_since(t) <= DRAG_HOLD);
+    let holding = {
+        let mut hold = state.hold_until.lock().unwrap_or_else(|e| e.into_inner());
+        *hold = next_hold(*hold, now, moved, DRAG_HOLD);
+        hold.is_some()
+    };
+    let mut policy = *state.policy.lock().unwrap_or_else(|e| e.into_inner());
+    policy.visible = visible;
+    let desired = desired_ignore_cursor_events(policy, hit, holding);
+    if state.ignore_written.swap(desired, Ordering::Relaxed) != desired {
+        let _ = window.set_ignore_cursor_events(desired);
+    }
+}
+
+/// 启动智能穿透轮询线程（app 存活期内常驻；smart 关闭时 tick 空转早退；
+/// 进程退出随进程终止，无需停止信号）。
+fn start_companion_pointer_watcher(app: AppHandle) {
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(POINTER_TICK);
+            companion_pointer_tick(&app);
+        }
+    });
+}
+
+/// 主动初始化几何缓存（origin/size/scale）。
+///
+/// tao 不保证窗口创建后派发首次 Moved/Resized；不初始化则轮询 tick 因缓存为
+/// `None` 永久跳过，智能穿透静默失效。此后增量由 `on_window_event` 维护。
+fn init_companion_pointer_geometry(app: &AppHandle) {
+    let Some(window) = app.get_webview_window("companion") else {
+        return;
+    };
+    let state = app.state::<CompanionPointerState>();
+    if let Ok(p) = window.outer_position() {
+        *state.origin.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(PhysicalPosition::new(f64::from(p.x), f64::from(p.y)));
+    }
+    if let Ok(s) = window.outer_size() {
+        *state.size.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(PhysicalSize::new(f64::from(s.width), f64::from(s.height)));
+    }
+    if let Ok(f) = window.scale_factor() {
+        *state.scale.lock().unwrap_or_else(|e| e.into_inner()) = f;
+    }
+}
+
+/// 保存并应用角色窗口**强制穿透**（内部实现，供 command 与原生菜单事件共用）。
 ///
 /// 开启后 companion 窗口对所有鼠标事件透明（拖动/滚轮缩放/右键菜单随之失效），
-/// 关闭入口只剩设置页与托盘菜单。不发事件：穿透不影响角色窗口渲染，其前端无消费者。
+/// 关闭入口只剩设置页与托盘菜单；优先级最高，覆盖智能穿透的光标判定。
+/// 穿透的实际写点统一在 `sync_companion_ignore_cursor_events`（单一权威写点）。
+/// 不发事件：穿透不影响角色窗口渲染，其前端无消费者。
 fn apply_companion_click_through(app: &AppHandle, enabled: bool) -> Result<(), String> {
     let mut settings = settings::load_settings()?.unwrap_or_default();
     let live2d = settings.live2d.get_or_insert_with(Live2dSettings::default);
     live2d.click_through = Some(enabled);
     settings::save_settings(&settings)?;
-    if let Some(window) = app.get_webview_window("companion") {
-        window
-            .set_ignore_cursor_events(enabled)
-            .map_err(|e| format!("切换点击穿透失败: {e}"))?;
-    }
+    refresh_companion_pointer_policy(app);
+    sync_companion_ignore_cursor_events(app);
+    rebuild_tray_menu(app);
+    Ok(())
+}
+
+/// 保存并应用角色窗口智能穿透（内部实现，供 command 与原生菜单事件共用）。
+///
+/// 开启后按光标位置动态切换穿透：光标落在角色不透明区域上才接收鼠标（决策逻辑见
+/// `zapmomo::companion_click_through`）。与强制穿透（`click_through`）叠加时后者优先。
+fn apply_companion_smart_click_through(app: &AppHandle, enabled: bool) -> Result<(), String> {
+    let mut settings = settings::load_settings()?.unwrap_or_default();
+    let live2d = settings.live2d.get_or_insert_with(Live2dSettings::default);
+    live2d.smart_click_through = Some(enabled);
+    settings::save_settings(&settings)?;
+    refresh_companion_pointer_policy(app);
+    sync_companion_ignore_cursor_events(app);
+    let _ = app.emit("companion-smart-click-through-changed", enabled);
     rebuild_tray_menu(app);
     Ok(())
 }
 
 /// 保存角色窗口显示层级并即时应用（内部实现，供 command 与原生菜单事件共用）。
+///
+/// z-order 由 `apply_companion_layer_platform` 平台实现调整；点穿不再由平台实现
+/// 直写（历史 bug：macOS 前置分支硬编码清除穿透，会静默丢掉已开启的手动穿透），
+/// 统一收敛到单一写点 `sync_companion_ignore_cursor_events`。
 fn apply_companion_layer(app: &AppHandle, layer: CompanionWindowLayer) -> Result<(), String> {
     let mut settings = settings::load_settings()?.unwrap_or_default();
     let live2d = settings.live2d.get_or_insert_with(Live2dSettings::default);
     live2d.window_layer = Some(layer);
     settings::save_settings(&settings)?;
     apply_companion_layer_platform(app, layer);
+    refresh_companion_pointer_policy(app);
+    sync_companion_ignore_cursor_events(app);
     let _ = app.emit("companion-layer-changed", layer);
     rebuild_tray_menu(app);
     Ok(())
@@ -3528,11 +3759,14 @@ const MACOS_COMPANION_BACK_LEVEL: i64 = -1;
 #[cfg(target_os = "macos")]
 const MACOS_OVERLAY_PANEL_LEVEL: i64 = 5;
 
-/// 按层级即时调整角色窗口的 z-order 与鼠标穿透（平台相关；启动与运行时共用）。
+/// 按层级即时调整角色窗口的 z-order（平台相关；启动与运行时共用）。
 ///
-/// macOS 走 NSPanel（set_level + set_ignores_mouse_events），不混用 tauri 的
-/// set_always_on_top（它会先把 level 置回 0，与壁纸级冲突）。注意：不要在这里切换
-/// NSPanel 的 floating 属性——运行时切换会破坏存活 WKWebView 的渲染（模型消失）。
+/// 只管 z-order：点穿统一由 `sync_companion_ignore_cursor_events` 单一写点处理
+/// （tauri `set_ignore_cursor_events` 与面板的 setIgnoresMouseEvents 同 selector，
+/// 不必在此直写；直写曾静默清掉已开启的手动穿透）。
+/// macOS 走 NSPanel set_level，不混用 tauri 的 set_always_on_top（它会先把 level
+/// 置回 0，与壁纸级冲突）。注意：不要在这里切换 NSPanel 的 floating 属性——
+/// 运行时切换会破坏存活 WKWebView 的渲染（模型消失）。
 #[cfg(target_os = "macos")]
 fn apply_companion_layer_platform(app: &AppHandle, layer: CompanionWindowLayer) {
     use tauri_nspanel::{ManagerExt, PanelLevel};
@@ -3541,17 +3775,11 @@ fn apply_companion_layer_platform(app: &AppHandle, layer: CompanionWindowLayer) 
         return;
     };
     match layer {
-        CompanionWindowLayer::Front => {
-            // 浮层（4），与建窗时的 always_on_top 行为一致。
-            panel.set_level(i64::from(PanelLevel::Floating));
-            panel.set_ignores_mouse_events(false);
-        }
-        CompanionWindowLayer::Back => {
-            // 图标之上：-1 在普通窗口之下、桌面图标与壁纸之上。不切换 NSPanel floating 属性——
-            // z-order 完全由 set_level 控制（浮层属性不参与层级），运行时切换 floating 会破坏存活 WebView 渲染。
-            panel.set_level(MACOS_COMPANION_BACK_LEVEL);
-            panel.set_ignores_mouse_events(true); // 完全点穿
-        }
+        // 浮层（4），与建窗时的 always_on_top 行为一致。
+        CompanionWindowLayer::Front => panel.set_level(i64::from(PanelLevel::Floating)),
+        // 图标之上：-1 在普通窗口之下、桌面图标与壁纸之上。不切换 NSPanel floating 属性——
+        // z-order 完全由 set_level 控制（浮层属性不参与层级），运行时切换 floating 会破坏存活 WebView 渲染。
+        CompanionWindowLayer::Back => panel.set_level(MACOS_COMPANION_BACK_LEVEL),
     }
 }
 
@@ -3569,7 +3797,10 @@ fn raise_overlay_windows(app: &AppHandle) {
     }
 }
 
-/// 按层级即时调整角色窗口的 z-order 与鼠标穿透（平台相关；启动与运行时共用）。
+/// 按层级即时调整角色窗口的 z-order（平台相关；启动与运行时共用）。
+///
+/// 只管 z-order：点穿（含置底 WS_EX_TRANSPARENT）统一由
+/// `sync_companion_ignore_cursor_events` 单一写点处理，避免与手动/智能穿透双写竞争。
 #[cfg(windows)]
 fn apply_companion_layer_platform(app: &AppHandle, layer: CompanionWindowLayer) {
     use windows::Win32::UI::WindowsAndMessaging::{
@@ -3581,7 +3812,6 @@ fn apply_companion_layer_platform(app: &AppHandle, layer: CompanionWindowLayer) 
     };
     let front = matches!(layer, CompanionWindowLayer::Front);
     let _ = window.set_always_on_top(front); // 置顶 = WS_EX_TOPMOST；置底 = 清除
-    let _ = window.set_ignore_cursor_events(!front); // 置底 = WS_EX_TRANSPARENT 点穿
     if !front {
         let Ok(hwnd) = window.hwnd() else { return };
         unsafe {
@@ -3723,10 +3953,57 @@ fn set_companion_opacity(app: AppHandle, opacity: f64) -> Result<(), String> {
 ///
 /// 由设置面板或原生菜单调用：写入 `~/.zapmomo/settings.toml` 的 `[live2d].click_through`，
 /// 并立即对 companion 窗口生效。开启后窗口收不到任何鼠标事件（拖动/缩放/右键菜单失效），
-/// 只能从设置页或托盘菜单关闭。
+/// 只能从设置页或托盘菜单关闭。语义为**强制穿透**：优先级最高，覆盖智能穿透。
 #[tauri::command]
 fn set_companion_click_through(app: AppHandle, enabled: bool) -> Result<(), String> {
     apply_companion_click_through(&app, enabled)
+}
+
+/// 设置并持久化角色窗口智能穿透（光标在角色不透明区域上才接收鼠标，其余穿透）。
+///
+/// 由设置面板或原生菜单调用：写入 `~/.zapmomo/settings.toml` 的
+/// `[live2d].smart_click_through`，并经 `companion-smart-click-through-changed`
+/// 事件广播；与强制穿透叠加时后者优先。
+#[tauri::command]
+fn set_companion_smart_click_through(app: AppHandle, enabled: bool) -> Result<(), String> {
+    apply_companion_smart_click_through(&app, enabled)
+}
+
+/// 更新角色窗口的智能穿透命中区域（前端在模型加载/布局变化后上报，去抖 150ms）。
+///
+/// `rects` 为窗口内逻辑像素矩形集；`[]` 表示清屏（明确穿透），不调用表示未就绪
+/// （fail-open 判可交互）。NaN/负值坐标防御性 clamp 为 0。不在此处 sync：
+/// push 路径无光标上下文，交给轮询下一 tick（≤33ms）按实况判定，避免假命中翻转。
+#[tauri::command]
+fn set_companion_hit_region(app: AppHandle, rects: Vec<HitRect>) -> Result<(), String> {
+    let cleaned: Vec<HitRect> = rects
+        .into_iter()
+        .map(|r| HitRect {
+            x: if r.x.is_finite() && r.x > 0.0 {
+                r.x
+            } else {
+                0.0
+            },
+            y: if r.y.is_finite() && r.y > 0.0 {
+                r.y
+            } else {
+                0.0
+            },
+            width: if r.width.is_finite() && r.width > 0.0 {
+                r.width
+            } else {
+                0.0
+            },
+            height: if r.height.is_finite() && r.height > 0.0 {
+                r.height
+            } else {
+                0.0
+            },
+        })
+        .collect();
+    let state = app.state::<CompanionPointerState>();
+    *state.region.lock().unwrap_or_else(|e| e.into_inner()) = Some(cleaned);
+    Ok(())
 }
 
 /// 设置并持久化角色窗口显示层级（置顶/置底），并即时应用到角色窗口。
@@ -3887,6 +4164,13 @@ fn handle_menu(app: &AppHandle, id: &str) {
         "disable_click_through" => {
             let _ = apply_companion_click_through(app, false);
         }
+        // 智能穿透：与强制穿透同理按当前状态显示相反动作项，点击应用固定值（幂等）。
+        "enable_smart_click_through" => {
+            let _ = apply_companion_smart_click_through(app, true);
+        }
+        "disable_smart_click_through" => {
+            let _ = apply_companion_smart_click_through(app, false);
+        }
         // 位置锁定：与点击穿透同理按当前状态显示「锁定/解锁」项，点击应用固定值（幂等）。
         "enable_lock" => {
             let _ = apply_companion_locked(app, true);
@@ -3982,6 +4266,7 @@ fn build_companion_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let (scale_submenu, opacity_submenu) = build_metric_submenus(app)?;
     let layer_submenu = build_layer_submenu(app)?;
     let click_through = build_click_through_item(app)?;
+    let smart_click_through = build_smart_click_through_item(app)?;
     let locked = build_locked_item(app)?;
     let chatbox = build_chatbox_item(app)?;
     let open_settings = MenuItem::with_id(app, "open_settings", "打开设置", true, None::<&str>)?;
@@ -3997,6 +4282,7 @@ fn build_companion_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             &opacity_submenu,
             &layer_submenu,
             &click_through,
+            &smart_click_through,
             &locked,
             &chatbox,
             &open_settings,
@@ -4017,6 +4303,7 @@ fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let (tray_scale, tray_opacity) = build_metric_submenus(app)?;
     let tray_layer = build_layer_submenu(app)?;
     let click_through = build_click_through_item(app)?;
+    let smart_click_through = build_smart_click_through_item(app)?;
     let locked = build_locked_item(app)?;
     let autostart = build_autostart_item(app)?;
     let chatbox = build_chatbox_item(app)?;
@@ -4035,6 +4322,7 @@ fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             &tray_opacity,
             &tray_layer,
             &click_through,
+            &smart_click_through,
             &locked,
             &chatbox,
             &autostart,
@@ -4123,6 +4411,14 @@ fn current_companion_click_through() -> bool {
     }
 }
 
+/// 读当前智能穿透开关（读失败或缺省回退 true——智能穿透是新默认行为）。
+fn current_companion_smart_click_through() -> bool {
+    match settings::load_settings() {
+        Ok(Some(s)) => resolve_smart_click_through(s.live2d.as_ref()),
+        _ => true,
+    }
+}
+
 /// 读当前文字输入条可见性（读失败或缺省回退 false）。
 fn current_chatbox_visible() -> bool {
     match settings::load_settings() {
@@ -4156,9 +4452,9 @@ fn current_companion_locked() -> bool {
     }
 }
 
-/// 构建「点击穿透」菜单项（角色右键菜单与托盘菜单共用）。
+/// 构建「强制穿透」菜单项（角色右键菜单与托盘菜单共用）。
 ///
-/// 按当前状态显示「启用点击穿透」或「禁用点击穿透」的普通菜单项，点击后
+/// 按当前状态显示「启用强制穿透」或「禁用强制穿透」的普通菜单项，点击后
 /// `handle_menu` 应用固定值（不取反）。不用 CheckMenuItem：其 checked 自动切换
 /// 与取反逻辑叠加，一次点击可能触发正反两个 apply（如 15:21 日志所示），
 /// 净效果为零，表现为「点击无效」。
@@ -4172,9 +4468,30 @@ fn build_click_through_item(app: &AppHandle) -> tauri::Result<MenuItem<tauri::Wr
             "enable_click_through"
         },
         if enabled {
-            "禁用点击穿透"
+            "禁用强制穿透"
         } else {
-            "启用点击穿透"
+            "启用强制穿透"
+        },
+        true,
+        None::<&str>,
+    )
+}
+
+/// 构建「智能穿透」菜单项（角色右键菜单与托盘菜单共用；不用 CheckMenuItem 的
+/// 理由同 build_click_through_item）。
+fn build_smart_click_through_item(app: &AppHandle) -> tauri::Result<MenuItem<tauri::Wry>> {
+    let enabled = current_companion_smart_click_through();
+    MenuItem::with_id(
+        app,
+        if enabled {
+            "disable_smart_click_through"
+        } else {
+            "enable_smart_click_through"
+        },
+        if enabled {
+            "禁用智能穿透"
+        } else {
+            "启用智能穿透"
         },
         true,
         None::<&str>,
@@ -4321,6 +4638,14 @@ fn build_empty_companion_submenu(app: &AppHandle) -> tauri::Result<Submenu<tauri
 /// 弹出角色窗口右键菜单（由前端在右键时调用，坐标相对窗口左上角，逻辑像素）。
 #[tauri::command]
 fn show_companion_menu(app: AppHandle, x: f64, y: f64) -> Result<(), String> {
+    // 右键菜单保护期：原生菜单无关闭回调，只能定时兜底；期间智能穿透不切换，
+    // 防止光标在菜单项上游走时把窗口切穿透。Windows 弹出菜单还会模态阻塞
+    // dispatcher（轮询线程停顿无损害），恢复后由 hold 继续保护。
+    {
+        let state = app.state::<CompanionPointerState>();
+        *state.hold_until.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(std::time::Instant::now() + MENU_HOLD);
+    }
     let menu = build_companion_menu(&app).map_err(|e| e.to_string())?;
     let window = app
         .get_webview_window("companion")
@@ -4358,6 +4683,8 @@ fn toggle_companion_window(app: &AppHandle) {
         // App，不会把开着的设置窗连带带到最前。
         set_chatbox_visible(app, true, true);
     }
+    // 显隐改变了 visible 输入，经单一写点即时重算穿透（不等轮询下一 tick）。
+    sync_companion_ignore_cursor_events(app);
     sync_bubble_visibility(app);
 }
 
@@ -4550,6 +4877,8 @@ fn hide_companion_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("companion") {
         let _ = window.hide();
     }
+    // 隐藏改变 visible 输入，经单一写点即时重算穿透（不等轮询下一 tick）。
+    sync_companion_ignore_cursor_events(app);
     sync_bubble_visibility(app);
 }
 
@@ -5326,6 +5655,8 @@ pub fn run() {
                 if cfg!(windows) && current_companion_layer() == CompanionWindowLayer::Back {
                     apply_companion_layer_platform(app, CompanionWindowLayer::Back);
                 }
+                // show 改变 visible 输入：单一写点即时重算穿透（同 toggle_companion_window）。
+                sync_companion_ignore_cursor_events(app);
             }
             sync_bubble_visibility(app);
             show_settings_window(app);
@@ -5339,6 +5670,7 @@ pub fn run() {
             Some(vec!["--autostart"]),
         ))
         .manage(ListenState::new())
+        .manage(CompanionPointerState::new())
         .manage(DownloadState::default())
         .manage(AsrListenState::new())
         .manage(AsrDictateState::new())
@@ -5436,6 +5768,8 @@ pub fn run() {
             set_companion_scale,
             set_companion_opacity,
             set_companion_click_through,
+            set_companion_smart_click_through,
+            set_companion_hit_region,
             set_companion_layer,
             set_companion_locked,
             set_companion_drag_mode,
@@ -5640,18 +5974,19 @@ pub fn run() {
                 }
             }
 
-            // 恢复点击穿透：持久化开启时建窗后立即应用（缺省关闭无需设置；窗口
-            // hide/show 不销毁窗口对象，穿透状态跨显隐自然保留）。
-            if resolve_click_through(live2d.as_ref())
-                && let Some(window) = app.get_webview_window("companion")
-            {
-                let _ = window.set_ignore_cursor_events(true);
-            }
             // 恢复持久化的显示层级（置顶/置底）并即时应用。
             // 必须在 macOS 面板转换之后调用（此时 panel handle 已注册，get_webview_panel 才命中）。
             if let Some(layer) = live2d.as_ref().and_then(|l| l.window_layer) {
                 apply_companion_layer_platform(app.handle(), layer);
             }
+            // 恢复穿透：初始化策略快照后经单一写点一次性应用强制穿透/智能穿透/层级
+            // 的综合决策（替代旧的裸 set_ignore_cursor_events 直写；窗口 hide/show
+            // 不销毁窗口对象，穿透状态跨显隐由轮询与 push 路径维护）。
+            refresh_companion_pointer_policy(app.handle());
+            sync_companion_ignore_cursor_events(app.handle());
+            // 智能穿透轮询线程：按光标位置动态切换穿透（SMART_CLICK_THROUGH_DESIGN.md）。
+            init_companion_pointer_geometry(app.handle());
+            start_companion_pointer_watcher(app.handle().clone());
             // 位置锁定无需建窗时后端应用：拦截点在前端 CompanionRoot 的 mousedown，
             // 由 get_live2d_config 恢复（见 frontend CompanionRoot）。
 
@@ -5921,6 +6256,31 @@ pub fn run() {
                 //  windowShouldClose:，被本拦截器取消，见上方菜单构建处注释）。
                 api.prevent_close();
                 let _ = window.hide();
+            }
+            // 智能穿透输入缓存：窗口几何事件驱动更新，轮询 tick 只消费缓存值。
+            // Moved 同时记录移动时刻（DRAG_HOLD 内视为拖动中，保护期持续顺延）。
+            if window.label() == "companion" {
+                let state = window.app_handle().state::<CompanionPointerState>();
+                match event {
+                    WindowEvent::Moved(p) => {
+                        *state.origin.lock().unwrap_or_else(|e| e.into_inner()) =
+                            Some(PhysicalPosition::new(f64::from(p.x), f64::from(p.y)));
+                        *state.last_move_at.lock().unwrap_or_else(|e| e.into_inner()) =
+                            Some(std::time::Instant::now());
+                    }
+                    WindowEvent::Resized(s) => {
+                        *state.size.lock().unwrap_or_else(|e| e.into_inner()) =
+                            Some(PhysicalSize::new(f64::from(s.width), f64::from(s.height)));
+                    }
+                    WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                        *state.scale.lock().unwrap_or_else(|e| e.into_inner()) = *scale_factor;
+                        let size = window.outer_size().unwrap_or_default();
+                        *state.size.lock().unwrap_or_else(|e| e.into_inner()) = Some(
+                            PhysicalSize::new(f64::from(size.width), f64::from(size.height)),
+                        );
+                    }
+                    _ => {}
+                }
             }
         })
         // RunEvent::Exit 兜底回收 audio.cpp sidecar：覆盖全部退出路径（含未来新增

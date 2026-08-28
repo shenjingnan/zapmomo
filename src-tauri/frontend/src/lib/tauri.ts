@@ -23,6 +23,7 @@ import type {
   DshConfigInfo,
   DshParamsPatch,
   DshSpeakPayload,
+  HitRect,
   ImportCompanionResult,
   KwsConfigInfo,
   KwsParamsPatch,
@@ -178,6 +179,10 @@ export const api = {
   setCompanionOpacity: (args: { opacity: number }) => invoke<void>("set_companion_opacity", args),
   setCompanionClickThrough: (args: { enabled: boolean }) =>
     invoke<void>("set_companion_click_through", args),
+  setCompanionSmartClickThrough: (args: { enabled: boolean }) =>
+    invoke<void>("set_companion_smart_click_through", args),
+  setCompanionHitRegion: (args: { rects: HitRect[] }) =>
+    invoke<void>("set_companion_hit_region", args),
   setCompanionLayer: (args: { layer: CompanionWindowLayer }) =>
     invoke<void>("set_companion_layer", args),
   setCompanionLocked: (args: { enabled: boolean }) => invoke<void>("set_companion_locked", args),
@@ -290,6 +295,13 @@ export function onCompanionLayerChanged(
   handler: (layer: CompanionWindowLayer) => void,
 ): Promise<UnlistenFn> {
   return listen<CompanionWindowLayer>("companion-layer-changed", (e) => handler(e.payload));
+}
+
+/** 智能穿透开关变化（设置页 / 托盘菜单切换时广播）。 */
+export function onCompanionSmartClickThroughChanged(
+  handler: (enabled: boolean) => void,
+): Promise<UnlistenFn> {
+  return listen<boolean>("companion-smart-click-through-changed", (e) => handler(e.payload));
 }
 
 export function onCompanionLockedChanged(handler: (locked: boolean) => void): Promise<UnlistenFn> {

@@ -4,6 +4,7 @@ pub mod audio;
 pub mod audiocpp;
 pub mod cli;
 pub mod companion;
+pub mod companion_click_through;
 pub mod config;
 pub mod datetime;
 pub mod dsh;

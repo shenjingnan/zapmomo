@@ -7,12 +7,14 @@ import {
   type Live2dStageHandle,
   type ModelLayout,
 } from "@/components/live2d/Live2dStage";
+import { computeModelHitRects } from "@/components/live2d/modelLayout";
 import { PropsLayer } from "@/components/performance/PropsLayer";
 import { usePerformance } from "@/components/performance/usePerformance";
 import { VoiceStatusDot } from "@/components/voice/VoiceStatusDot";
 import { useLive2dConfig } from "@/hooks/useLive2dConfig";
 import { useVoiceSession } from "@/hooks/useVoiceSession";
 import { isStaticImageFormat } from "@/lib/companionFormat";
+import { gifContainRect, HIT_REGION_DEBOUNCE_MS, toWindowRects } from "@/lib/companionHitRegion";
 import { pickMotionGroup } from "@/lib/dshMotion";
 import {
   api,
@@ -26,7 +28,12 @@ import {
   toAssetUrl,
 } from "@/lib/tauri";
 import { centeredResizeTarget } from "@/lib/windowResize";
-import type { CompanionDragMode, CompanionWindowLayer, PerformancePropsInfo } from "@/types/tauri";
+import type {
+  CompanionDragMode,
+  CompanionWindowLayer,
+  HitRect,
+  PerformancePropsInfo,
+} from "@/types/tauri";
 
 /** 角色窗口基准高度上限（100% 时高度 = min(480, 屏幕可用高度 × 0.6)）。 */
 const BASE_HEIGHT = 480;
@@ -88,6 +95,10 @@ export function CompanionRoot() {
 
   // Live2D 模型句柄：dsh 事件触发动作用（模型缺对应组时静默跳过）。
   const modelRef = useRef<Live2DModel | null>(null);
+  // 是否曾有伙伴加载成功：区分「启动/加载失败未就绪」与「明确卸载清屏」——
+  // 前者不上报命中区域（后端 fail-open 判可交互，角色加载失败仍可拖动/右键），
+  // 后者上报空数组（空窗口明确穿透，不再挡下层）。
+  const everLoadedRef = useRef(false);
 
   // 用 ref 保存最新值，供异步回调（滚轮/事件/模型加载）读取，避免闭包过期。
   const aspectRatioRef = useRef(aspectRatio);
@@ -308,6 +319,9 @@ export function CompanionRoot() {
   const startupAnchorRef = useRef(true);
   const handleModelMetrics = useCallback(
     async (metrics: { aspectRatio: number }) => {
+      // 宽高比上报 = 伙伴加载成功（Live2D 与 GIF 共用此回调）：标记「曾加载」，
+      // 供命中区域上报区分未就绪与卸载清屏（见 everLoadedRef 注释）。
+      everLoadedRef.current = true;
       const ratio =
         Number.isFinite(metrics.aspectRatio) && metrics.aspectRatio > 0
           ? metrics.aspectRatio
@@ -371,6 +385,56 @@ export function CompanionRoot() {
       void unlisten.then((fn) => fn());
     };
   }, []);
+
+  // 智能穿透：把「角色画面」换算成窗口内逻辑像素矩形集上报后端（150ms 去抖），
+  // Rust 轮询全局光标点查后动态切换穿透（SMART_CLICK_THROUGH_DESIGN.md）。
+  // - 曾加载后清屏（url null）→ 上报空数组（明确穿透）；
+  // - GIF/立绘 → object-contain 实际显示区（letterbox 空白不挡点击）；
+  // - Live2D → 逐 drawable 可见包围盒；模型或布局未就绪时不上报，
+  //   后端对「未上报」fail-open 判可交互（保证角色永远可点）；
+  // - BongoCat（props 存在）→ 追加画布映射盒整体矩形（键盘背景也是可见内容）。
+  useEffect(() => {
+    const computeRects = (): HitRect[] | null => {
+      if (stage.url === null) {
+        return everLoadedRef.current ? [] : null;
+      }
+      if (stage.isGif) {
+        const contained = gifContainRect(
+          { width: size.width, height: size.height - BUBBLE_STRIP },
+          aspectRatio,
+        );
+        // 图未加载（无合法宽高比）：不上报，沿用「未就绪」语义。
+        if (!contained) return null;
+        // stage 原点在窗口 (0, BUBBLE_STRIP)：contain rect 平移到窗口坐标（无缩放）。
+        return [{ ...contained, y: contained.y + BUBBLE_STRIP }];
+      }
+      const model = modelRef.current;
+      if (!model || !modelLayout) return null;
+      const rects = toWindowRects(computeModelHitRects(model), modelLayout, BUBBLE_STRIP);
+      if (props) {
+        rects.push(
+          ...toWindowRects(
+            [
+              {
+                x: 0,
+                y: 0,
+                width: modelLayout.canvasWidth,
+                height: modelLayout.canvasHeight,
+              },
+            ],
+            modelLayout,
+            BUBBLE_STRIP,
+          ),
+        );
+      }
+      return rects;
+    };
+    const timer = setTimeout(() => {
+      const rects = computeRects();
+      if (rects) void api.setCompanionHitRegion({ rects }).catch(() => {});
+    }, HIT_REGION_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [stage, modelLayout, size, aspectRatio, props]);
 
   // cmd/ctrl + 滚轮：连续缩放（节流约 60ms，阻止默认滚动）。
   // 置底（back）为点穿背景，不挂滚轮监听（原生层本已吞掉鼠标事件，这里是防御）。
@@ -436,6 +500,7 @@ export function CompanionRoot() {
               onLayout={setModelLayout}
               onModelLoaded={(m) => {
                 modelRef.current = m;
+                everLoadedRef.current = true;
               }}
             />
           )}
