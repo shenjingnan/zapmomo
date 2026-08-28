@@ -3164,16 +3164,52 @@ fn hide_chatbox(app: AppHandle) {
 /// 显示/隐藏文字输入条窗口并持久化开关状态（托盘/右键菜单勾选共用）。
 ///
 /// `focus` 仅显示时生效（显示后可直接打字）。macOS 上 chatbox 是非激活面板，
-/// 聚焦不激活应用；其它平台为普通窗口，聚焦会激活应用。
+/// 显示与聚焦走 NSPanel 专用 API（`orderFrontRegardless` + `makeKeyWindow`）：
+/// 聚焦输入不激活应用，不会把本应用其它可见窗口（如设置窗）一并带到最前；
+/// 其它平台为普通窗口，聚焦会激活应用。
 fn set_chatbox_visible(app: &AppHandle, visible: bool, focus: bool) {
     if let Some(window) = app.get_webview_window("chatbox") {
-        let _ = if visible && focus {
-            window.show().and_then(|()| window.set_focus())
-        } else if visible {
-            window.show()
-        } else {
-            window.hide()
-        };
+        // macOS：tao 的 window.show()/set_focus() 底层是 makeKeyAndOrderFront /
+        // activateIgnoringOtherApps——后者无条件激活整个 App，AppKit 激活时会把本应用
+        // 全部可见窗口（如一直开着的设置窗）整体带到最前，显隐快捷键因此表现为
+        // 「连带弹出主界面」。NonactivatingPanel mask 只抑制用户点击面板时的隐式
+        // 激活，管不住显式 activate 调用。改走 panel 的 orderFrontRegardless +
+        // makeKeyWindow：输入条成为 key window 可直接打字，但 App 不激活（Spotlight 式）。
+        #[cfg(target_os = "macos")]
+        {
+            use tauri_nspanel::ManagerExt;
+            match app.get_webview_panel("chatbox") {
+                Ok(panel) => {
+                    if visible {
+                        if focus {
+                            panel.show_and_make_key();
+                        } else {
+                            panel.show();
+                        }
+                    } else {
+                        panel.hide();
+                    }
+                }
+                // panel 注册前的时序兜底（正常运行不可达）：退回 tauri 原路径
+                Err(_) => {
+                    let _ = if visible {
+                        window.show()
+                    } else {
+                        window.hide()
+                    };
+                }
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = if visible && focus {
+                window.show().and_then(|()| window.set_focus())
+            } else if visible {
+                window.show()
+            } else {
+                window.hide()
+            };
+        }
     }
     if let Ok(mut settings) = settings::load_settings() {
         let settings = settings.get_or_insert_with(Default::default);
@@ -4308,8 +4344,9 @@ fn toggle_companion_window(app: &AppHandle) {
         if cfg!(windows) && current_companion_layer() == CompanionWindowLayer::Back {
             apply_companion_layer_platform(app, CompanionWindowLayer::Back);
         }
-        // 输入条随角色一起显示并聚焦（show 后可直接打字）。macOS 上 chatbox 是
-        // 非激活面板，聚焦不激活 App，不会把开着的设置窗带到最前。
+        // 输入条随角色一起显示并聚焦（show 后可直接打字）。macOS 上走 NSPanel 的
+        // orderFrontRegardless + makeKeyWindow（见 set_chatbox_visible）：聚焦不激活
+        // App，不会把开着的设置窗连带带到最前。
         set_chatbox_visible(app, true, true);
     }
     sync_bubble_visibility(app);
@@ -6153,6 +6190,7 @@ mod companion_open_dir_tests {
             model_file: manifest.display().to_string(),
             format: "cubism3".to_string(),
             imported_at: "2026-01-01T00:00:00Z".to_string(),
+            layout: None,
         }
     }
 
