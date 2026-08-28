@@ -5,8 +5,10 @@
 ///
 /// 切分规则：
 /// - 边界字符（`。！？；` + 英文 `.!?;` + 换行）归属前一句（`"你好。"` 是一句）。
+/// - ASCII `.` 前一字符是数字时**不作边界**：保护小数（`3.14` 不拆散）与有序列表
+///   标记（`"1. 第一点"` 不切出垃圾句 `"1."`；列表前缀由 `sanitizer` 剥离）。
 /// - 无边界持续超 `max_sentence_len` 时在最近空白/边界处兜底切，避免「整段不标点 →
-///   永远不开始播报」。英文句点误判（小数/缩写）对 TTS 无实质影响，接受。
+///   永远不开始播报」。英文句点误判（缩写）对 TTS 无实质影响，接受。
 ///
 /// 默认单句最大长度（无标点时的兜底切分阈值）。
 pub const DEFAULT_MAX_SENTENCE_LEN: usize = 80;
@@ -17,6 +19,17 @@ pub fn is_sentence_boundary(c: char) -> bool {
         c,
         '。' | '！' | '？' | '；' | '．' | '…' | '.' | '!' | '?' | ';' | '\n'
     )
+}
+
+/// 上下文感知的边界判定：ASCII `.` 前一字符是数字时不作边界（保护小数 `3.14`
+/// 与有序列表标记 `1.`，避免切出 `"1."` 这类垃圾句送合成）。
+///
+/// 只收窄 `.` 一个字符的行为：其余边界字符与既有语义完全一致。
+fn is_boundary_after(prev: Option<char>, c: char) -> bool {
+    if c == '.' && prev.is_some_and(|p| p.is_ascii_digit()) {
+        return false;
+    }
+    is_sentence_boundary(c)
 }
 
 /// 是否为「兜底切分点」：句子边界或空白（切分点本身归属前一句）。
@@ -55,10 +68,11 @@ impl SentenceSplitter {
         self.buffer.push_str(text);
         let mut out = Vec::new();
 
-        // 1) 按边界字符切分（边界归属前一句）
+        // 1) 按边界字符切分（边界归属前一句；ASCII `.` 数字前不作边界）
         let mut start = 0;
+        let mut prev: Option<char> = None;
         for (i, c) in self.buffer.char_indices() {
-            if is_sentence_boundary(c) {
+            if is_boundary_after(prev, c) {
                 let end = i + c.len_utf8();
                 let sentence = self.buffer[start..end].trim();
                 if !sentence.is_empty() {
@@ -66,6 +80,7 @@ impl SentenceSplitter {
                 }
                 start = end;
             }
+            prev = Some(c);
         }
         if start > 0 {
             self.buffer = self.buffer[start..].to_string();
@@ -150,6 +165,37 @@ mod tests {
             s.push("第一点\n第二点\n"),
             vec!["第一点".to_string(), "第二点".to_string()]
         );
+        assert_eq!(s.finish(), "");
+    }
+
+    #[test]
+    fn test_ordered_list_marker_not_split() {
+        // 「1.」的句点不作边界：整行随换行切出，列表前缀由 sanitizer 剥离
+        let mut s = SentenceSplitter::new();
+        assert_eq!(
+            s.push("1. 第一点\n2. 第二点\n"),
+            vec!["1. 第一点".to_string(), "2. 第二点".to_string()]
+        );
+        assert_eq!(s.finish(), "");
+    }
+
+    #[test]
+    fn test_decimal_not_split() {
+        // 小数不拆散：整句保留到中文句号兜底（旧行为会切成「价格是 3.」+「14 元。」）
+        let mut s = SentenceSplitter::new();
+        assert_eq!(
+            s.push("价格是 3.14 元。"),
+            vec!["价格是 3.14 元。".to_string()]
+        );
+        assert_eq!(s.finish(), "");
+    }
+
+    #[test]
+    fn test_digit_period_across_pushes() {
+        // 跨 token：「版本 2」+「. 更新内容」两段到达，`.` 在 buffer 内可见 prev，不切
+        let mut s = SentenceSplitter::new();
+        assert_eq!(s.push("版本 2"), Vec::<String>::new());
+        assert_eq!(s.push(". 更新内容\n"), vec!["版本 2. 更新内容".to_string()]);
         assert_eq!(s.finish(), "");
     }
 

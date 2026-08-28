@@ -1298,6 +1298,15 @@ fn synthesize_tts(
         return Err("文本不能为空".to_string());
     }
 
+    // 试听与真实语音会话同规则：markdown/emoji 清洗后再送引擎（CLI `tts run`
+    // 不洗，保留引擎裸行为调试）。清洗为空报错而非静默回退——试听语义下用户
+    // 应知道没有可朗读内容。注意 reference_text 不清洗（克隆音色转写须与 wav
+    // 逐字对应）。
+    let text = zapmomo::voice::sanitizer::sanitize_for_tts(&text);
+    if text.is_empty() {
+        return Err("清洗后没有可朗读内容（可能全是 Markdown 符号或 emoji）。".to_string());
+    }
+
     let settings = zapmomo::config::settings::load_settings()?;
     let tts_settings = settings.as_ref().and_then(|s| s.tts.clone());
     let cfg = zapmomo::tts::config::resolve(tts_settings.as_ref(), None)?;

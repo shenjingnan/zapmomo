@@ -36,6 +36,7 @@ use crate::voice::config::ResolvedSessionConfig;
 use crate::voice::events::{ErrorKind, StoppedReason, VoiceEvent};
 use crate::voice::listen::{MicEvent, MicLoop};
 use crate::voice::player::AudioPlayer;
+use crate::voice::sanitizer::{TtsSanitizer, sanitize_for_tts};
 use crate::voice::splitter::SentenceSplitter;
 use crate::voice::state::{SessionEvent, SessionState};
 use crate::voice::synthesizer::{SynthHandle, SynthResult};
@@ -416,10 +417,17 @@ impl VoiceSession {
             (self.emit)(VoiceEvent::Wake { keyword });
             // 首响打点：唤醒时刻（含欢迎语流程；回复轮的起点在 start_reply）
             self.t_wake = Some(Instant::now());
-            // 唤醒 → 合成并播放欢迎语（复用 SynthHandle；进入 Greeting 等结果）
+            // 唤醒 → 合成并播放欢迎语（复用 SynthHandle；进入 Greeting 等结果）。
+            // 欢迎语同规则清洗（剥 emoji 等）；清洗为空**必须回退原文**——
+            // step_greeting 靠恰一次合成终态置 welcome_played，跳过 enqueue 会卡死
+            let welcome = sanitize_for_tts(&self.cfg.welcome_text);
+            let welcome = if welcome.is_empty() {
+                self.cfg.welcome_text.clone()
+            } else {
+                welcome
+            };
             self.synth.clear_cancel();
-            self.synth
-                .enqueue(self.cfg.welcome_text.clone(), self.current_gen);
+            self.synth.enqueue(welcome, self.current_gen);
             self.welcome_played = false;
             self.set_state(SessionEvent::KeywordDetected)?; // → Greeting
         }
@@ -925,15 +933,21 @@ impl SentencePlayGate {
     }
 }
 
-/// 一句话的回复累积：过滤思考块 → 拼接可见文本 + 切句（供合成入队）。
+/// 一句话的回复累积：过滤思考块 → 拼接可见文本 + 切句 → 清洗（供合成入队）。
 ///
 /// 独立成可测结构：`push_token` 返回（可见文本, 本次切出的句子）；`finish` 冲刷
 /// 残余句；`take_text` 取完整可见回复（入历史后即丢弃，打断时直接 new 一个丢弃）。
+///
+/// 清洗（[`TtsSanitizer`]）仅作用于合成入队句：markdown/emoji 剥离、垃圾句丢弃，
+/// 避免垃圾句占据串行合成线程的整句合成时长；`text` / `take_text` 保持 LLM 原文
+/// （入历史 + `ReplyFinished` 上屏不受影响）。句子在此处丢弃 = 不入队 =
+/// `synth_enqueued` 不增，编排循环收敛条件不感知。
 #[derive(Default)]
 pub struct ReplyAccumulator {
     text: String,
     splitter: SentenceSplitter,
     filter: ThinkingFilter,
+    sanitizer: TtsSanitizer,
 }
 
 impl ReplyAccumulator {
@@ -951,7 +965,12 @@ impl ReplyAccumulator {
             return (String::new(), Vec::new());
         }
         self.text.push_str(&visible);
-        let sentences = self.splitter.push(&visible);
+        let sentences = self
+            .splitter
+            .push(&visible)
+            .into_iter()
+            .filter_map(|s| self.sanitizer.sanitize(&s))
+            .collect();
         (visible, sentences)
     }
 
@@ -963,7 +982,7 @@ impl ReplyAccumulator {
             self.splitter.push(&tail);
         }
         let rest = self.splitter.finish();
-        if rest.is_empty() { None } else { Some(rest) }
+        self.sanitizer.sanitize(&rest)
     }
 
     /// 完整可见回复文本（trim 后；空返回 `None`）。
@@ -1239,6 +1258,51 @@ mod tests {
         assert!(r.push_token("  ").1.is_empty());
         assert_eq!(r.finish(), None);
         assert_eq!(r.take_text(), None);
+    }
+
+    #[test]
+    fn test_reply_accumulator_sanitizes_sentences_keeps_text() {
+        // 合成句被清洗（列表前缀剥离），历史/上屏文本保持 LLM 原文
+        let mut r = ReplyAccumulator::new();
+        let (visible, sentences) = r.push_token("1. 第一点\n");
+        assert_eq!(visible, "1. 第一点\n"); // 上屏仍是原文
+        assert_eq!(sentences, vec!["第一点".to_string()]); // 合成句已清洗
+        assert_eq!(r.take_text().as_deref(), Some("1. 第一点")); // 历史仍是原文
+    }
+
+    #[test]
+    fn test_reply_accumulator_drops_symbol_only_sentence() {
+        // `###` 清洗后无可朗读内容 → 整句丢弃，不产生合成句
+        let mut r = ReplyAccumulator::new();
+        let (_, sentences) = r.push_token("###\n正文。");
+        assert_eq!(sentences, vec!["正文。".to_string()]);
+        assert_eq!(r.take_text().as_deref(), Some("###\n正文。"));
+    }
+
+    #[test]
+    fn test_reply_accumulator_drops_code_block() {
+        // 代码块整块丢弃：fence 行与块内句子都不入合成队列
+        let mut r = ReplyAccumulator::new();
+        let (_, sentences) = r.push_token("如下：\n```python\nprint(1)\n```\n");
+        assert_eq!(sentences, vec!["如下：".to_string()]);
+        // 历史保持完整原文（含代码块）
+        assert_eq!(
+            r.take_text().as_deref(),
+            Some("如下：\n```python\nprint(1)\n```")
+        );
+    }
+
+    #[test]
+    fn test_reply_accumulator_finish_sanitizes_tail() {
+        // 尾句清洗：`*尾句*` → `尾句`
+        let mut r = ReplyAccumulator::new();
+        r.push_token("*尾句*");
+        assert_eq!(r.finish().as_deref(), Some("尾句"));
+
+        // 尾句清洗后无可朗读内容 → None（不合成）
+        let mut r = ReplyAccumulator::new();
+        r.push_token("#");
+        assert_eq!(r.finish(), None);
     }
 
     #[test]
