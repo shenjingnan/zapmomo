@@ -1,19 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
-  CatalogPage,
-  CatalogQuery,
-  DownloadArtifactRequest,
-  DownloadTaskView,
-  ModelCompatibility,
-  RemoteModelDetail,
-  RemoteModelFile,
-  UnifiedModelItem,
-} from "@/types/catalog";
-import type {
   LibraryModel,
   ModelLibraryProgress,
-  ModelType,
   SetCurrentResult,
   StorageInfo,
   StorageMigrateProgress,
@@ -24,7 +13,6 @@ import type {
   AsrConfigInfo,
   AsrParamsPatch,
   AsrResult,
-  TranscribeResult,
   CompanionDragMode,
   CompanionLibraryView,
   CompanionWindowLayer,
@@ -51,6 +39,7 @@ import type {
   PerformanceStoppedPayload,
   SaveTtsVoiceRequest,
   ShortcutActionId,
+  TranscribeResult,
   TtsConfigInfo,
   TtsParamsPatch,
   TtsProgress,
@@ -130,7 +119,7 @@ export const api = {
   setTtsEnabled: (args: { enabled: boolean }) => invoke<void>("set_tts_enabled", args),
   setTtsParams: (args: { params: TtsParamsPatch }) => invoke<void>("set_tts_params", args),
   setTtsVoice: (voice: string | null) => invoke<void>("set_tts_voice", { voice }),
-  /** 切换 TTS 推理后端（sherpa/audiocpp）；常规入口是模型库「设为当前」 */
+  /** 切换 TTS 推理后端（sherpa/audiocpp）；常规入口是「选择模型」弹窗的设为当前 */
   setTtsBackend: (backend: string) => invoke<void>("set_tts_backend", { backend }),
   getLlmConfig: () => invoke<LlmConfigInfo>("get_llm_config"),
   loadLlmModel: () => invoke<void>("load_llm_model"),
@@ -165,7 +154,7 @@ export const api = {
   setDshParams: (args: { params: DshParamsPatch }) => invoke<void>("set_dsh_params", args),
   getDshBridgeStatus: () => invoke<DshBridgeStatus>("get_dsh_bridge_status"),
   testDshAnnounce: () => invoke<void>("test_dsh_announce"),
-  // ---- 模型库 ----
+  // ---- 模型列表（registry 预设 + 安装状态；供各「选择模型」弹窗）----
   listModelLibrary: () => invoke<LibraryModel[]>("list_model_library"),
   getSystemResources: () => invoke<SystemResources>("get_system_resources"),
   // ---- 存储位置（数据目录）----
@@ -178,38 +167,6 @@ export const api = {
   cancelModelDownload: () => invoke<void>("cancel_model_download"),
   setCurrentModel: (args: { id: string }) => invoke<SetCurrentResult>("set_current_model", args),
   deleteModel: (args: { id: string }) => invoke<void>("delete_model", args),
-  removeLocalModel: (args: { id: string }) => invoke<void>("remove_local_model", args),
-  addLocalModel: (args: {
-    path: string;
-    modelType?: ModelType | null;
-    registryId?: string | null;
-  }) => invoke<LibraryModel>("add_local_model", args),
-  openModelDirectory: (args: { id: string }) => invoke<void>("open_model_directory", args),
-  openExternal: (url: string) => invoke<void>("open_external", { url }),
-  // ---- 模型目录（Catalog）----
-  catalogSearchModels: (provider: string, query: CatalogQuery) =>
-    invoke<CatalogPage<UnifiedModelItem>>("catalog_search_models", { provider, query }),
-  catalogGetModelDetail: (provider: string, modelId: string, revision?: string | null) =>
-    invoke<RemoteModelDetail>("catalog_get_model_detail", { provider, modelId, revision }),
-  catalogGetModelFiles: (provider: string, modelId: string, revision?: string | null) =>
-    invoke<RemoteModelFile[]>("catalog_get_model_files", { provider, modelId, revision }),
-  catalogGetCompatibility: (provider: string, modelId: string, revision?: string | null) =>
-    invoke<ModelCompatibility>("catalog_get_compatibility", { provider, modelId, revision }),
-  catalogGetModelReadme: (provider: string, modelId: string, revision?: string | null) =>
-    invoke<string | null>("catalog_get_model_readme", { provider, modelId, revision }),
-  // ---- 下载队列 ----
-  downloadEnqueue: (request: DownloadArtifactRequest) =>
-    invoke<DownloadTaskView>("download_enqueue", { request }),
-  downloadCancel: (taskId: string) => invoke<void>("download_cancel", { taskId }),
-  downloadSnapshot: () => invoke<DownloadTaskView[]>("download_snapshot"),
-  // ---- 下载源 / token（设置页）----
-  catalogGetEndpoint: () =>
-    invoke<{ catalogBase: string; downloadSource: string; mirrorUrl: string }>(
-      "catalog_get_endpoint",
-    ),
-  catalogSetEndpoint: (args: { catalogBase: string; downloadSource: string; mirrorUrl: string }) =>
-    invoke<void>("catalog_set_endpoint", args),
-  catalogSetToken: (token: string | null) => invoke<void>("catalog_set_token", { token }),
   saveCompanionPosition: (args: { x: number; y: number }) =>
     invoke<void>("save_companion_position", args),
   setCompanionScale: (args: { scale: number }) => invoke<void>("set_companion_scale", args),
@@ -377,13 +334,6 @@ export function onStorageMigrateProgress(
   handler: (p: StorageMigrateProgress) => void,
 ): Promise<UnlistenFn> {
   return listen<StorageMigrateProgress>("storage-migrate-progress", (e) => handler(e.payload));
-}
-
-/** 统一下载队列进度（`download-progress`；独立 taskId）。 */
-export function onCatalogDownloadProgress(
-  handler: (p: DownloadTaskView) => void,
-): Promise<UnlistenFn> {
-  return listen<DownloadTaskView>("download-progress", (e) => handler(e.payload));
 }
 
 export function onLlmToken(handler: (delta: LlmToken) => void): Promise<UnlistenFn> {

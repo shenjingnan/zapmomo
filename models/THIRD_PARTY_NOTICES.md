@@ -11,16 +11,6 @@
 - **许可证**: Apache-2.0（依据 sherpa-onnx 项目整体许可；如需商用请以官方模型发布页的许可说明为准）
 - **sha256**: `68447f4fbc67e70eee3a93961f36e81e98f47aef73ce7e7ca00885c6cd3616a6`
 
-## sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01
-
-- **用途**: 纯英文关键词唤醒词检测（KWS）
-- **来源**: https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01.tar.bz2
-- **发布方**: k2-fsa（sherpa-onnx 项目，模型由 pkufool 训练，GigaSpeech XL 1 万小时）
-- **许可证**: Apache-2.0（依据 sherpa-onnx 项目整体许可；如需商用请以官方模型发布页的许可说明为准）
-- **sha256**: `f170013b4716e41b62b9bfd809687c207cef798ef9bc6534d524e17af9b6561a`
-- **测试夹具**: `src/kws/testdata/bpe.model` 取自该模型包内的同名单文件（239KB），
-  用于钉住子词切分行为，随代码分发，许可同上
-
 ## sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20
 
 - **用途**: 中英双语流式语音识别（ASR）

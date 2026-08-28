@@ -42,7 +42,7 @@ export interface TtsState {
 /**
  * TTS 状态管理：配置读取、音色列表、合成触发/进度/结果、播放、自定义音色库。
  * 合成走后台线程，进度与结果经 `tts-progress` / `tts-result` / `tts-stopped` 事件同步。
- * 模型下载/切换统一走模型库（`list_model_library` 弹窗），此处不持有 legacy 下载通道。
+ * 模型下载/切换统一走「选择模型」弹窗（`list_model_library`），此处不持有 legacy 下载通道。
  */
 export function useTts(): TtsState {
   const [config, setConfig] = useState<TtsConfigInfo | null>(null);

@@ -174,8 +174,10 @@ export function AsrAdvancedParams() {
   const streaming = isStreamingAsr(params?.model_type);
   // 热词/空白惩罚为 transducer（zipformer）专属：paraformer 隐藏（后端也会忽略）
   const zipformerOnly = params?.model_type === "zipformer" || !params?.model_type;
-  // 热词：zipformer 走 context graph、Qwen3-ASR 嵌提示词（后端转逗号格式），均可见可存
-  const hotwordsSupported = zipformerOnly || params?.model_type === "qwen3_asr";
+  // 热词：zipformer 走 context graph、Qwen3-ASR 嵌提示词（后端转逗号格式），均可见可存；
+  // audio.cpp 后端上游无热词选项，隐藏（后端 patch 层也会过滤）
+  const hotwordsSupported =
+    (zipformerOnly || params?.model_type === "qwen3_asr") && params?.backend !== "audiocpp";
   const numericKeys: NumericKey[] = zipformerOnly
     ? NUMERIC_KEYS
     : streaming

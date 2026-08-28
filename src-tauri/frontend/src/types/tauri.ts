@@ -14,8 +14,6 @@ export interface KwsConfigInfo {
   /** 持久化的会话级自定义唤醒词（原始字符串，多个用 / 分隔；空 = 模型内置） */
   custom_keywords: string;
   model_dir: string;
-  /** 当前模型支持的自定义唤醒词语言（gigaspeech 仅 ["en"]；缺省按 ["zh"] 兜底） */
-  keyword_languages?: string[];
   provider: string;
   num_threads: number;
   sample_rate: number;
@@ -70,6 +68,8 @@ export interface AsrConfigInfo {
   enabled: boolean;
   /** 模型类型（zipformer/sensevoice/whisper），决定是否展示流式专属参数 */
   model_type: string;
+  /** 推理后端（sherpa/audiocpp）：audiocpp 时显示 audio.cpp 标识并隐藏热词参数 */
+  backend: string;
   model_dir: string;
   provider: string;
   num_threads: number;

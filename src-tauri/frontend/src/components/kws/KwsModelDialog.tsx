@@ -1,14 +1,13 @@
 import { CircleAlert, Download, Loader2, Trash2 } from "lucide-react";
 import { useState } from "react";
-import { Link } from "react-router-dom";
-import { LibraryDialog } from "@/components/library/LibraryDialog";
-import { ModelConfirmDialog } from "@/components/library/LibraryDialogs";
+import { ModelConfirmDialog } from "@/components/models/ModelConfirmDialog";
+import { ModelDialog } from "@/components/models/ModelDialog";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { KWS_PRESETS, useKwsModelSwitch } from "@/hooks/useKwsModelSwitch";
 import { useSmoothProgress } from "@/hooks/useSmoothProgress";
-import { formatBytes } from "@/lib/catalog/quantization";
+import { formatBytes } from "@/lib/utils";
 import { useRuntime } from "@/providers/RuntimeContext";
 import type { LibraryModel } from "@/types/modelLibrary";
 
@@ -47,7 +46,7 @@ export function KwsModelDialog({ open, onClose }: KwsModelDialogProps) {
   const percent = useSmoothProgress(targetPercent);
 
   return (
-    <LibraryDialog open={open} onClose={onClose} title="选择唤醒词模型" width="lg">
+    <ModelDialog open={open} onClose={onClose} title="选择唤醒词模型" width="lg">
       <p className="text-xs text-text-muted">
         内置唤醒词模型：下载后即可设为当前；正在监听时切换会自动重启监听。
       </p>
@@ -142,16 +141,6 @@ export function KwsModelDialog({ open, onClose }: KwsModelDialogProps) {
         </Alert>
       )}
 
-      <div className="flex flex-wrap items-center gap-2 pt-1">
-        <Link
-          to="/models/library"
-          onClick={onClose}
-          className="text-xs text-text-secondary transition-colors hover:text-text-primary"
-        >
-          更多模型 → 模型库
-        </Link>
-      </div>
-
       <ModelConfirmDialog
         open={confirmModel !== null}
         model={confirmModel}
@@ -161,6 +150,6 @@ export function KwsModelDialog({ open, onClose }: KwsModelDialogProps) {
           void switcher.remove(m.id);
         }}
       />
-    </LibraryDialog>
+    </ModelDialog>
   );
 }

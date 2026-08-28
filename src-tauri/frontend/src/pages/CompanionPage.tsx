@@ -2,7 +2,6 @@ import { open } from "@tauri-apps/plugin-dialog";
 import {
   CircleAlert,
   Image as ImageIcon,
-  Info,
   Pencil,
   Sparkles,
   Star,
@@ -17,23 +16,21 @@ import {
   useRef,
   useState,
 } from "react";
-import { LibraryDialog } from "@/components/library/LibraryDialog";
 import type { Live2dCatalog } from "@/components/live2d/previewManager";
 import type { SharedLive2dStageHandle } from "@/components/live2d/SharedLive2dStage";
 import { SharedLive2dStage } from "@/components/live2d/SharedLive2dStage";
+import { ModelDialog } from "@/components/models/ModelDialog";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Slider } from "@/components/ui/slider";
-import { Switch } from "@/components/ui/switch";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useCompanionLibrary } from "@/hooks/useCompanionLibrary";
 import { isStaticImageFormat } from "@/lib/companionFormat";
 import { api, toAssetUrl } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
-import type { CompanionDragMode, CompanionModelInfo, CompanionWindowLayer } from "@/types/tauri";
+import type { CompanionModelInfo } from "@/types/tauri";
 
 /**
  * 把 Live2D 渲染画布截取为缩小的 PNG 字节数组（供保存为封面）。
@@ -414,21 +411,12 @@ export function CompanionPage() {
   // 拖拽模式（窗口级）：modifier = 需按住 ⌘/Ctrl 才能拖动，direct = 直接拖动。
   const [percent, setPercent] = useState(100);
   const [opacityPercent, setOpacityPercent] = useState(100);
-  const [clickThrough, setClickThrough] = useState(false);
-  const [layer, setLayer] = useState<CompanionWindowLayer>("front");
-  const [locked, setLocked] = useState(false);
-  const [dragMode, setDragMode] = useState<CompanionDragMode>("direct");
   useEffect(() => {
     void api
       .getLive2dConfig()
       .then((cfg) => {
         if (cfg.window_scale != null) setPercent(Math.round(cfg.window_scale * 100));
         if (cfg.window_opacity != null) setOpacityPercent(Math.round(cfg.window_opacity * 100));
-        // 旧后端 / 测试桩可能不返回该字段，兜底为关闭。
-        setClickThrough(cfg.click_through ?? false);
-        if (cfg.window_layer) setLayer(cfg.window_layer);
-        setLocked(cfg.locked ?? false);
-        setDragMode(cfg.drag_mode ?? "direct");
       })
       .catch(() => {});
   }, []);
@@ -441,24 +429,6 @@ export function CompanionPage() {
     const clamped = Math.max(20, Math.min(100, Math.round(value)));
     setOpacityPercent(clamped);
     void api.setCompanionOpacity({ opacity: clamped / 100 });
-  }, []);
-  const handleToggleClickThrough = useCallback((enabled: boolean) => {
-    setClickThrough(enabled);
-    void api.setCompanionClickThrough({ enabled });
-  }, []);
-  const handleLayerChange = useCallback((checked: boolean) => {
-    const next: CompanionWindowLayer = checked ? "front" : "back";
-    setLayer(next);
-    void api.setCompanionLayer({ layer: next });
-  }, []);
-  const handleToggleLocked = useCallback((enabled: boolean) => {
-    setLocked(enabled);
-    void api.setCompanionLocked({ enabled });
-  }, []);
-  const handleToggleDragMode = useCallback((enabled: boolean) => {
-    const next: CompanionDragMode = enabled ? "modifier" : "direct";
-    setDragMode(next);
-    void api.setCompanionDragMode({ mode: next });
   }, []);
 
   // 通用导入收尾：清错误、调导入命令并选中新伙伴。
@@ -514,8 +484,7 @@ export function CompanionPage() {
   const isGif = isStaticImageFormat(selected?.format);
   const previewUrl = selected ? toAssetUrl(selected.model_file) : null;
   // 静态图像伙伴（GIF/角色包立绘）不走 PIXI 预览（无 canvas/动作目录），单独 img 分支。
-  const showStage =
-    !!selected?.valid && !isGif && previewSize.width > 0 && previewSize.height > 0;
+  const showStage = !!selected?.valid && !isGif && previewSize.width > 0 && previewSize.height > 0;
 
   return (
     <div className="flex h-full flex-col gap-4">
@@ -621,80 +590,6 @@ export function CompanionPage() {
                   </div>
                 </>
               )}
-              {/* 显示层级：置顶 = 悬浮浮层（默认，现状）；置底 = 沉到窗口之下并点穿（窗口级） */}
-              <div className="flex w-full items-center gap-2">
-                <span className="w-20 shrink-0">层级</span>
-                <Switch
-                  aria-label="置顶"
-                  checked={layer === "front"}
-                  onCheckedChange={handleLayerChange}
-                />
-                <span className="min-w-0 flex-1 text-xs text-muted-foreground">
-                  {layer === "front"
-                    ? "置顶：悬浮在所有窗口之上"
-                    : "置底：沉到所有窗口之下（点穿，无法拖拽/右键）"}
-                </span>
-              </div>
-              {/* 点击穿透（窗口级）：说明收进 Info icon 的 tooltip，对齐「锁定位置」的展示方式 */}
-              <div className="flex w-full items-center gap-2">
-                <span className="w-20 shrink-0">点击穿透</span>
-                <Switch
-                  aria-label="点击穿透"
-                  checked={clickThrough}
-                  onCheckedChange={handleToggleClickThrough}
-                />
-                <Tooltip>
-                  <TooltipTrigger
-                    aria-label="点击穿透说明"
-                    className="rounded p-0.5 text-muted-foreground/70 transition-colors hover:text-text-primary focus-visible:outline-none"
-                  >
-                    <Info className="h-3.5 w-3.5" />
-                  </TooltipTrigger>
-                  <TooltipContent className="max-w-xs">
-                    开启后鼠标点击穿过模型直达背后内容；拖动、滚轮缩放与右键菜单将失效，可随时在此或托盘菜单关闭
-                  </TooltipContent>
-                </Tooltip>
-              </div>
-              {/* 位置锁定（窗口级）：说明收进 Info icon 的 tooltip，避免占满整行 */}
-              <div className="flex w-full items-center gap-2">
-                <span className="w-20 shrink-0">锁定位置</span>
-                <Switch
-                  aria-label="锁定位置"
-                  checked={locked}
-                  onCheckedChange={handleToggleLocked}
-                />
-                <Tooltip>
-                  <TooltipTrigger
-                    aria-label="锁定位置说明"
-                    className="rounded p-0.5 text-muted-foreground/70 transition-colors hover:text-text-primary focus-visible:outline-none"
-                  >
-                    <Info className="h-3.5 w-3.5" />
-                  </TooltipTrigger>
-                  <TooltipContent className="max-w-xs">
-                    开启后禁止拖动窗口，滚轮缩放与右键菜单不受影响
-                  </TooltipContent>
-                </Tooltip>
-              </div>
-              {/* 拖拽模式（窗口级）：modifier = 需按住 cmd/Ctrl 才能拖动，与锁定正交（锁定优先），说明收进 Info icon 的 tooltip */}
-              <div className="flex w-full items-center gap-2">
-                <span className="w-20 shrink-0">修饰键拖动</span>
-                <Switch
-                  aria-label="修饰键拖动"
-                  checked={dragMode === "modifier"}
-                  onCheckedChange={handleToggleDragMode}
-                />
-                <Tooltip>
-                  <TooltipTrigger
-                    aria-label="修饰键拖动说明"
-                    className="rounded p-0.5 text-muted-foreground/70 transition-colors hover:text-text-primary focus-visible:outline-none"
-                  >
-                    <Info className="h-3.5 w-3.5" />
-                  </TooltipTrigger>
-                  <TooltipContent className="max-w-xs">
-                    开启后需按住 ⌘/Ctrl 才能拖动窗口，滚轮缩放与右键菜单不受影响
-                  </TooltipContent>
-                </Tooltip>
-              </div>
             </div>
           </CardHeader>
           <CardContent className="flex min-h-0 flex-1 flex-col">
@@ -766,8 +661,8 @@ export function CompanionPage() {
         </Card>
       </div>
 
-      {/* 移除伙伴确认（样式对齐模型库 ModelConfirmDialog） */}
-      <LibraryDialog
+      {/* 移除伙伴确认（样式对齐模型卸载确认框） */}
+      <ModelDialog
         open={removeTarget != null}
         onClose={() => setRemoveTarget(null)}
         title="移除伙伴"
@@ -797,7 +692,7 @@ export function CompanionPage() {
             </p>
           </div>
         )}
-      </LibraryDialog>
+      </ModelDialog>
     </div>
   );
 }

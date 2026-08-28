@@ -54,6 +54,7 @@ const KWS_CONFIG = {
 const ASR_CONFIG: AsrConfigInfo = {
   enabled: false,
   model_type: "zipformer",
+  backend: "sherpa",
   model_dir:
     "/home/user/.zapmomo/models/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20",
   provider: "cpu",
