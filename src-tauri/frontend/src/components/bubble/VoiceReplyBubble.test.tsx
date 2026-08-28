@@ -35,13 +35,24 @@ describe("VoiceReplyBubble（回复气泡）", () => {
     expect(container.firstChild).toBeNull();
   });
 
-  it("正常完结（text 清空、phase 仍在 speaking）：定格 5s 后消失", () => {
-    const { rerender } = render(<VoiceReplyBubble text="完整回复" phase="speaking" />);
+  it("正常完结：定格 5s（期间不透明），随后淡出并于 5.5s 移除", () => {
+    const { rerender, container } = render(<VoiceReplyBubble text="完整回复" phase="speaking" />);
     rerender(<VoiceReplyBubble text="" phase="speaking" />);
     // 定格中仍显示
     expect(screen.getByText("完整回复")).toBeTruthy();
     act(() => {
-      vi.advanceTimersByTime(5100);
+      vi.advanceTimersByTime(4000);
+    });
+    expect(container.querySelector(".transition-opacity")?.className).toContain("opacity-100");
+    // 5s 进入淡出（DOM 仍在，透明度过渡到 0）
+    act(() => {
+      vi.advanceTimersByTime(1200);
+    });
+    expect(screen.getByText("完整回复")).toBeTruthy();
+    expect(container.querySelector(".transition-opacity")?.className).toContain("opacity-0");
+    // 5.5s 移除
+    act(() => {
+      vi.advanceTimersByTime(400);
     });
     expect(screen.queryByText("完整回复")).toBeNull();
   });
@@ -61,9 +72,9 @@ describe("VoiceReplyBubble（回复气泡）", () => {
       vi.advanceTimersByTime(2000);
     });
     expect(screen.getByText("定格我")).toBeTruthy();
-    // 总计 5s 后仍按时消失
+    // 总计 5.6s（定格 5s + 淡出 0.5s）后消失
     act(() => {
-      vi.advanceTimersByTime(3100);
+      vi.advanceTimersByTime(3600);
     });
     expect(screen.queryByText("定格我")).toBeNull();
   });
@@ -107,5 +118,93 @@ describe("VoiceReplyBubble（回复气泡）", () => {
     // 打断立即消失 → 上报不可见
     rerender(<VoiceReplyBubble text="" phase="armed" onVisibleChange={onVisibleChange} />);
     expect(onVisibleChange).toHaveBeenLastCalledWith(false);
+  });
+
+  // ---- 插播通道（announcement，dsh 播报与回复共用同一个气泡）----
+
+  it("插播在无流式文本时展示，走同一套定格→淡出→移除", () => {
+    const { container } = render(
+      <VoiceReplyBubble text="" phase="speaking" announcement="开工啦" />,
+    );
+    expect(screen.getByText("开工啦")).toBeTruthy();
+    act(() => {
+      vi.advanceTimersByTime(4900);
+    });
+    expect(screen.getByText("开工啦")).toBeTruthy();
+    expect(container.querySelector(".transition-opacity")?.className).toContain("opacity-100");
+    act(() => {
+      vi.advanceTimersByTime(700);
+    });
+    expect(screen.queryByText("开工啦")).toBeNull();
+  });
+
+  it("插播被流式回复压制，回复完结后（新鲜期内）补展示", () => {
+    const { rerender } = render(<VoiceReplyBubble text="" phase="armed" />);
+    rerender(<VoiceReplyBubble text="长回复" phase="thinking" announcement="插播台词" />);
+    expect(screen.getByText("长回复")).toBeTruthy();
+    expect(screen.queryByText("插播台词")).toBeNull();
+    rerender(<VoiceReplyBubble text="" phase="speaking" announcement="插播台词" />);
+    expect(screen.getByText("插播台词")).toBeTruthy();
+    expect(screen.queryByText("长回复")).toBeNull();
+  });
+
+  it("插播被压制超过新鲜期（5s）→ 回复完结后不再补展示，回复照常定格", () => {
+    const { rerender } = render(
+      <VoiceReplyBubble text="长回复" phase="thinking" announcement="过期插播" />,
+    );
+    expect(screen.getByText("长回复")).toBeTruthy();
+    act(() => {
+      vi.advanceTimersByTime(6000);
+    });
+    rerender(<VoiceReplyBubble text="" phase="speaking" announcement="过期插播" />);
+    expect(screen.queryByText("过期插播")).toBeNull();
+    expect(screen.getByText("长回复")).toBeTruthy();
+    act(() => {
+      vi.advanceTimersByTime(5600);
+    });
+    expect(screen.queryByText("长回复")).toBeNull();
+  });
+
+  it("插播到达时替换定格中的旧回复（最新发言胜出）", () => {
+    const { rerender } = render(<VoiceReplyBubble text="旧回复" phase="speaking" />);
+    rerender(<VoiceReplyBubble text="" phase="speaking" />);
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    rerender(<VoiceReplyBubble text="" phase="speaking" announcement="插播台词" />);
+    expect(screen.getByText("插播台词")).toBeTruthy();
+    expect(screen.queryByText("旧回复")).toBeNull();
+  });
+
+  it("插播不随会话打断消失（phase 回 armed 不影响，按自身定时消失）", () => {
+    const { rerender } = render(
+      <VoiceReplyBubble text="" phase="speaking" announcement="插播台词" />,
+    );
+    rerender(<VoiceReplyBubble text="" phase="armed" announcement="插播台词" />);
+    act(() => {
+      vi.advanceTimersByTime(3000);
+    });
+    expect(screen.getByText("插播台词")).toBeTruthy();
+  });
+
+  it("流式回复开始时立即顶掉展示中的插播", () => {
+    const { rerender } = render(<VoiceReplyBubble text="" phase="armed" announcement="插播台词" />);
+    expect(screen.getByText("插播台词")).toBeTruthy();
+    rerender(<VoiceReplyBubble text="新回复" phase="thinking" announcement="插播台词" />);
+    expect(screen.getByText("新回复")).toBeTruthy();
+    expect(screen.queryByText("插播台词")).toBeNull();
+  });
+
+  it("插播展示同样经 onVisibleChange 上报", () => {
+    const onVisibleChange = vi.fn();
+    render(
+      <VoiceReplyBubble
+        text=""
+        phase="armed"
+        announcement="插播台词"
+        onVisibleChange={onVisibleChange}
+      />,
+    );
+    expect(onVisibleChange).toHaveBeenLastCalledWith(true);
   });
 });

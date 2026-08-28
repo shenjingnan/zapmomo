@@ -1956,9 +1956,11 @@ fn collect_tts_preflight_files(
 
 /// 预检语音会话所需模型文件（KWS / ASR / TTS / LLM）。缺任一返回带安装提示的错误。
 ///
-/// ASR 按 `model_type` 族感知（zipformer 四件套 / paraformer encoder+decoder+tokens /
-/// SenseVoice model+tokens / Whisper encoder+decoder+tokens / Qwen3-ASR
-/// conv_frontend+encoder+decoder，tokenizer 目录单独校验），不再硬编码 zipformer 专属文件名。
+/// ASR 按 backend 分派：sherpa 走 `model_type` 族感知逐文件收集（zipformer 四件套 /
+/// paraformer encoder+decoder+tokens / SenseVoice model+tokens / Whisper
+/// encoder+decoder+tokens / Qwen3-ASR conv_frontend+encoder+decoder，tokenizer 目录
+/// 单独校验）；audiocpp 走 `asr::config::preflight` 按族清单校验（单 GGUF 包，不查
+/// sherpa 的 ONNX 清单，否则 Qwen3Asr 会误报缺 conv_frontend）。
 /// TTS 按 backend 分派：sherpa 走逐文件收集（含 Kokoro 主模型/voices）；audiocpp 走
 /// `tts::config::preflight`（固定两文件，不查 sherpa 清单）。
 fn preflight_voice_models(
@@ -1980,7 +1982,16 @@ fn preflight_voice_models(
             files.extend(collect_tts_preflight_files(&cfg.tts)?);
         }
     }
-    files.extend(collect_asr_preflight_files(&cfg.asr)?);
+    match cfg.asr.backend {
+        zapmomo::asr::config::AsrBackendKind::Audiocpp => {
+            // audiocpp：单 GGUF 包，`preflight` 按族清单校验（缺失时带 registry 安装提示）
+            zapmomo::asr::config::preflight(&cfg.asr)
+                .map_err(|e| format!("{e}\n（语音会话 ASR 预检失败）"))?;
+        }
+        zapmomo::asr::config::AsrBackendKind::Sherpa => {
+            files.extend(collect_asr_preflight_files(&cfg.asr)?);
+        }
+    }
     for (name, path) in files {
         if !path.is_file() {
             return Err(format!("缺少模型文件 {name}: {}", path.display()));
@@ -3475,6 +3486,14 @@ fn apply_active_companion(app: &AppHandle, id: &str) {
 #[cfg(target_os = "macos")]
 const MACOS_COMPANION_BACK_LEVEL: i64 = -1;
 
+/// 气泡/输入条面板的 macOS 层级：Floating(4) 之上 1 级，建窗时常置、不随角色层级切换。
+/// 角色前置 = Floating(4)、置底 = -1（见 `apply_companion_layer_platform`），层级 5
+/// 保证聊天气泡与文字输入条恒高于角色，角色任何层级下都不会遮挡它们。
+/// （Tauri `always_on_top` 只设 NSFloatingWindowLevel=3，低于角色前置的 4，
+/// 曾导致角色前置时角色反而盖住气泡/输入条、无法操作。）
+#[cfg(target_os = "macos")]
+const MACOS_OVERLAY_PANEL_LEVEL: i64 = 5;
+
 /// 按层级即时调整角色窗口的 z-order 与鼠标穿透（平台相关；启动与运行时共用）。
 ///
 /// macOS 走 NSPanel（set_level + set_ignores_mouse_events），不混用 tauri 的
@@ -3498,6 +3517,20 @@ fn apply_companion_layer_platform(app: &AppHandle, layer: CompanionWindowLayer) 
             // z-order 完全由 set_level 控制（浮层属性不参与层级），运行时切换 floating 会破坏存活 WebView 渲染。
             panel.set_level(MACOS_COMPANION_BACK_LEVEL);
             panel.set_ignores_mouse_events(true); // 完全点穿
+        }
+    }
+}
+
+/// 把气泡/输入条窗口重断到 TOPMOST band 顶部（Windows）。
+///
+/// topmost band 内无层级之分，Z 序由插入顺序决定：角色置顶后再断一次气泡/输入条
+/// 的 always_on_top（SetWindowPos HWND_TOPMOST 即移到 band 顶），保证二者恒在角色
+/// 之上；角色置底时已退出 topmost band，本调用无副作用（仅重复置顶）。
+#[cfg(windows)]
+fn raise_overlay_windows(app: &AppHandle) {
+    for label in ["bubble", "chatbox"] {
+        if let Some(w) = app.get_webview_window(label) {
+            let _ = w.set_always_on_top(true);
         }
     }
 }
@@ -3530,6 +3563,7 @@ fn apply_companion_layer_platform(app: &AppHandle, layer: CompanionWindowLayer) 
             );
         }
     }
+    raise_overlay_windows(app);
 }
 
 /// 按层级即时调整角色窗口的 z-order 与鼠标穿透（平台相关；启动与运行时共用）。
@@ -5621,6 +5655,9 @@ pub fn run() {
                             .full_screen_auxiliary()
                             .into(),
                     );
+                    // 层级常置 Floating 之上 1 级：恒高于角色（前置 4 / 置底 -1），
+                    // 角色永不遮挡输入条。
+                    panel.set_level(MACOS_OVERLAY_PANEL_LEVEL);
                 }
             }
             // 恢复持久化的可见性（缺省隐藏）
@@ -5685,10 +5722,17 @@ pub fn run() {
                             .full_screen_auxiliary()
                             .into(),
                     );
+                    // 层级常置 Floating 之上 1 级：恒高于角色（前置 4 / 置底 -1），
+                    // 角色永不遮挡气泡。
+                    panel.set_level(MACOS_OVERLAY_PANEL_LEVEL);
                 }
             }
             // 显隐跟随角色（companion 默认可见 → 气泡随之显示；内容为空时仍点穿）
             sync_bubble_visibility(app.handle());
+            // Windows：启动时的层级应用先于 chatbox/bubble 建窗（重断为 no-op），
+            // 这里补一次，保证角色前置 topmost 时二者在其上。
+            #[cfg(windows)]
+            raise_overlay_windows(app.handle());
 
             // 自动打开设置窗口：仅用于「无全局菜单栏」的场景（macOS Accessory 模式或非 macOS），
             // 否则 Cmd+, 快捷键不可靠，自动打开可避免「找不到设置」；普通模式有菜单栏，无需自动弹出。

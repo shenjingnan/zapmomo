@@ -96,4 +96,37 @@ describe("BubbleRoot（气泡窗口根组件）", () => {
     expect(screen.queryByText("不应出现")).toBeNull();
     expect(setIgnoreMock).not.toHaveBeenCalledWith(false);
   });
+
+  // ---- 统一聊天气泡：dsh（DeepSeek Harness）播报与回复共用同一个气泡窗口 ----
+
+  it("dsh-speak 播报渲染进气泡并恢复接收鼠标（与回复同一气泡）", async () => {
+    render(<BubbleRoot />);
+    await waitFor(() => expect(setIgnoreMock).toHaveBeenCalledWith(true));
+    emit("dsh-speak", { text: "开工啦", event: { kind: "task-started" } });
+    expect(screen.getByText("开工啦")).toBeTruthy();
+    await waitFor(() => expect(setIgnoreMock).toHaveBeenCalledWith(false));
+  });
+
+  it("插播不顶掉正在流式输出的回复，回复完结后补展示插播", async () => {
+    render(<BubbleRoot />);
+    emit("voice-session-token", { delta: "回复中" });
+    emit("dsh-speak", { text: "插播台词", event: {} });
+    expect(screen.getByText("回复中")).toBeTruthy();
+    expect(screen.queryByText("插播台词")).toBeNull();
+    emit("voice-session-reply-finished", { text: "回复中" });
+    expect(screen.getByText("插播台词")).toBeTruthy();
+  });
+
+  it("角色置底（layer=back）时 dsh 播报同样不渲染", async () => {
+    invokeMock.mockImplementation((cmd: string) =>
+      cmd === "get_live2d_config"
+        ? Promise.resolve({ window_layer: "back" })
+        : Promise.resolve(undefined),
+    );
+    render(<BubbleRoot />);
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("get_live2d_config"));
+    await act(async () => {});
+    emit("dsh-speak", { text: "置底不播", event: {} });
+    expect(screen.queryByText("置底不播")).toBeNull();
+  });
 });

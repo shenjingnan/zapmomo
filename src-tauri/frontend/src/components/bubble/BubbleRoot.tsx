@@ -2,11 +2,15 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useState } from "react";
 import { VoiceReplyBubble } from "@/components/bubble/VoiceReplyBubble";
 import { useVoiceSession } from "@/hooks/useVoiceSession";
-import { api, onCompanionLayerChanged } from "@/lib/tauri";
+import { api, onCompanionLayerChanged, onDshSpeak } from "@/lib/tauri";
 import type { CompanionWindowLayer } from "@/types/tauri";
 
 /**
- * 回复气泡窗口根组件（bubble 窗口）：独立透明窗口，galgame 对话框位。
+ * 聊天气泡窗口根组件（bubble 窗口）：独立透明窗口，galgame 对话框位。
+ *
+ * 有且只有一个聊天气泡：对话流式回复（voice-session-token）与 dsh（DeepSeek
+ * Harness）事件播报台词（dsh-speak）都渲染在这里，优先级与插播语义由
+ * VoiceReplyBubble 统一管理。
  *
  * - 显隐由后端跟随角色窗口控制（无独立开关）；本组件只负责内容渲染与交互态。
  * - 空闲点击穿透：无可见气泡内容时 `setIgnoreCursorEvents(true)`，透明区域
@@ -18,7 +22,16 @@ import type { CompanionWindowLayer } from "@/types/tauri";
 export function BubbleRoot() {
   const voice = useVoiceSession();
   const [layer, setLayer] = useState<CompanionWindowLayer>("front");
+  const [announcement, setAnnouncement] = useState("");
   const [bubbleVisible, setBubbleVisible] = useState(false);
+
+  // dsh 播报台词：仅取文本进气泡（事件动作联动在 CompanionRoot，与此无关）
+  useEffect(() => {
+    const unlisten = onDshSpeak((p) => setAnnouncement(p.text));
+    return () => {
+      void unlisten.then((fn) => fn());
+    };
+  }, []);
 
   // 初始层级回读 + 设置面板/菜单切换层级时同步
   useEffect(() => {
@@ -34,9 +47,12 @@ export function BubbleRoot() {
     };
   }, []);
 
-  // 空闲点穿：有可见气泡内容（且角色前置）时才接收鼠标（可拖动），否则穿透到下方窗口
+  // 空闲点穿：有可见气泡内容（回复或插播，且角色前置）时才接收鼠标（可拖动），
+  // 否则穿透到下方窗口
   const interactive = bubbleVisible && layer === "front";
   useEffect(() => {
+    // （临时调试）气泡窗口前端状态日志：排查「气泡无法拖动」——确认点穿切换与
+    // 拖动事件是否到达。验收通过后随 bubble_debug_log 一并删除。
     void api.bubbleDebugLog({
       message: `interactive=${interactive} (bubbleVisible=${bubbleVisible}, layer=${layer}) → setIgnoreCursorEvents(${!interactive})`,
     });
@@ -73,6 +89,7 @@ export function BubbleRoot() {
         <VoiceReplyBubble
           text={voice.pendingReply}
           phase={voice.phase}
+          announcement={announcement}
           onVisibleChange={setBubbleVisible}
         />
       )}
