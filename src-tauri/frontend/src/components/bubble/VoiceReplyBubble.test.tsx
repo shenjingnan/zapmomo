@@ -225,4 +225,113 @@ describe("VoiceReplyBubble（回复气泡）", () => {
     render(<VoiceReplyBubble text="" announcement="插播台词" onVisibleChange={onVisibleChange} />);
     expect(onVisibleChange).toHaveBeenLastCalledWith(true);
   });
+
+  // ---- 用户句通道（userText，一轮对话视图：先用户句、后回复）----
+
+  it("用户句先亮：仅 userText 时展示「我：」前缀句", () => {
+    render(<VoiceReplyBubble text="" userText="你好呀" />);
+    expect(screen.getByText("我：你好呀")).toBeTruthy();
+  });
+
+  it("回复流式追加在用户句下方，两者同屏", () => {
+    const { rerender } = render(<VoiceReplyBubble text="" userText="你好呀" />);
+    rerender(<VoiceReplyBubble text="你好，很高兴" userText="你好呀" />);
+    expect(screen.getByText("我：你好呀")).toBeTruthy();
+    expect(screen.getByText("你好，很高兴")).toBeTruthy();
+  });
+
+  it("新一轮 userText 顶掉旧轮内容（静置的旧回复一并清场）", () => {
+    const { rerender } = render(<VoiceReplyBubble text="旧回复" userText="旧问题" />);
+    rerender(<VoiceReplyBubble text="" userText="旧问题" />);
+    rerender(<VoiceReplyBubble text="" userText="新问题" />);
+    expect(screen.getByText("我：新问题")).toBeTruthy();
+    expect(screen.queryByText("旧回复")).toBeNull();
+    expect(screen.queryByText("我：旧问题")).toBeNull();
+  });
+
+  it("userText 与首 token 同批到达时直接显示流式回复（不清场竞态）", () => {
+    render(<VoiceReplyBubble text="你" userText="你好" />);
+    expect(screen.getByText("我：你好")).toBeTruthy();
+    expect(screen.getByText("你")).toBeTruthy();
+  });
+
+  it("userText 等回复期间插播被压制，回复完结后补展示且清用户句", () => {
+    const { rerender } = render(<VoiceReplyBubble text="" userText="问题" />);
+    expect(screen.queryByText("插播台词")).toBeNull();
+    // 回复流式开始（压制持续）……
+    rerender(<VoiceReplyBubble text="回复中" userText="问题" announcement="插播台词" />);
+    expect(screen.getByText("回复中")).toBeTruthy();
+    expect(screen.queryByText("插播台词")).toBeNull();
+    // ……完结变空：新鲜期内补展示，插播是独立发言不带用户句
+    rerender(<VoiceReplyBubble text="" userText="问题" announcement="插播台词" />);
+    expect(screen.getByText("插播台词")).toBeTruthy();
+    expect(screen.queryByText("我：问题")).toBeNull();
+  });
+
+  it("耐心窗口内（回复未始）插播被压制不抢屏", () => {
+    const { rerender } = render(<VoiceReplyBubble text="" userText="问题" />);
+    act(() => {
+      vi.advanceTimersByTime(3000);
+    });
+    rerender(<VoiceReplyBubble text="" userText="问题" announcement="插播台词" />);
+    expect(screen.getByText("我：问题")).toBeTruthy();
+    expect(screen.queryByText("插播台词")).toBeNull();
+  });
+
+  it("等回复耐心窗口过期后（回复始终未始），插播到达正常展示", () => {
+    const { rerender } = render(<VoiceReplyBubble text="" userText="问题" />);
+    expect(screen.getByText("我：问题")).toBeTruthy();
+    act(() => {
+      vi.advanceTimersByTime(6000);
+    });
+    rerender(<VoiceReplyBubble text="" userText="问题" announcement="插播台词" />);
+    expect(screen.getByText("插播台词")).toBeTruthy();
+    expect(screen.queryByText("我：问题")).toBeNull();
+  });
+
+  it("点击关闭一次性清空用户句与回复", () => {
+    const { rerender } = render(<VoiceReplyBubble text="完整回复" userText="问题" />);
+    rerender(<VoiceReplyBubble text="" userText="问题" />);
+    const el = screen.getByText("完整回复");
+    press(el);
+    release(el);
+    expect(screen.queryByText("完整回复")).toBeNull();
+    expect(screen.queryByText("我：问题")).toBeNull();
+  });
+
+  it("仅用户句时点击同样关闭", () => {
+    render(<VoiceReplyBubble text="" userText="问题" />);
+    const el = screen.getByText("我：问题");
+    press(el);
+    release(el);
+    expect(screen.queryByText("我：问题")).toBeNull();
+  });
+
+  it("仅用户句（回复未始）时可见性上报为可见，关闭后不可见", () => {
+    const onVisibleChange = vi.fn();
+    render(<VoiceReplyBubble text="" userText="问题" onVisibleChange={onVisibleChange} />);
+    expect(onVisibleChange).toHaveBeenLastCalledWith(true);
+    const el = screen.getByText("我：问题");
+    press(el);
+    release(el);
+    expect(onVisibleChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it("dismiss 后同 props 重渲染不复活用户句", () => {
+    const { rerender } = render(<VoiceReplyBubble text="" userText="问题" />);
+    const el = screen.getByText("我：问题");
+    press(el);
+    release(el);
+    rerender(<VoiceReplyBubble text="" userText="问题" />);
+    expect(screen.queryByText("我：问题")).toBeNull();
+  });
+
+  it("回复流式到完结期间 userText 不变，多次重渲染不重复登记清场", () => {
+    const { rerender } = render(<VoiceReplyBubble text="部分" userText="问题" />);
+    rerender(<VoiceReplyBubble text="部分回复" userText="问题" />);
+    rerender(<VoiceReplyBubble text="" userText="问题" />);
+    // 用户句不因 effect 重跑被重复登记/清场，回复完结后两者静置同屏
+    expect(screen.getByText("我：问题")).toBeTruthy();
+    expect(screen.getByText("部分回复")).toBeTruthy();
+  });
 });
