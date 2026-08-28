@@ -60,7 +60,7 @@ pinyin = "0.11"
 tokio = { version = "1", features = ["full"] }
 
 # 系统资源检测（audio.cpp sidecar 残留进程按 pid 存活检查与清理）
-sysinfo = "0.33"
+sysinfo = "0.39"
 
 # dsh 桥：loopback HTTP 接收 deepseek-harness 插件推送的任务事件
 tiny_http = "0.12"
