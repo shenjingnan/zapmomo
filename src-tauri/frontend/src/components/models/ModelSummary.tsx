@@ -2,7 +2,6 @@ import {
   AudioWaveform,
   Brain,
   ChevronRight,
-  Database,
   type LucideIcon,
   Mic,
   RefreshCw,
@@ -10,6 +9,7 @@ import {
 } from "lucide-react";
 import { type ReactNode, useState } from "react";
 import { Link } from "react-router-dom";
+import { currentModelName, isLlmConfigured } from "@/components/llm/llmMeta";
 import { AsrModelSwitchMenu } from "@/components/models/AsrModelSwitchMenu";
 import {
   deriveListenerStatus,
@@ -17,7 +17,6 @@ import {
   type ListenerStatus,
 } from "@/components/models/capabilityStatus";
 import { KwsModelSwitchMenu } from "@/components/models/KwsModelSwitchMenu";
-import { currentModelName, isLlmConfigured } from "@/components/llm/llmMeta";
 import { TtsModelSwitchMenu } from "@/components/models/TtsModelSwitchMenu";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
@@ -278,12 +277,6 @@ export function ModelSummary() {
           <Button variant="ghost" size="sm" onClick={refreshAll} disabled={refreshing}>
             <RefreshCw className={cn("h-4 w-4", refreshing && "animate-spin")} />
             刷新状态
-          </Button>
-          <Button variant="outline" size="sm" className="shadow-none" asChild>
-            <Link to="/models/library">
-              <Database className="h-4 w-4" />
-              管理模型
-            </Link>
           </Button>
         </div>
       </div>

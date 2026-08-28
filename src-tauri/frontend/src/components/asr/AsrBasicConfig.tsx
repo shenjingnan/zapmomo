@@ -114,6 +114,15 @@ export function AsrBasicConfig({
               >
                 {modelName ?? "未知模型"}
               </span>
+              {config?.backend === "audiocpp" && (
+                <Badge
+                  variant="outline"
+                  className="shrink-0 border-violet-500/20 bg-violet-500/10 text-violet-600"
+                  title="由内置 audio.cpp 引擎（sidecar 进程）驱动"
+                >
+                  audio.cpp
+                </Badge>
+              )}
               <Badge
                 variant="outline"
                 className={

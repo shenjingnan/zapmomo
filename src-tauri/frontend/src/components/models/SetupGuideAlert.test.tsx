@@ -130,16 +130,20 @@ describe("SetupGuideAlert 未配置/错误引导卡", () => {
     expect(cta).toHaveAttribute("href", "/models/kws");
   });
 
-  it("多项未配置：去模型库", () => {
+  it("多项未配置：每能力一个直达按钮", () => {
     state.runtime = makeRuntime({
       kws: makeKws({ modelsPresent: false }),
       llm: makeLlm({ modelsPresent: false }),
     });
     renderGuide();
     expect(screen.getByText("2 项能力尚未配置模型")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "去模型库" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "去配置唤醒词（KWS）" })).toHaveAttribute(
       "href",
-      "/models/library",
+      "/models/kws",
+    );
+    expect(screen.getByRole("link", { name: "去配置AI 大脑（LLM）" })).toHaveAttribute(
+      "href",
+      "/models/llm",
     );
   });
 

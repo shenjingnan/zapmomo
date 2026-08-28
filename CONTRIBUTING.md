@@ -227,7 +227,7 @@ debug = false
 
 基于 llama.cpp（Rust 绑定 `llama-cpp-2`）的本地大语言模型，支持流式对话与 Agent 工具调用；也可通过 OpenAI 兼容的 `/v1/responses` 接口接入远程 API 或 `llama-server`。
 
-LLM 模型为 **GGUF 文件**：内置清单提供多个可一键下载的预设（应用内「AI 大脑（LLM）配置」页 / 模型库），也支持自备 GGUF 放入 `~/.zapmomo/models/<任意目录>/` 自动发现，或用 `[llm] model_path` 指定路径。
+LLM 模型为 **GGUF 文件**：内置清单提供多个可一键下载的预设（应用内「AI 大脑（LLM）配置」页），也支持自备 GGUF 放入 `~/.zapmomo/models/<任意目录>/` 自动发现，或用 `[llm] model_path` 指定路径。
 
 ```bash
 # 1. 获取模型：桌面应用「AI 大脑（LLM）配置」页一键下载（Qwen3-0.6B / 4B 预设），
@@ -419,7 +419,7 @@ window_scale = 1.0                       # 窗口缩放（0.25 ~ 2.0）
 │   │   ├── state.rs     # 会话状态
 │   │   └── config.rs    # [voice] 配置解析
 │   ├── companion.rs     # 伙伴库（Live2D 模型集合 + 当前使用项）
-│   ├── model_library/   # 模型库核心服务（catalog / 安装 / 下载 / 选择）
+│   ├── model_library/   # 模型列表核心服务（registry 预设 / 安装 / 下载 / 选择）
 │   ├── live2d/          # Live2D 角色模型定位
 │   │   ├── mod.rs
 │   │   └── config.rs    # [live2d] 配置解析

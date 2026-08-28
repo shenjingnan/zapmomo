@@ -16,10 +16,10 @@ import {
   useRef,
   useState,
 } from "react";
-import { LibraryDialog } from "@/components/library/LibraryDialog";
 import type { Live2dCatalog } from "@/components/live2d/previewManager";
 import type { SharedLive2dStageHandle } from "@/components/live2d/SharedLive2dStage";
 import { SharedLive2dStage } from "@/components/live2d/SharedLive2dStage";
+import { ModelDialog } from "@/components/models/ModelDialog";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -661,8 +661,8 @@ export function CompanionPage() {
         </Card>
       </div>
 
-      {/* 移除伙伴确认（样式对齐模型库 ModelConfirmDialog） */}
-      <LibraryDialog
+      {/* 移除伙伴确认（样式对齐模型卸载确认框） */}
+      <ModelDialog
         open={removeTarget != null}
         onClose={() => setRemoveTarget(null)}
         title="移除伙伴"
@@ -692,7 +692,7 @@ export function CompanionPage() {
             </p>
           </div>
         )}
-      </LibraryDialog>
+      </ModelDialog>
     </div>
   );
 }

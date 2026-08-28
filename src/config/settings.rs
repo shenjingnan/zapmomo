@@ -276,49 +276,12 @@ pub struct LocalModel {
 
 /// 模型库配置段。
 ///
-/// 只保存**用户配置**（本地注册 + 目录/下载源），不保存 installed inventory。
+/// 只保存**用户配置**（本地注册），不保存 installed inventory。
 /// "电脑上装了哪些模型" 的唯一事实来源是 `~/.zapmomo/models/**/.zapmomo-lib.json` 扫描。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct ModelLibrarySettings {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub local_models: Vec<LocalModel>,
-    /// 在线目录 base URL（默认 huggingface.co，预留 ModelScope 等）。
-    #[serde(default = "default_hf_catalog_base_url")]
-    pub hf_catalog_base_url: String,
-    /// 下载源：auto（HF 失败 fallback 镜像）| huggingface | mirror。
-    #[serde(default = "default_hf_download_source")]
-    pub hf_download_source: String,
-    /// 自定义镜像 base URL（默认 https://hf-mirror.com，可改为任意镜像）。
-    #[serde(default = "default_hf_mirror_url")]
-    pub hf_mirror_url: String,
-    /// Hugging Face token（明文 settings.toml；**不是安全存储**）。
-    /// 只进 Authorization header；绝不进 log / error message / cache key / 前端配置 View。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hf_token: Option<String>,
-}
-
-fn default_hf_catalog_base_url() -> String {
-    "https://huggingface.co".to_string()
-}
-
-fn default_hf_download_source() -> String {
-    "auto".to_string()
-}
-
-fn default_hf_mirror_url() -> String {
-    "https://hf-mirror.com".to_string()
-}
-
-impl Default for ModelLibrarySettings {
-    fn default() -> Self {
-        Self {
-            local_models: Vec::new(),
-            hf_catalog_base_url: default_hf_catalog_base_url(),
-            hf_download_source: default_hf_download_source(),
-            hf_mirror_url: default_hf_mirror_url(),
-            hf_token: None,
-        }
-    }
 }
 
 /// 唤醒词检测（KWS）配置。
@@ -451,6 +414,12 @@ pub struct AsrSettings {
     /// 调试输出，缺省 false
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub debug: Option<bool>,
+    /// ASR 引擎后端：sherpa（进程内，缺省）| audiocpp（audio.cpp sidecar 进程）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    /// audiocpp 引擎二进制覆盖路径（开发/调试用；缺省由 locator 自动定位）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_path: Option<String>,
 }
 
 /// 文本转语音（TTS）配置。
