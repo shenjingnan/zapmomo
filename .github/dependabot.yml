@@ -12,6 +12,13 @@ updates:
     commit-message:
       prefix: 'chore'
       include: 'scope'
+    ignore:
+      # windows crate 0.62 与 tauri 2.x 生态（tao/muda/tray-icon 仍依赖 windows 0.61）
+      # 不兼容：升级后依赖图并存两个版本，window.hwnd() 返回的 0.61 HWND 无法传入
+      # 0.62 的 SetWindowPos，src-tauri 在 Windows 上编译失败（#167）。
+      # 待 tauri 上游跟进 windows 0.62 后移除本 ignore 一并升级。
+      - dependency-name: 'windows'
+        update-types: ['version-update:semver-minor', 'version-update:semver-major']
 
   - package-ecosystem: 'github-actions'
     directory: '/'
