@@ -99,7 +99,8 @@ function parseNumericDraft(
 ): Record<NumericKey, number> | null {
   const out = {} as Record<NumericKey, number>;
   for (const k of keys) {
-    const raw = draft[k].trim();
+    // 防御：模型族切换瞬间旧草稿可能缺新键（hydrate 重建前的渲染），缺键视为未填
+    const raw = draft[k]?.trim() ?? "";
     if (raw === "") return null;
     const v = Number(raw);
     if (!Number.isFinite(v)) return null;
@@ -184,11 +185,14 @@ export function AsrAdvancedParams() {
       ? NUMERIC_KEYS.filter((k) => k !== "blank_penalty")
       : NUMERIC_KEYS.filter((k) => k === "num_threads");
 
-  // hydrate：config 就绪时填充草稿；数字草稿在 dirty 时保留用户编辑，开关/热词仅首次填充
+  // hydrate：config 就绪时填充草稿；数字草稿在 dirty 时保留用户编辑，开关/热词仅首次填充。
+  // 键集随模型族变化（如 qwen3 → zipformer 扩出 blank_penalty/断句），旧草稿缺键时
+  // 整体重建，避免用残缺草稿做 pristine 比对。
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 有意仅随 params 刷新；numericKeys 为每次渲染重建的派生数组，入 deps 会无限循环
   useEffect(() => {
     if (!params) return;
     setDraft((prev) =>
-      prev === null || isPristine(prev, params, numericKeys)
+      prev === null || !numericKeys.every((k) => k in prev) || isPristine(prev, params, numericKeys)
         ? toDraft(params, numericKeys)
         : prev,
     );
