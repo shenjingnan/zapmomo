@@ -289,6 +289,52 @@ describe("VoiceReplyBubble（回复气泡）", () => {
     expect(screen.queryByText("我：问题")).toBeNull();
   });
 
+  it("窗口内暂存的插播在耐心窗口到期后自动补展示（无需 props 变化）", () => {
+    const { rerender } = render(<VoiceReplyBubble text="" userText="问题" />);
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    rerender(<VoiceReplyBubble text="" userText="问题" announcement="插播台词" />);
+    expect(screen.queryByText("插播台词")).toBeNull();
+    // 耐心窗口自用户句登记起算 5s 到期；插播 freshTimer 自暂存（晚 1s）起算，尚未到期
+    act(() => {
+      vi.advanceTimersByTime(4500);
+    });
+    expect(screen.getByText("插播台词")).toBeTruthy();
+    expect(screen.queryByText("我：问题")).toBeNull();
+  });
+
+  it("dismiss 后窗口内暂存的插播不弹回", () => {
+    const { rerender, container } = render(<VoiceReplyBubble text="" userText="问题" />);
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    rerender(<VoiceReplyBubble text="" userText="问题" announcement="插播台词" />);
+    const el = screen.getByText("我：问题");
+    press(el);
+    release(el);
+    expect(container.firstChild).toBeNull();
+    act(() => {
+      vi.advanceTimersByTime(6000);
+    });
+    rerender(<VoiceReplyBubble text="" userText="问题" announcement="插播台词" />);
+    expect(container.firstChild).toBeNull();
+  });
+
+  it("userText 与插播同批到达（回复未始）时用户句先亮", () => {
+    render(<VoiceReplyBubble text="" userText="你好" announcement="插播台词" />);
+    expect(screen.getByText("我：你好")).toBeTruthy();
+    expect(screen.queryByText("插播台词")).toBeNull();
+  });
+
+  it("新 userText 顶掉展示中的插播", () => {
+    const { rerender } = render(<VoiceReplyBubble text="" announcement="插播台词" />);
+    expect(screen.getByText("插播台词")).toBeTruthy();
+    rerender(<VoiceReplyBubble text="" userText="新问题" announcement="插播台词" />);
+    expect(screen.getByText("我：新问题")).toBeTruthy();
+    expect(screen.queryByText("插播台词")).toBeNull();
+  });
+
   it("点击关闭一次性清空用户句与回复", () => {
     const { rerender } = render(<VoiceReplyBubble text="完整回复" userText="问题" />);
     rerender(<VoiceReplyBubble text="" userText="问题" />);

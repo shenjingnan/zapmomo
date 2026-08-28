@@ -10,9 +10,6 @@ const ANNOUNCEMENT_FRESH_MS = 5000;
  * 超过窗口则插播恢复正常展示（最新发言胜出）。 */
 const AWAITING_REPLY_PATIENCE_MS = 5000;
 
-/** 当前展示内容的来源。 */
-type ContentSource = "turn" | "announcement";
-
 /**
  * 聊天气泡（独立 bubble 窗口的唯一内容视图，有且只有一个聊天气泡）。
  *
@@ -22,9 +19,9 @@ type ContentSource = "turn" | "announcement";
  * - `text`：语音/文字对话的流式回复（token 累积 = 天然打字机），追加在用户句
  *   下方。text 清空（正常完结或被打断/停止）后内容静置保留，不自动消失。
  * - `announcement`：dsh（DeepSeek Harness）事件播报台词。被流式回复或「用户句
- *   等回复耐心窗口」（AWAITING_REPLY_PATIENCE_MS）压制时暂存，压制解除后新鲜期
- *   内补展示，超期丢弃；插播是独立发言，补展示时清掉用户句；展示中新插播替换
- *   旧插播（最新发言胜出）。
+ *   等回复耐心窗口」（AWAITING_REPLY_PATIENCE_MS，到期自动解除压制）压制时暂存，
+ *   压制解除后新鲜期内补展示，超期丢弃；插播是独立发言，补展示时清掉用户句；
+ *   展示中新插播替换旧插播（最新发言胜出）。
  *
  * 内容一旦出现即静置常驻，唯一消失途径是用户点击气泡（新一轮内容到达时
  * 自然顶替除外）——「想看的内容不被程序收走」。点击与拖动共用气泡面：按住后
@@ -49,18 +46,21 @@ export function VoiceReplyBubble({
 }) {
   const [visibleUser, setVisibleUser] = useState("");
   const [visibleText, setVisibleText] = useState("");
-  const sourceRef = useRef<ContentSource | null>(null);
-  // 插播暂存与新鲜期判定（现有，不变）
+  // 插播暂存与新鲜期判定
   const pendingAnnouncementRef = useRef<{ text: string; at: number } | null>(null);
   const lastAnnouncementRef = useRef("");
   const freshTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  // 用户新到判定 + 「等回复」压制窗口（耐心窗口内压制插播，回复开始即解除）
+  // 用户新到判定 + 「等回复」压制窗口（耐心窗口内压制插播，回复开始或窗口到期即解除）
   const lastUserTextRef = useRef("");
   const awaitingReplyRef = useRef(false);
   const awaitingSinceRef = useRef(0);
+  const patienceTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  // 耐心窗口到期时 bump，驱动 effect 重评（补展示窗口内暂存的插播）
+  const [patienceTick, setPatienceTick] = useState(0);
   // 按住状态（pointer down 起点与拖动标记），ref 不触发渲染
   const pressRef = useRef<{ x: number; y: number; moved: boolean } | null>(null);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: patienceTick 是耐心窗口到期的重评触发器（bump 模式，体内不读），非数据依赖
   useEffect(() => {
     // 新插播登记（同一条不重复处理）；暂存后视流式状态决定立即展示或等待补展示
     if (announcement !== lastAnnouncementRef.current) {
@@ -81,7 +81,12 @@ export function VoiceReplyBubble({
       if (userText) {
         awaitingReplyRef.current = true;
         awaitingSinceRef.current = Date.now();
-        sourceRef.current = "turn";
+        // 耐心窗口到期兜底：回复始终未始（如 LLM 出错）时解除压制并重评补展示
+        clearTimeout(patienceTimerRef.current);
+        patienceTimerRef.current = setTimeout(() => {
+          awaitingReplyRef.current = false;
+          setPatienceTick((t) => t + 1);
+        }, AWAITING_REPLY_PATIENCE_MS);
         setVisibleUser(userText);
         // 同批已有首 token 则不清场（直接被下方 text 分支覆盖为新回复）
         if (!text) setVisibleText("");
@@ -89,17 +94,18 @@ export function VoiceReplyBubble({
     }
 
     if (text) {
-      // 流式更新中：跟随最新文本，用户句保留在上方
+      // 流式更新中：跟随最新文本，用户句保留在上方（等回复窗口随之结束）
       awaitingReplyRef.current = false;
-      sourceRef.current = "turn";
+      clearTimeout(patienceTimerRef.current);
       setVisibleText(text);
       return;
     }
 
-    // 用户句在屏、回复未始：耐心窗口内压制插播（用户主动对话优先，暂存等补展示）
+    // 用户句在屏、回复未始：耐心窗口内压制插播（用户主动对话优先，暂存等补展示）。
+    // 读 lastUserTextRef 而非 visibleUser：同批登记时 state 尚未提交，ref 判定无竞态。
     if (
       awaitingReplyRef.current &&
-      visibleUser !== "" &&
+      lastUserTextRef.current !== "" &&
       Date.now() - awaitingSinceRef.current <= AWAITING_REPLY_PATIENCE_MS
     ) {
       return;
@@ -109,21 +115,22 @@ export function VoiceReplyBubble({
     const pending = pendingAnnouncementRef.current;
     if (pending && Date.now() - pending.at <= ANNOUNCEMENT_FRESH_MS) {
       clearTimeout(freshTimerRef.current);
+      clearTimeout(patienceTimerRef.current);
       pendingAnnouncementRef.current = null;
       awaitingReplyRef.current = false;
-      sourceRef.current = "announcement";
       setVisibleUser("");
       setVisibleText(pending.text);
     }
 
     // text 清空（正常完结 / 打断 / 停止）：内容静置保留，等用户点击关闭。
     // 同 props 重渲染不复活——展示仅由新内容或点击关闭驱动。
-  }, [text, announcement, userText, visibleUser]);
+  }, [text, announcement, userText, patienceTick]);
 
   // 卸载时清理定时器
   useEffect(
     () => () => {
       clearTimeout(freshTimerRef.current);
+      clearTimeout(patienceTimerRef.current);
     },
     [],
   );
@@ -135,10 +142,13 @@ export function VoiceReplyBubble({
 
   if (!visibleText && !visibleUser) return null;
 
-  /** 点击关闭：清空展示（ref 与 state 同步），气泡随之消失、窗口回到点穿态。 */
+  /** 点击关闭：清空展示与暂存（ref 与 state 同步），气泡随之消失、窗口回到点穿态。
+   * lastAnnouncementRef 不动——同文本插播不因重渲染复活。 */
   const dismiss = () => {
     awaitingReplyRef.current = false;
-    sourceRef.current = null;
+    clearTimeout(freshTimerRef.current);
+    clearTimeout(patienceTimerRef.current);
+    pendingAnnouncementRef.current = null;
     setVisibleUser("");
     setVisibleText("");
   };
