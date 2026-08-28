@@ -96,6 +96,8 @@ export const api = {
   renameCompanion: (args: { id: string; name: string }) =>
     invoke<CompanionLibraryView>("rename_companion", args),
   removeCompanion: (args: { id: string }) => invoke<CompanionLibraryView>("remove_companion", args),
+  /** 在文件管理器中打开伙伴的托管资产目录（可自行调整音色参考等资产）。 */
+  openCompanionDir: (args: { id: string }) => invoke<void>("open_companion_dir", args),
   saveCoverImage: (args: { id: string; png: number[] }) =>
     invoke<CompanionLibraryView>("save_cover_image", args),
   getTtsConfig: () => invoke<TtsConfigInfo>("get_tts_config"),

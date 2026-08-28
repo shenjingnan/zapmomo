@@ -75,6 +75,8 @@ const MODEL_B = model("companion-bbbb", "星语");
 let library: CompanionLibraryView;
 /** import_companion mock 用序号生成唯一 id。 */
 let importSeq: number;
+/** open_companion_dir mock 的可变失败注入（null = 成功）。 */
+let openDirError: string | null;
 
 beforeEach(() => {
   invokeMock.mockReset();
@@ -85,6 +87,7 @@ beforeEach(() => {
   stageState.catalog = null;
   library = { models: [], active_model_id: null };
   importSeq = 0;
+  openDirError = null;
 
   invokeMock.mockImplementation(
     (cmd: string, args?: { source?: string; id?: string; name?: string }) => {
@@ -156,6 +159,8 @@ beforeEach(() => {
           };
           return Promise.resolve(library);
         }
+        case "open_companion_dir":
+          return openDirError == null ? Promise.resolve(undefined) : Promise.reject(openDirError);
         default:
           return Promise.resolve(undefined);
       }
@@ -506,6 +511,31 @@ describe("CompanionPage 伙伴模型管理器", () => {
     await user.keyboard("{Escape}");
 
     expect(invokeMock).not.toHaveBeenCalledWith("rename_companion", expect.anything());
+  });
+
+  it("打开资产文件夹：点击按钮调用 open_companion_dir", async () => {
+    library = { models: [MODEL_A], active_model_id: MODEL_A.id };
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByRole("button", { name: /大月下.*使用中/ });
+    await user.click(screen.getByRole("button", { name: `打开「${MODEL_A.name}」的资产文件夹` }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("open_companion_dir", { id: MODEL_A.id });
+    });
+  });
+
+  it("打开资产文件夹失败：toast 显示后端错误", async () => {
+    library = { models: [MODEL_A], active_model_id: MODEL_A.id };
+    openDirError = "伙伴「大月下」的资产目录不存在，可能已被移动或删除";
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByRole("button", { name: /大月下.*使用中/ });
+    await user.click(screen.getByRole("button", { name: `打开「${MODEL_A.name}」的资产文件夹` }));
+
+    expect(await screen.findByText(openDirError)).toBeInTheDocument();
   });
 
   it("展示动作与表情目录：点击动作播放、点击表情应用、重置恢复", async () => {
