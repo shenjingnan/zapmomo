@@ -8,9 +8,9 @@ import type { CompanionWindowLayer } from "@/types/tauri";
 /**
  * 聊天气泡窗口根组件（bubble 窗口）：独立透明窗口，galgame 对话框位。
  *
- * 有且只有一个聊天气泡：对话流式回复（voice-session-token）与 dsh（DeepSeek
- * Harness）事件播报台词（dsh-speak）都渲染在这里，优先级与插播语义由
- * VoiceReplyBubble 统一管理。
+ * 有且只有一个聊天气泡：呈现当前轮用户句与流式回复。对话流式回复
+ * （voice-session-token）与 dsh（DeepSeek Harness）事件播报台词（dsh-speak）
+ * 都渲染在这里，优先级与插播语义由 VoiceReplyBubble 统一管理。
  *
  * - 显隐由后端跟随角色窗口控制（无独立开关）；本组件只负责内容渲染与交互态。
  * - 空闲点击穿透：无可见气泡内容时 `setIgnoreCursorEvents(true)`，透明区域
@@ -88,6 +88,7 @@ export function BubbleRoot() {
       {layer === "front" && (
         <VoiceReplyBubble
           text={voice.pendingReply}
+          userText={voice.turnUserText}
           announcement={announcement}
           onVisibleChange={setBubbleVisible}
         />
