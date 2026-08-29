@@ -7,6 +7,7 @@
 /// 句级流水线近似：LLM 流式 token → `splitter` 切句 → 独立合成线程逐句合成 →
 /// rodio `Sink` 边合成边播放。
 pub mod asr_backend;
+pub mod bargein;
 pub mod config;
 pub mod events;
 pub mod listen;

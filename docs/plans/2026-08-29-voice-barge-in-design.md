@@ -1,7 +1,7 @@
 # 设计：TTS 播报中的语音打断（ASR Barge-in）
 
 - 日期：2026-08-29
-- 状态：已评审定稿
+- 状态：已评审定稿（阶段 1 已实施）
 - 关联：`src/voice/session.rs`（编排核心）、`src/voice/state.rs`（状态机）
 
 ## 1. 需求

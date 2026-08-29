@@ -675,6 +675,12 @@ pub struct VoiceSettings {
     /// 欢迎语后等用户真正说话的超时（秒），超时回待唤醒，缺省 8.0
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub welcome_wait_timeout: Option<f32>,
+    /// 播报/思考中语音打断（ASR 识别到用户说话即打断，仅流式 ASR 后端生效），缺省 true
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice_barge_in: Option<bool>,
+    /// 语音打断的回声比对阈值（字符 bigram Dice，≥ 判回声忽略），缺省 0.5
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub barge_in_similarity_threshold: Option<f32>,
 }
 
 /// dsh 桥配置。

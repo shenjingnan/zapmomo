@@ -302,6 +302,8 @@ speed = 1.0                    # 播报语速
 max_turns = 0                  # 最多对话轮数；0 = 无限（Ctrl-C 退出）
 history_max = 12               # 传给 LLM 的历史消息条数上限
 barge_in = true                # 播报/思考中唤醒词打断，默认 true
+voice_barge_in = true          # 播报中语音打断（说话即打断，仅流式 ASR 生效），默认 true
+barge_in_similarity_threshold = 0.5  # 语音打断回声比对阈值（外放误触发时调高）
 follow_up = true               # 回复播完自动聆听（免唤醒续聊），默认 true
 welcome_text = "你好，我在。"  # 唤醒后的欢迎语
 ```
