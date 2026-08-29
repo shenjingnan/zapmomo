@@ -3,6 +3,8 @@
 /// - `get_current_time`：基础工具（始终注册）。
 /// - `run_command`：CLI 工具，执行 shell 命令（`cli_tools` 开启才注册，
 ///   配置 `[llm] cli_tools = true`）。
+/// - `set_character_sprite`：角色形象切换（active 角色包带 `sprites/` 目录才注册，
+///   动态探测，见 [`crate::companion_sprites`]）。
 ///
 /// `run_command` 的安全边界：
 /// - **默认关闭**：模型只能调用已注册的工具，不注册即不可达；
@@ -92,6 +94,31 @@ impl ToolRuntime {
                 }),
             });
         }
+        // 角色形象：active 角色包带 sprites/ 时动态注册（每轮探测，
+        // 中途加图 / 切换伙伴下一轮自动生效）；文件名 stem 即形象语义。
+        let sprites = crate::companion_sprites::list_active_sprites();
+        if !sprites.is_empty() {
+            let names: Vec<&str> = sprites.iter().map(|s| s.name.as_str()).collect();
+            defs.push(ToolDefinition {
+                name: "set_character_sprite".to_string(),
+                description: format!(
+                    "切换你的桌面形象（立绘/表情）。当对话情绪发生明显变化时调用，\
+                    可与文字回复在同一轮一起发出。可用形象：{}。\
+                    传 \"default\" 恢复默认立绘。",
+                    names.join(", ")
+                ),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "形象名，必须是可用形象之一，或 default"
+                        }
+                    },
+                    "required": ["name"]
+                }),
+            });
+        }
         defs
     }
 
@@ -100,6 +127,7 @@ impl ToolRuntime {
         match name {
             "get_current_time" => Ok(chrono::Local::now().to_rfc3339()),
             "run_command" if self.cli_tools => Ok(self.run_command(arguments)),
+            "set_character_sprite" => Ok(crate::companion_sprites::apply_tool_call(arguments)),
             other => Err(LlmError::InferenceFailed(format!("未知工具: {other}"))),
         }
     }
@@ -237,27 +265,129 @@ fn truncate_output(output: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::run_with_temp_home;
+
+    /// 在当前 temp HOME 下导入带 sprites/ 的角色包（自动设为 active）。
+    fn import_pack_with_sprites(home: &std::path::Path) {
+        let src = home.join("furina");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("character.md"), "# 芙宁娜\n\n你是芙宁娜。\n").unwrap();
+        std::fs::write(src.join("character.png"), b"\x89PNG\r\n\x1a\n fake").unwrap();
+        std::fs::create_dir_all(src.join("sprites")).unwrap();
+        std::fs::write(src.join("sprites/happy.png"), b"png").unwrap();
+        std::fs::write(src.join("sprites/angry.png"), b"png").unwrap();
+        crate::companion::import_character_from_dir(&src).unwrap();
+    }
+
+    // ---------- 角色形象工具（sprites/ 动态注册） ----------
+
+    #[test]
+    fn test_sprite_tool_registered_only_with_sprites() {
+        run_with_temp_home(|home| {
+            let rt = ToolRuntime::new(false);
+            // 无 active 伙伴 → 不注册
+            assert!(
+                rt.definitions()
+                    .iter()
+                    .all(|d| d.name != "set_character_sprite")
+            );
+
+            // 角色包带 sprites/ → 注册，描述内联 stem 列表
+            import_pack_with_sprites(home);
+            let defs = rt.definitions();
+            let def = defs
+                .iter()
+                .find(|d| d.name == "set_character_sprite")
+                .expect("角色包带 sprites 时应注册形象工具");
+            assert!(
+                def.description.contains("happy") && def.description.contains("angry"),
+                "描述应内联可用形象：{}",
+                def.description
+            );
+            assert_eq!(def.parameters["required"], serde_json::json!(["name"]));
+            assert_eq!(def.parameters["properties"]["name"]["type"], "string");
+        });
+    }
+
+    #[test]
+    fn test_sprite_tool_not_registered_without_sprites() {
+        run_with_temp_home(|home| {
+            // 角色包但没有 sprites/ 目录 → 不注册
+            let src = home.join("furina");
+            std::fs::create_dir_all(&src).unwrap();
+            std::fs::write(src.join("character.md"), "# 芙宁娜\n").unwrap();
+            std::fs::write(src.join("character.png"), b"\x89PNG\r\n\x1a\n fake").unwrap();
+            crate::companion::import_character_from_dir(&src).unwrap();
+
+            let rt = ToolRuntime::new(false);
+            assert!(
+                rt.definitions()
+                    .iter()
+                    .all(|d| d.name != "set_character_sprite")
+            );
+
+            // GIF 伙伴同样不注册
+            let gif = home.join("舞.gif");
+            std::fs::write(&gif, b"GIF89a\x01\x00\x01\x00\x00").unwrap();
+            let (gif_model, _) = crate::companion::import_gif_from_file(&gif).unwrap();
+            crate::companion::set_active(&gif_model.id).unwrap();
+            assert!(
+                rt.definitions()
+                    .iter()
+                    .all(|d| d.name != "set_character_sprite")
+            );
+        });
+    }
+
+    #[test]
+    fn test_execute_set_character_sprite() {
+        run_with_temp_home(|home| {
+            import_pack_with_sprites(home);
+            let rt = ToolRuntime::new(false);
+
+            let out = rt
+                .execute("set_character_sprite", r#"{"name":"happy"}"#)
+                .unwrap();
+            assert!(out.contains("已切换"), "实际：{out}");
+
+            let out = rt
+                .execute("set_character_sprite", r#"{"name":"default"}"#)
+                .unwrap();
+            assert!(out.contains("default"), "实际：{out}");
+
+            // 未知名走「失败即结果」，返回提示文本而非 Err
+            let out = rt
+                .execute("set_character_sprite", r#"{"name":"nope"}"#)
+                .unwrap();
+            assert!(out.contains("未找到"), "实际：{out}");
+        });
+    }
 
     // ---------- 注册门控 ----------
 
     #[test]
     fn test_definitions_without_cli() {
-        let rt = ToolRuntime::new(false);
-        let defs = rt.definitions();
-        assert_eq!(defs.len(), 1);
-        assert_eq!(defs[0].name, "get_current_time");
+        // HOME 隔离：definitions 会探测角色包 sprites，不能依赖真机环境
+        run_with_temp_home(|_home| {
+            let rt = ToolRuntime::new(false);
+            let defs = rt.definitions();
+            assert_eq!(defs.len(), 1);
+            assert_eq!(defs[0].name, "get_current_time");
+        });
     }
 
     #[test]
     fn test_definitions_with_cli() {
-        let rt = ToolRuntime::new(true);
-        let defs = rt.definitions();
-        assert_eq!(defs.len(), 2);
-        assert_eq!(defs[1].name, "run_command");
-        assert_eq!(
-            defs[1].parameters["required"],
-            serde_json::json!(["command"])
-        );
+        run_with_temp_home(|_home| {
+            let rt = ToolRuntime::new(true);
+            let defs = rt.definitions();
+            assert_eq!(defs.len(), 2);
+            assert_eq!(defs[1].name, "run_command");
+            assert_eq!(
+                defs[1].parameters["required"],
+                serde_json::json!(["command"])
+            );
+        });
     }
 
     #[test]

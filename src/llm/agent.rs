@@ -117,28 +117,31 @@ mod tests {
 
     #[test]
     fn test_agent_loop_executes_tool_then_returns_text() {
-        let agent = Agent::new(ToolRuntime::new(false));
-        let mut provider = MockProvider;
-        let input = vec![InputItem::Message(ChatMessage::new(
-            ChatRole::User,
-            "现在几点？",
-        ))];
-        let mut text = String::new();
-        let result = agent
-            .run(
-                &mut provider,
-                &input,
-                &GenParams::default(),
-                &mut |item| {
-                    if let OutputItem::MessageDelta(d) = item {
-                        text.push_str(&d.text);
-                    }
-                },
-                Arc::new(AtomicBool::new(false)),
-            )
-            .unwrap();
-        assert_eq!(result, FinishReason::Eos);
-        // 第一轮 tool call → 执行工具 → 第二轮纯文本回复
-        assert_eq!(text, "答案是 42");
+        // HOME 隔离：definitions() 会探测角色包 sprites 工具（磁盘 IO），测试需确定性
+        crate::test_util::run_with_temp_home(|_home| {
+            let agent = Agent::new(ToolRuntime::new(false));
+            let mut provider = MockProvider;
+            let input = vec![InputItem::Message(ChatMessage::new(
+                ChatRole::User,
+                "现在几点？",
+            ))];
+            let mut text = String::new();
+            let result = agent
+                .run(
+                    &mut provider,
+                    &input,
+                    &GenParams::default(),
+                    &mut |item| {
+                        if let OutputItem::MessageDelta(d) = item {
+                            text.push_str(&d.text);
+                        }
+                    },
+                    Arc::new(AtomicBool::new(false)),
+                )
+                .unwrap();
+            assert_eq!(result, FinishReason::Eos);
+            // 第一轮 tool call → 执行工具 → 第二轮纯文本回复
+            assert_eq!(text, "答案是 42");
+        });
     }
 }
