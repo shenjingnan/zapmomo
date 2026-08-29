@@ -22,26 +22,6 @@
       "license": "Apache-2.0"
     },
     {
-      "name": "sherpa-onnx-streaming-zipformer-small-bilingual-zh-en-2023-02-16",
-      "role": "asr-small-bilingual-zh-en",
-      "version": "2023-02-16",
-      "archive": "sherpa-onnx-streaming-zipformer-small-bilingual-zh-en-2023-02-16.tar.bz2",
-      "source": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-small-bilingual-zh-en-2023-02-16.tar.bz2",
-      "sha256": "2b7c63322b32e5e0f2526043a1103366119ca58dd615cd7105a37c01db9553d7",
-      "size_bytes": 458187351,
-      "license": "Apache-2.0"
-    },
-    {
-      "name": "sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23",
-      "role": "asr-zh-14m",
-      "version": "2023-02-23",
-      "archive": "sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23.tar.bz2",
-      "source": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23.tar.bz2",
-      "sha256": "2cbd71b640d9c37d3784f29367333a4577b0398b62e9deeed418170b081cba8b",
-      "size_bytes": 74004050,
-      "license": "Apache-2.0"
-    },
-    {
       "name": "sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12",
       "role": "punctuation",
       "version": "2024-04-12",
@@ -74,56 +54,6 @@
       "license": "Apache-2.0"
     },
     {
-      "name": "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17",
-      "role": "asr-sensevoice",
-      "version": "2024-07-17",
-      "archive": "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2",
-      "source": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2",
-      "sha256": "7d1efa2138a65b0b488df37f8b89e3d91a60676e416f515b952358d83dfd347e",
-      "size_bytes": 163002883,
-      "license": "FunASR-1.1"
-    },
-    {
-      "name": "sherpa-onnx-whisper-tiny",
-      "role": "asr-whisper-tiny",
-      "version": "tiny",
-      "archive": "sherpa-onnx-whisper-tiny.tar.bz2",
-      "source": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-tiny.tar.bz2",
-      "sha256": "c46116994e539aa165266d96b325252728429c12535eb9d8b6a2b10f129e66b1",
-      "size_bytes": 116204861,
-      "license": "MIT"
-    },
-    {
-      "name": "sherpa-onnx-whisper-base",
-      "role": "asr-whisper-base",
-      "version": "base",
-      "archive": "sherpa-onnx-whisper-base.tar.bz2",
-      "source": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-base.tar.bz2",
-      "sha256": "911b2083efd7c0dca2ac3b358b75222660dc09fb716d64fbfc417ba6c99ff3de",
-      "size_bytes": 207557382,
-      "license": "MIT"
-    },
-    {
-      "name": "sherpa-onnx-streaming-paraformer-bilingual-zh-en",
-      "role": "asr-paraformer-bilingual-zh-en",
-      "version": "bilingual-zh-en",
-      "archive": "sherpa-onnx-streaming-paraformer-bilingual-zh-en.tar.bz2",
-      "source": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-paraformer-bilingual-zh-en.tar.bz2",
-      "sha256": "5462a1fce42693deae572af1e8c4687124b12aa85fe61ff4d3168bb5280e205f",
-      "size_bytes": 1047319737,
-      "license": "FunASR-1.1"
-    },
-    {
-      "name": "sherpa-onnx-streaming-paraformer-trilingual-zh-cantonese-en",
-      "role": "asr-paraformer-trilingual-zh-cantonese-en",
-      "version": "trilingual-zh-cantonese-en",
-      "archive": "sherpa-onnx-streaming-paraformer-trilingual-zh-cantonese-en.tar.bz2",
-      "source": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-paraformer-trilingual-zh-cantonese-en.tar.bz2",
-      "sha256": "d479167d8752628d9032d29de1060493865389d1e295a1c2e8e011e7062f1932",
-      "size_bytes": 1047671211,
-      "license": "FunASR-1.1"
-    },
-    {
       "name": "silero-vad",
       "role": "asr-vad",
       "version": "v5",
@@ -133,16 +63,6 @@
       "sha256": "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6",
       "size_bytes": 643854,
       "license": "MIT"
-    },
-    {
-      "name": "sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25",
-      "role": "asr-qwen3",
-      "version": "2026-03-25",
-      "archive": "sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25.tar.bz2",
-      "source": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25.tar.bz2",
-      "sha256": "393f8a14e2f5fb96746aaab342997a40641001fbd5bf9592a080a8329178ee96",
-      "size_bytes": 878702423,
-      "license": "Apache-2.0"
     },
     {
       "name": "omnivoice-audiocpp",

@@ -18,76 +18,12 @@
       "compatibility_notes": "内置流式 ASR（中英双语），sherpa-onnx OnlineRecognizer 验证可用。"
     },
     {
-      "model_id": "asr-streaming-small-bilingual-zh-en",
-      "provider": null,
-      "repo_id": null,
-      "model_type": "asr",
-      "architecture": "sherpa-asr-streaming-zipformer",
-      "compatibility_notes": "内置流式 ASR 小号（中英），sherpa-onnx 验证可用。"
-    },
-    {
-      "model_id": "asr-streaming-zh-14m",
-      "provider": null,
-      "repo_id": null,
-      "model_type": "asr",
-      "architecture": "sherpa-asr-streaming-zipformer",
-      "compatibility_notes": "内置流式 ASR 轻量（中文），sherpa-onnx 验证可用。"
-    },
-    {
-      "model_id": "asr-paraformer-bilingual-zh-en",
-      "provider": null,
-      "repo_id": null,
-      "model_type": "asr",
-      "architecture": "sherpa-asr-streaming-paraformer",
-      "compatibility_notes": "内置流式 ASR（Paraformer 中英），sherpa-onnx OnlineRecognizer 验证可用；仅 greedy_search，不支持热词。"
-    },
-    {
-      "model_id": "asr-paraformer-trilingual-zh-cantonese-en",
-      "provider": null,
-      "repo_id": null,
-      "model_type": "asr",
-      "architecture": "sherpa-asr-streaming-paraformer",
-      "compatibility_notes": "内置流式 ASR（Paraformer 中粤英），sherpa-onnx OnlineRecognizer 验证可用；仅 greedy_search，不支持热词。"
-    },
-    {
       "model_id": "tts-zipvoice-distill-int8",
       "provider": null,
       "repo_id": null,
       "model_type": "tts",
       "architecture": "sherpa-tts-zipvoice",
       "compatibility_notes": "内置 TTS（ZipVoice），sherpa-onnx OfflineTts 验证可用。"
-    },
-    {
-      "model_id": "asr-sensevoice-zh-en-ja-ko-yue",
-      "provider": null,
-      "repo_id": null,
-      "model_type": "asr",
-      "architecture": "sherpa-asr-offline-sensevoice",
-      "compatibility_notes": "内置离线 ASR（SenseVoice int8），多语言+情绪标签，sherpa-onnx OfflineRecognizer 验证可用。"
-    },
-    {
-      "model_id": "asr-qwen3-0.6b",
-      "provider": null,
-      "repo_id": null,
-      "model_type": "asr",
-      "architecture": "sherpa-asr-offline-qwen3",
-      "compatibility_notes": "离线 ASR（Qwen3-ASR 0.6B int8），29 语言+中文方言自动识别、热词（提示词嵌入）验证可用；CPU 实测约 0.4× 实时（20s 音频推理约 9s）、峰值内存约 960MB。已知限制：整段转写超过约 30s 的音频因 max_total_len=512 输出崩坏，长音频走 VAD 分段（听写/会话路径分段上限 20s 不受影响）。"
-    },
-    {
-      "model_id": "asr-whisper-tiny",
-      "provider": null,
-      "repo_id": null,
-      "model_type": "asr",
-      "architecture": "sherpa-asr-offline-whisper",
-      "compatibility_notes": "内置离线 ASR（Whisper tiny），多语言，sherpa-onnx OfflineRecognizer 验证可用。"
-    },
-    {
-      "model_id": "asr-whisper-base",
-      "provider": null,
-      "repo_id": null,
-      "model_type": "asr",
-      "architecture": "sherpa-asr-offline-whisper",
-      "compatibility_notes": "内置离线 ASR（Whisper base），多语言，sherpa-onnx OfflineRecognizer 验证可用。"
     }
   ]
 }

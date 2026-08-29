@@ -32,6 +32,8 @@ function Probe() {
       <span data-testid="phase">{voice.phase}</span>
       <span data-testid="partial">{voice.partial}</span>
       <span data-testid="reply">{voice.pendingReply}</span>
+      <span data-testid="turnUserText">{voice.turnUserText}</span>
+      <span data-testid="turnSeq">{voice.turnSeq}</span>
       <span data-testid="current">{voice.currentSentence ?? ""}</span>
       <span data-testid="records">{voice.records.map((r) => `${r.role}:${r.text}`).join("|")}</span>
       <span data-testid="error">{voice.error ?? ""}</span>
@@ -75,6 +77,36 @@ describe("useVoiceSession", () => {
     emit("voice-session-transcript", { text: "你好", is_final: true });
     expect(screen.getByTestId("partial").textContent).toBe("");
     expect(screen.getByTestId("records").textContent).toContain("user:你好");
+  });
+
+  it("transcript is_final 置位 turnUserText，新一轮顶替，打断不清", () => {
+    render(<Probe />);
+    emit("voice-session-transcript", { text: "第一句", is_final: true });
+    expect(screen.getByTestId("turnUserText").textContent).toBe("第一句");
+    // partial 不置位
+    emit("voice-session-transcript", { text: "说到一半", is_final: false });
+    expect(screen.getByTestId("turnUserText").textContent).toBe("第一句");
+    // 打断（state 回 armed）保留——静置语义：想看的内容不被程序收走
+    emit("voice-session-state", { running: true, state: "armed" });
+    expect(screen.getByTestId("turnUserText").textContent).toBe("第一句");
+    // 新一轮顶替
+    emit("voice-session-transcript", { text: "第二句", is_final: true });
+    expect(screen.getByTestId("turnUserText").textContent).toBe("第二句");
+  });
+
+  it("同文本连发 turnSeq 仍递增；partial 不递增，打断不清零", () => {
+    render(<Probe />);
+    emit("voice-session-transcript", { text: "继续", is_final: true });
+    expect(screen.getByTestId("turnSeq").textContent).toBe("1");
+    // partial 不递增
+    emit("voice-session-transcript", { text: "说到一半", is_final: false });
+    expect(screen.getByTestId("turnSeq").textContent).toBe("1");
+    // 打断（state 回 armed）不清轮序
+    emit("voice-session-state", { running: true, state: "armed" });
+    expect(screen.getByTestId("turnSeq").textContent).toBe("1");
+    // 同文本连发仍自增（气泡据此判新轮，值比较判不出）
+    emit("voice-session-transcript", { text: "继续", is_final: true });
+    expect(screen.getByTestId("turnSeq").textContent).toBe("2");
   });
 
   it("LLM token 累积为 pendingReply，reply-finished 提交桌宠记录并清空", () => {
