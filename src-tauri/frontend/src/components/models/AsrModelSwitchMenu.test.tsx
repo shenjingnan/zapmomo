@@ -128,11 +128,9 @@ describe("AsrModelSwitchMenu 模型快速切换（弹窗版）", () => {
     expect(navProbe.count).toBe(0);
   });
 
-  it("切换到 zh-14M 后显示新模型目录名", () => {
-    makeAsrConfig("/home/user/.zapmomo/models/sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23");
+  it("切换到 qwen3 后显示新模型目录名", () => {
+    makeAsrConfig("/home/user/.zapmomo/models/qwen3-asr-0.6b-audiocpp");
     renderMenu();
-    expect(
-      screen.getByText("sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23"),
-    ).toBeInTheDocument();
+    expect(screen.getByText("qwen3-asr-0.6b-audiocpp")).toBeInTheDocument();
   });
 });

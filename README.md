@@ -35,7 +35,7 @@ An open-source, real-time desktop **AI companion** with voice, memory, and a cus
 <summary>✨ 特性一览</summary>
 
 - **语音唤醒（KWS）** — 说唤醒词即可唤醒伙伴；自定义唤醒词直接输中文，自动转拼音，无需任何外部工具
-- **语音识别（ASR）** — 中英双语实时转文字幕（流式 Zipformer / Paraformer），自动加标点；Zipformer 支持热词，另有离线 SenseVoice/Whisper 可选
+- **语音识别（ASR）** — 中英双语实时转文字幕（流式 Zipformer），自动加标点、支持热词；另有离线 Qwen3-ASR 可选（29 语言自动识别）
 - **文本转语音（TTS）** — 中英双语语音合成，内置多音色，支持用参考音频克隆自己的音色
 - **本地大语言模型（LLM）** — 基于 llama.cpp 的本地推理（流式对话 + Agent 工具调用），应用内一键下载预设模型；也可接入 OpenAI 兼容远程 API
 - **语音会话** — 一句话唤醒 → 语音识别 → 流式回复 → 实时播报，支持唤醒词打断与免唤醒续聊
