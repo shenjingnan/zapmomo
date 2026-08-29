@@ -50,9 +50,9 @@ impl Announcer {
         // 逐文件预检（backend 感知，与 synthesize_tts 一致），给出明确的
         // 「模型未就绪」错误而非深层引擎报错
         tts::config::preflight(&cfg).map_err(|e| format!("TTS 模型未就绪: {e}"))?;
-        // 合成音色参数统一解析：active 角色包带克隆音色时优先（Announcer 每次构建时
-        // 探测，天然跟随伙伴切换），否则用配置默认音色/语速播报。
-        let character = crate::companion::active_character_voice();
+        // 合成音色参数统一解析：active 伙伴带克隆音色（目录自带或音色库绑定）时优先
+        // （Announcer 每次构建时探测，天然跟随伙伴切换），否则用配置默认音色/语速播报。
+        let character = crate::companion::active_companion_voice();
         let voice = tts::voice::resolve_voice_params(
             &cfg,
             None,

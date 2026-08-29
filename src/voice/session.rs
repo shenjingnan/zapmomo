@@ -368,7 +368,7 @@ impl VoiceSession {
                 }
                 None => {
                     // 换入一个每句必报错的新引擎比保留旧引擎更糟：取消本次切换
-                    tracing::warn!("TTS 热切换取消：{e}（保留当前引擎，请先在音色库选择克隆音色）");
+                    tracing::warn!("TTS 热切换取消：{e}（保留当前引擎）");
                     return;
                 }
             },

@@ -44,6 +44,8 @@ function model(id: string, name: string, valid = true): CompanionModelInfo {
     valid,
     cover_image: null,
     has_persona: false,
+    voice_id: null,
+    voice_source: null,
     has_voice: false,
   };
 }

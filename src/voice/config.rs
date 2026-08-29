@@ -76,7 +76,8 @@ pub struct ResolvedSessionConfig {
     pub asr_max_trailing_silence: f32,
     /// 欢迎语后等用户说话的超时（秒）
     pub welcome_wait_timeout: f32,
-    /// active 角色包的音色克隆参考（`apply_companion_overrides` 注入；None = 无角色音色）
+    /// active 伙伴的音色克隆参考（`apply_companion_overrides` 注入；None = 无伙伴音色，
+    /// 上层回退 `[voice].voice` > `[tts].voice` > 内置默认）。
     pub character_voice: Option<crate::companion::CharacterVoice>,
 }
 
@@ -162,18 +163,19 @@ pub fn resolve(
     })
 }
 
-/// 应用 active 角色包覆盖（人设 + 音色），在 `resolve` 之后调用。
+/// 应用 active 伙伴覆盖（人设 + 音色），在 `resolve` 之后调用。
 ///
 /// - 人设：active 伙伴是角色包且 character.md 非空 → **完全覆盖** `cfg.llm.system_prompt`
 ///   （不写盘，切回普通伙伴后下次会话自然回退全局 `[llm].system_prompt`）；
-/// - 音色：仅当前 TTS 模型支持参考音频克隆（ZipVoice/OmniVoice）时注入
+/// - 音色：伙伴音色三级解析（托管目录 `voice/` > 音色库绑定 > None，任意 format 均可，
+///   见 `companion::companion_voice_in`）；仅当前 TTS 模型支持参考音频克隆时注入
 ///   `cfg.character_voice`（非克隆模型走全局音色，优雅降级）。
 pub fn apply_companion_overrides(cfg: &mut ResolvedSessionConfig) {
     if let Some(persona) = crate::companion::active_persona() {
         cfg.llm.system_prompt = persona;
     }
     if cfg.tts.uses_reference_audio()
-        && let Some(voice) = crate::companion::active_character_voice()
+        && let Some(voice) = crate::companion::active_companion_voice()
     {
         cfg.character_voice = Some(voice);
     }
@@ -419,6 +421,68 @@ mod tests {
             cfg.tts.model_type = crate::tts::config::TtsModelKind::Kitten;
             apply_companion_overrides(&mut cfg);
             assert!(cfg.llm.system_prompt.contains("芙宁娜"));
+            assert!(cfg.character_voice.is_none());
+        });
+    }
+
+    /// 导入一个最小合法 Live2D 伙伴（无角色包结构），返回其 id。
+    fn import_live2d_companion(home: &std::path::Path) -> String {
+        let dir = home.join("大月下");
+        std::fs::create_dir_all(dir.join("textures")).unwrap();
+        std::fs::write(dir.join("model.moc3"), b"moc").unwrap();
+        std::fs::write(dir.join("textures/texture_00.png"), b"png").unwrap();
+        std::fs::write(
+            dir.join("l.model3.json"),
+            r#"{"FileReferences":{"Moc":"model.moc3","Textures":["textures/texture_00.png"]}}"#,
+        )
+        .unwrap();
+        crate::companion::import_from_dir(&dir).unwrap().0.id
+    }
+
+    /// 往音色库存一条音色，返回 (id, wav_path)。
+    fn save_library_voice(home: &std::path::Path) -> (String, std::path::PathBuf) {
+        let wav = home.join("lib-voice.wav");
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut w = hound::WavWriter::create(&wav, spec).unwrap();
+        w.write_sample(0i16).unwrap();
+        w.finalize().unwrap();
+        let v = crate::tts::voice_store::save_voice("绑定的音色", &wav, "库音色转写").unwrap();
+        (v.id, v.wav_path)
+    }
+
+    /// 音色库绑定对非角色包伙伴同样注入（第 2 级解析，任意 format）。
+    #[test]
+    fn test_apply_companion_overrides_binding_for_live2d() {
+        run_with_temp_home(|home| {
+            let companion_id = import_live2d_companion(home);
+            let (voice_id, wav_path) = save_library_voice(home);
+            crate::companion::set_voice_binding(&companion_id, Some(&voice_id)).unwrap();
+
+            let mut cfg = resolve(None, &CliOverrides::default()).unwrap();
+            assert!(cfg.character_voice.is_none());
+            apply_companion_overrides(&mut cfg);
+            let voice = cfg.character_voice.unwrap();
+            assert_eq!(voice.wav, wav_path);
+            assert_eq!(voice.text, "库音色转写");
+        });
+    }
+
+    /// 绑定指向的音色被删 → fail-open：不注入，走全局默认。
+    #[test]
+    fn test_apply_companion_overrides_stale_binding_falls_back() {
+        run_with_temp_home(|home| {
+            let companion_id = import_live2d_companion(home);
+            let (voice_id, _) = save_library_voice(home);
+            crate::companion::set_voice_binding(&companion_id, Some(&voice_id)).unwrap();
+            crate::tts::voice_store::delete_voice(&voice_id).unwrap();
+
+            let mut cfg = resolve(None, &CliOverrides::default()).unwrap();
+            apply_companion_overrides(&mut cfg);
             assert!(cfg.character_voice.is_none());
         });
     }

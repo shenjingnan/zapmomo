@@ -812,6 +812,7 @@ mod tests {
                         .to_string(),
                     format: "Cubism3".into(),
                     imported_at: "t".into(),
+                    voice_id: None,
                     layout: None,
                 }],
                 active_model_id: Some(id.to_string()),

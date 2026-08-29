@@ -139,7 +139,10 @@ pub fn resolve_voice_params(
                     crate::audiocpp::families::VoiceSemantics::ReferenceCloneRequired
                 )
             }) {
-                return Err("Qwen3-TTS 需要克隆音色：请先在音色库选择或录制一个音色".to_string());
+                return Err(
+                    "Qwen3-TTS 需要克隆音色：请在伙伴页为当前角色绑定音色，或在 TTS 设置页选择默认音色，或切换到 OmniVoice / VoxCPM2（支持自动音色）"
+                        .to_string(),
+                );
             }
             return Ok(TtsVoiceParams::Sid(0));
         }
