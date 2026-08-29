@@ -161,6 +161,9 @@ impl Drop for ActiveModelGuard {
 /// 语音会话线程状态：共享停止标志 + 线程句柄（仿 `ListenState`）。
 struct VoiceSessionState {
     running: Arc<AtomicBool>,
+    /// 会话当前状态（dsh 空档插播共存策略用）：`make_voice_emit` 收到
+    /// `VoiceEvent::State` 时同步写入；Stop → Idle 由状态机保证闭环。
+    phase: Mutex<VoicePhase>,
     handle: Mutex<Option<std::thread::JoinHandle<()>>>,
     /// 当前会话的打断标志：会话线程创建 session 后写入，线程退出时清空。
     /// 全局快捷键「打断播报」置位 → 会话循环 `do_barge_in`（停生成/合成/播放，回 Armed）。
@@ -178,6 +181,7 @@ impl VoiceSessionState {
     fn new() -> Self {
         Self {
             running: Arc::new(AtomicBool::new(false)),
+            phase: Mutex::new(VoicePhase::Idle),
             handle: Mutex::new(None),
             barge_in: Mutex::new(None),
             tts_swap: Mutex::new(None),
@@ -1677,6 +1681,10 @@ fn make_voice_emit(app: AppHandle) -> Box<dyn Fn(VoiceEvent) + Send> {
             | VoiceEvent::Stopped { .. }
             | VoiceEvent::FollowUp => {}
             VoiceEvent::State { state } => {
+                // 镜像到宿主共享状态：dsh 空档插播据此判断当前是否可插播
+                if let Some(vs) = app.try_state::<VoiceSessionState>() {
+                    *vs.phase.lock().unwrap_or_else(|e| e.into_inner()) = state;
+                }
                 let _ = app.emit(
                     "voice-session-state",
                     VoiceSessionStatePayload {
@@ -2257,6 +2265,36 @@ fn narrate_text(app: &AppHandle, event: &zapmomo::dsh::event::DshEvent) -> Strin
     })
 }
 
+/// dsh 空档插播的轮询间隔与等待上限：对话间隙通常秒级出现，30s 覆盖多轮连续
+/// 对话；超时放弃语音（气泡已送达，语音只是增强）。
+const VOICE_SLOT_POLL: std::time::Duration = std::time::Duration::from_millis(200);
+const VOICE_SLOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// 等待语音会话出现可插播空档（未运行 / 待唤醒），见
+/// [`zapmomo::dsh::announce::voice_slot_available`]。
+///
+/// 返回 false = 超时放弃。在 dsh-llm worker 阻塞等待是安全的：事件槽为覆盖式
+/// 单槽，等待期间新到事件只替换槽内待处理项，不会丢失。
+fn wait_for_voice_slot(app: &AppHandle) -> bool {
+    let deadline = std::time::Instant::now() + VOICE_SLOT_TIMEOUT;
+    loop {
+        let vs = app.state::<VoiceSessionState>();
+        let running = vs.is_running();
+        let phase = vs
+            .phase
+            .lock()
+            .map(|p| *p)
+            .unwrap_or_else(|_| VoicePhase::Idle);
+        if zapmomo::dsh::announce::voice_slot_available(running, Some(phase)) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(VOICE_SLOT_POLL);
+    }
+}
+
 /// 单事件播报（在 dsh-llm worker 线程串行执行）：
 /// LLM 文案（不可用/失败降级模板）→ `dsh-speak` 气泡 → TTS 播报 → 对话记录落盘。
 fn narrate_event(app: &AppHandle, event: zapmomo::dsh::event::DshEvent) {
@@ -2272,12 +2310,19 @@ fn narrate_event(app: &AppHandle, event: zapmomo::dsh::event::DshEvent) {
 
     let settings = zapmomo::config::settings::load_settings().unwrap_or_default();
     let cfg = zapmomo::dsh::config::resolve(settings.as_ref().and_then(|s| s.dsh.as_ref()));
-    // 语音播报：voice 会话运行中不出声（不打断对话）；TTS 未就绪只出气泡
+    // 语音播报（空档插播共存策略）：气泡已出，等语音会话出现可插播空档
+    // （未运行 / 待唤醒）再开口；TTS 未就绪只出气泡
     if cfg.voice_enabled
-        && !app.state::<VoiceSessionState>().is_running()
         && let Some(announcer) = dsh_announcer(&app.state::<DshBridgeState>())
     {
-        announcer.announce(&text);
+        if wait_for_voice_slot(app) {
+            announcer.announce(&text);
+        } else {
+            tracing::info!(
+                "语音会话持续忙碌（{}s 未出现空档），放弃本次语音播报（气泡已送达）",
+                VOICE_SLOT_TIMEOUT.as_secs()
+            );
+        }
     }
     // 落盘到对话记录（与语音会话同库，前端「对话记录」页可见）；
     // 空文本不落盘（与 voice ReplyFinished 的守卫一致，防御性）

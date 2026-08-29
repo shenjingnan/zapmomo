@@ -12,8 +12,13 @@ use crate::voice::sanitizer::sanitize_for_tts;
 use crate::voice::thinking::ThinkingFilter;
 use std::time::Duration;
 
-/// 播报文案的 max_tokens：一句话文案（气泡 + TTS 都不宜长），留少量余量。
-const NARRATE_MAX_TOKENS: usize = 120;
+/// 播报文案的 max_tokens。
+///
+/// 可见文案目标只有一句话，但推理型模型（如 deepseek-v4）会先输出思考块再给
+/// 正文——预算太小会在思考阶段耗尽、正文零输出（表现为「清洗后无文本」回退
+/// 模板）。放宽到 1024 给思考 + 正文都留空间；思考块由 [`ThinkingFilter`] 剥离，
+/// 不进气泡/TTS。
+const NARRATE_MAX_TOKENS: usize = 1024;
 
 /// 单次播报生成的超时：远程 API 偶发挂起时不让事件无限等待，超时取消并降级。
 pub const NARRATE_TIMEOUT: Duration = Duration::from_secs(15);

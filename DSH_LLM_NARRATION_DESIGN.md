@@ -142,7 +142,24 @@ flowchart LR
 3. voice 会话进行中触发 → 模板台词且不打断对话
 4. LLM 生成中拔网线 / 超时 → 15s 内降级模板台词
 
-## 5. 已知边界（记录在案，非本次范围）
+## 5. 与语音会话共存（空档插播）
+
+初版守卫是「voice 会话运行中一律静音」，但语音会话是常驻形态（KWS 待唤醒），
+一刀切使 dsh 语音播报在常驻场景下永久失效。改为**空档插播**：
+
+- 宿主在 `make_voice_emit` 的 `VoiceEvent::State` 臂镜像当前 `SessionState`
+  到 `VoiceSessionState.phase`（Stop → Idle 由状态机保证闭环）
+- `dsh::announce::voice_slot_available`：会话未运行或处于 `Armed`（待唤醒
+  空闲）时可插播；`Listening`（插话会被麦克风拾回污染 ASR）、`Speaking`
+  （与 TTS 重叠）、`Thinking`/`Greeting`/`WaitingSpeech` 一律等待
+- `narrate_event` 的语音段轮询等待空档（200ms 粒度，上限 30s）；超时放弃
+  语音（气泡已送达）。气泡不等，事件到达即出
+- `Armed` 播报的回声风险已由 barge-in 架构消化：`Speaking` 期间 KWS 本就
+  持续监听 TTS 回声，非唤醒词内容不触发
+- 已知边界：dsh 开口的几秒窗口内用户喊唤醒词会有一次短暂重叠（低概率，
+  后续可加播报中让位）
+
+## 6. 已知边界（记录在案，非本次范围）
 
 - 共享引擎广播：dsh 生成的 token 也会进 `llm-token` 前端事件（用户开着聊天页
   会看到 dsh 流）——与 voice 现状一致，非新增问题；留作「事件加来源标签」优化
