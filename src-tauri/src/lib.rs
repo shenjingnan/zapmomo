@@ -16,13 +16,14 @@ use tauri::menu::PredefinedMenuItem;
 use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
 use tauri::{
-    AppHandle, Emitter, LogicalPosition, Manager, PhysicalPosition, PhysicalSize, State,
+    AppHandle, Emitter, LogicalPosition, Manager, PhysicalPosition, PhysicalSize, Position, State,
     WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
 use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
 use zapmomo::asr::config::AsrParamsPatch;
 use zapmomo::asr::{AsrReaction, AsrResult};
+use zapmomo::companion_bubble_link::bubble_follow_position;
 use zapmomo::companion_click_through::{
     CompanionPointerPolicy, EXIT_MARGIN_PX, HitRect, cursor_hit, desired_ignore_cursor_events,
     next_hold, resolve_smart_click_through,
@@ -6471,6 +6472,30 @@ pub fn run() {
                 let state = window.app_handle().state::<CompanionPointerState>();
                 match event {
                     WindowEvent::Moved(p) => {
+                        // 气泡联动：拖动角色时气泡按相同位移平移，保持相对距离
+                        //（单向联动，单独拖气泡不影响角色；气泡被联动移动后经其
+                        // 自身 onMoved 写回 [bubble.window_position]，无需额外持久化）。
+                        // 须在下方 origin 缓存更新**之前**取旧值求位移；决策纯函数
+                        // 在根 crate companion_bubble_link（CI 只测根 crate）。
+                        if let Some(bubble) = window.app_handle().get_webview_window("bubble") {
+                            let old = state
+                                .origin
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .map(|o| (o.x, o.y));
+                            let bubble_now = bubble
+                                .outer_position()
+                                .ok()
+                                .map(|b| (f64::from(b.x), f64::from(b.y)));
+                            let companion = (f64::from(p.x), f64::from(p.y));
+                            let next =
+                                bubble_now.and_then(|b| bubble_follow_position(old, companion, b));
+                            if let Some((x, y)) = next {
+                                let _ = bubble.set_position(Position::Physical(
+                                    PhysicalPosition::new(x.round() as i32, y.round() as i32),
+                                ));
+                            }
+                        }
                         *state.origin.lock().unwrap_or_else(|e| e.into_inner()) =
                             Some(PhysicalPosition::new(f64::from(p.x), f64::from(p.y)));
                         *state.last_move_at.lock().unwrap_or_else(|e| e.into_inner()) =
