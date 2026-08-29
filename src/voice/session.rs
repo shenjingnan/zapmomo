@@ -1,13 +1,13 @@
 /// 语音会话编排核心（`VoiceSession`）。
 ///
-/// 把 KWS → ASR → LLM → TTS 串成一条**唤醒门控 + 句级流式 + 唤醒词打断 + 跟听续聊**的对话链路：
+/// 把 KWS → ASR → LLM → TTS 串成一条**唤醒门控 + 句级流式 + 多源打断 + 跟听续聊**的对话链路：
 ///
 /// ```text
 /// Idle --Start--> Armed --唤醒词--> Greeting --欢迎播完--> WaitingSpeech --真说话--> Listening
 ///   ▲                            （下次唤醒）  │            │ 超时→Armed         │
 ///   │                                           └─────────────────────┐         │
 ///   │           Armed ◄──BargeIn─── Thinking|Speaking ◄──FirstSentenceEnqueued──┘
-///   │              ▲            │（回复播完）                          │
+///   │              ▲            │（回复播完）  └─VoiceBargeIn→ Listening（语音打断直接接话）
 ///   └──────────────┘◄─WaitTimeout│  FollowUp → 直接进 Listening（跟听免唤醒）  │
 ///                              └──────────────────────────────────────────────┘
 /// ```
@@ -20,11 +20,15 @@
 ///
 /// 线程模型：编排循环在**调用线程**运行，持有全部 sherpa 引擎/流与 rodio 播放器
 /// （`Sink`/`Player` 不跨线程）。唯一后台线程是 [`SynthHandle`] 的 TTS 合成线程。
-/// 整个会话只开一次麦克风（[`MicLoop`]），按状态把 chunk 喂给 KWS 流（待唤醒/
-/// 播报/思考）或 ASR 流（聆听）——KWS/ASR 各自 `start_capture` 会在同设备冲突。
+/// 整个会话只开一次麦克风（[`MicLoop`]），按状态把 chunk 喂给 KWS 流（待唤醒）或
+/// ASR 流（聆听；播报/思考期喂 ASR 做语音打断判定，见 [`Self::listen_barge_in`]）
+/// ——KWS/ASR 各自 `start_capture` 会在同设备冲突。
 ///
-/// 打断序列：KWS 命中 → `llm.cancel()` + `speaker.stop()` + `synth.cancel_all()` +
-/// `current_gen += 1`（作废在途合成结果）+ 回 Armed 前 `skip_for` 丢回声尾巴。
+/// 打断序列（四来源）：KWS 命中 → 暂存来源回 Armed；快捷键 → 共享标志回 Armed；
+/// 文字输入 → 打断后处理文本；语音打断（ASR partial 判定 + 回声过滤通过）→ 已播
+/// 句子入历史、重建 ASR 流进 Listening 直接接话（转写只含打断后的话）。公共序列：`llm.cancel()` +
+/// `speaker.stop()` + `synth.cancel_all()` + `current_gen += 1`（作废在途合成结果）
+/// + `skip_for` 丢回声尾巴。
 use crate::asr::{AsrReaction, AsrResult};
 use crate::kws::{KwsEngine, KwsResult, Reaction, ReactionOutcome};
 use crate::llm::LlmEngine;
@@ -32,8 +36,9 @@ use crate::llm::LlmEvent;
 use crate::llm::types::{ChatMessage, ChatRole, InputItem};
 use crate::tts::TtsEngine;
 use crate::voice::asr_backend::AsrBackend;
+use crate::voice::bargein::{EchoTracker, VoiceBargeInDetector, is_echo_leak};
 use crate::voice::config::ResolvedSessionConfig;
-use crate::voice::events::{ErrorKind, StoppedReason, VoiceEvent};
+use crate::voice::events::{BargeInSource, ErrorKind, StoppedReason, VoiceEvent};
 use crate::voice::listen::{MicEvent, MicLoop};
 use crate::voice::player::AudioPlayer;
 use crate::voice::sanitizer::{TtsSanitizer, sanitize_for_tts};
@@ -75,6 +80,26 @@ pub struct TtsSwap {
 
 /// TTS 热切换邮箱（宿主 `VoiceSessionState` 与会话各持一份 Arc）。
 pub type TtsSwapSlot = Arc<Mutex<Option<TtsSwap>>>;
+
+/// 打断后识别文本的去向（后置回声兜底的结果）。
+#[derive(Debug, PartialEq, Eq)]
+enum PostBargeAction {
+    /// 正常放行（进新一轮对话）
+    Keep,
+    /// 回声漏网（丢弃并保持聆听）
+    EchoDrop,
+}
+
+/// 后置回声兜底判定（纯函数，可单测）：语音打断后 finalize 的文本与回声参考快照
+/// 高相似（Dice ≥ 阈值）→ 判回声漏网丢弃。文本/参考太短（bigram 为空）→ Dice 0 →
+/// 放行，单字 query（「停」）不受影响。
+fn classify_post_barge_text(text: &str, echo_ref: &str, threshold: f32) -> PostBargeAction {
+    if is_echo_leak(text, echo_ref, threshold) {
+        PostBargeAction::EchoDrop
+    } else {
+        PostBargeAction::Keep
+    }
+}
 
 /// 语音会话编排器。
 pub struct VoiceSession {
@@ -133,6 +158,16 @@ pub struct VoiceSession {
     /// `pending_speech` 并发 `PlaySentence`，后续块沿用，零块句由终态补弹。
     /// 非流式句不触碰（行为等价于 gate 恒 false）。
     stream_gate: SentencePlayGate,
+    /// 回声参考窗口（当前播报句 + 最近播完 1 句）+ 已播句子累积（语音打断时入历史）。
+    echo: EchoTracker,
+    /// 语音打断瞬间的回声参考快照：后置兜底比对用（`handle_user_final` 消费后清空；
+    /// 非语音路径与新一轮开始时清空，防跨轮污染）。
+    barge_echo_ref: Option<String>,
+    /// 语音打断触发判定器（Speaking/Thinking 期间每 chunk 观察，连续命中即触发）。
+    barge_detector: VoiceBargeInDetector,
+    /// KWS 命中的来源暂存（`listen_barge_in` 内置位，run loop 顶部消费）：区别于
+    /// 快捷键（共享标志置位时此处为 None → 归 `BargeInSource::Hotkey`）。
+    pending_barge_source: Option<BargeInSource>,
     /// 首响打点（验收量化用；`start_reply` 重置、`do_barge_in` 清空）：
     /// 唤醒 → 首句入队 → 首块播放，首次播放时打一条分段耗时日志
     /// （`mark_first_audio`；非流式路径同样打点供 A/B 对比）。
@@ -210,6 +245,8 @@ impl VoiceSession {
         )?;
         let speaker = Box::new(crate::voice::player::Speaker::try_new()?);
         let kws_stream = Self::make_kws_stream(&kws, &cfg)?;
+        // 打断判定器在 cfg 被 move 进结构体前构造（阈值来自会话配置快照）
+        let barge_detector = VoiceBargeInDetector::new(cfg.barge_in_similarity_threshold);
 
         Ok(Self {
             cfg,
@@ -243,6 +280,10 @@ impl VoiceSession {
             speech_wait_accum: 0.0,
             welcome_played: false,
             stream_gate: SentencePlayGate::default(),
+            echo: EchoTracker::default(),
+            barge_echo_ref: None,
+            barge_detector,
+            pending_barge_source: None,
             t_wake: None,
             t_reply_start: None,
             t_first_sentence: None,
@@ -288,11 +329,16 @@ impl VoiceSession {
             self.refresh_llm_if_switched()?;
             // TTS 热切换（set_current_model TTS 事务臂塞邮箱）：句间换入合成线程
             self.refresh_tts_if_switched();
-            // 打断优先于状态推进
+            // 打断优先于状态推进。共享标志只归快捷键（KWS 命中改为 listen_barge_in
+            // 内同步消费并暂存来源）；KWS 与快捷键同轮叠加时归 WakeWord（文案近似，可接受）。
             if self.barge_in.load(Ordering::Relaxed)
                 && matches!(self.state, SessionState::Thinking | SessionState::Speaking)
             {
-                self.do_barge_in();
+                let source = self
+                    .pending_barge_source
+                    .take()
+                    .unwrap_or(BargeInSource::Hotkey);
+                self.do_barge_in(source);
                 continue;
             }
             // 文字输入（输入条窗口）：每轮开头轮询收件箱，与 LLM/TTS 热切换同模式
@@ -390,7 +436,9 @@ impl VoiceSession {
         self.state = next;
         match next {
             SessionState::Listening => {
-                // 复位后端：流式重建流（丢上轮识别状态）；离线清空 PCM 缓冲
+                // 复位后端：流式重建流（丢上轮识别状态）；离线清空 PCM 缓冲。
+                // 语音打断同样复位（转写只含打断之后说的话）：流式识别是流内累积
+                // 语义，保留流会把打断前喂入的播报回声与用户语音叠加进最终转写。
                 self.asr.reset(&self.cfg.asr);
                 self.silence_accum = 0.0;
             }
@@ -545,6 +593,15 @@ impl VoiceSession {
             self.handle_user_final(text)?;
         } else if self.silence_accum >= self.cfg.asr_max_trailing_silence {
             let text = self.force_finalize_asr();
+            // 上一轮打断的 cancel 尚未落地（worker 释放 generating 互斥有延迟）：
+            // 此时发起 generate 必得 Busy 走报错回 Armed 丢掉这句话——转文字队列，
+            // 交 poll_text_input 每 100ms 粒度重试。silence_accum 必须清零，否则
+            // 每轮循环重复 finalize/入队。
+            if !text.trim().is_empty() && self.llm.is_generating() {
+                self.silence_accum = 0.0;
+                self.pending_texts.push_back(text);
+                return Ok(());
+            }
             self.handle_user_final(text)?;
         }
         Ok(())
@@ -581,7 +638,7 @@ impl VoiceSession {
         match self.state {
             // 欢迎语/生成/播报中：先打断（清理 reply/synth/speaker），文字留队列下轮处理
             SessionState::Greeting | SessionState::Thinking | SessionState::Speaking => {
-                self.do_barge_in();
+                self.do_barge_in(BargeInSource::Text);
             }
             SessionState::Armed | SessionState::WaitingSpeech | SessionState::Listening => {
                 let text = self.pending_texts.pop_front().expect("队列非空已检查");
@@ -589,8 +646,10 @@ impl VoiceSession {
                 if matches!(self.state, SessionState::Listening) {
                     self.asr.reset(&self.cfg.asr);
                 }
+                // 文字输入与回声无关：清掉语音打断可能遗留的比对快照，防止误丢文字
+                self.barge_echo_ref = None;
                 // 排空上一轮遗留的 LLM 事件，再发起新一轮
-                while self.llm_rx.try_recv().is_ok() {}
+                self.drain_stale_llm_events();
                 self.handle_user_final(text)?;
             }
             SessionState::Idle => {
@@ -602,9 +661,22 @@ impl VoiceSession {
 
     /// 处理一句最终用户文本：非空 → 入历史并发起 LLM；空（没真说话/识别失败）→
     /// **保持聆听不退出**（重建 ASR 流，状态留在 Listening；跟听循环免唤醒持续监听）。
+    ///
+    /// 语音打断后的首轮识别会先过后置回声兜底（见 [`Self::barge_echo_ref`]）：
+    /// 与播报参考高相似 → 判回声漏网丢弃并保持聆听，不打进新一轮。
     fn handle_user_final(&mut self, text: String) -> Result<(), String> {
         let text = text.trim().to_string();
         self.silence_accum = 0.0;
+        // 后置回声兜底（仅语音打断后的首轮识别：快照存在才比对，take 即消费）。
+        // 单字 query（「停」）bigram 为空 Dice 为 0 天然放行，话头不受影响。
+        if let Some(echo_ref) = self.barge_echo_ref.take()
+            && classify_post_barge_text(&text, &echo_ref, self.cfg.barge_in_similarity_threshold)
+                == PostBargeAction::EchoDrop
+        {
+            tracing::info!("[voice] 打断后识别文本与回声参考高相似，判回声漏网，保持聆听");
+            self.asr.reset(&self.cfg.asr);
+            return Ok(());
+        }
         if text.is_empty() {
             // force_finalize 已终结旧句，复位后端后继续聆听（不回待唤醒）
             tracing::debug!("[voice] ASR 空识别，保持聆听");
@@ -620,6 +692,9 @@ impl VoiceSession {
             .push(InputItem::Message(ChatMessage::new(ChatRole::User, text)));
         truncate_history(&mut self.history, self.cfg.history_max);
         self.start_reply();
+        // 排空上一轮被打断后残留的 LLM 事件：迟到 Finished 会把已取消轮的回复再入
+        // 历史 + 提前置位 reply_done 形成空轮（与 poll_text_input 的排空同源）
+        self.drain_stale_llm_events();
         let input = build_llm_input(&self.cfg.llm.system_prompt, &self.history);
         match self.llm.generate(input, self.cfg.llm.params.clone()) {
             Ok(()) => {}
@@ -652,11 +727,21 @@ impl VoiceSession {
         self.synth_consumed = 0;
         self.pending_speech.clear();
         self.stream_gate = SentencePlayGate::default();
+        self.echo.clear();
+        self.barge_echo_ref = None;
+        self.barge_detector.reset();
         // 首响打点：本轮生成起点；首句/首块待入队与播放时置位
         self.t_reply_start = Some(Instant::now());
         self.t_first_sentence = None;
         self.t_first_audio = None;
         self.synth.clear_cancel();
+    }
+
+    /// 排空 LLM 事件残留：打断（`cancel` 只置标志）后 worker 迟到的 Token/`Finished`
+    /// 若被新一轮 `poll_llm_events` 消费，会把已取消轮的回复入历史 + 提前置位
+    /// `reply_done` 形成空轮。发起新一轮 generate 前必须排空。
+    fn drain_stale_llm_events(&mut self) {
+        while self.llm_rx.try_recv().is_ok() {}
     }
 
     /// 把一句文本入队合成，并记录其文本（播放时弹出打印）。
@@ -733,9 +818,12 @@ impl VoiceSession {
         Ok(())
     }
 
-    /// Thinking：喂 KWS（打断监听）+ 消费 LLM 事件（流式打印 token），把切句入队合成。
+    /// Thinking：喂 KWS/ASR（打断监听）+ 消费 LLM 事件（流式打印 token），把切句入队合成。
     fn step_thinking(&mut self) -> Result<(), String> {
-        self.listen_barge_in()?;
+        if self.listen_barge_in()? {
+            self.do_barge_in_voice();
+            return Ok(());
+        }
         self.poll_llm_events()?;
         // 未切出任何句子（空回复/立即出错）→ 直接回听
         if self.reply_done && self.synth_enqueued == 0 {
@@ -744,13 +832,16 @@ impl VoiceSession {
         Ok(())
     }
 
-    /// Speaking：喂 KWS（打断监听）+ 消费 LLM 事件（晚到的 token/Finished）+ 按序播放，播完回听。
+    /// Speaking：喂 KWS/ASR（打断监听）+ 消费 LLM 事件（晚到的 token/Finished）+ 按序播放，播完回听。
     ///
     /// 消费计数只计**当前 gen 的终态**（Done/StreamDone/Error）：流式分块不计，
     /// 过期结果（打断后迟到，流式下取消延迟 = chunk 边界）不计数——否则迟到
     /// 终态会把 `synth_consumed` 抬到 `synth_enqueued` 之上，完成判定永不成立。
     fn step_speaking(&mut self) -> Result<(), String> {
-        self.listen_barge_in()?;
+        if self.listen_barge_in()? {
+            self.do_barge_in_voice();
+            return Ok(());
+        }
         self.poll_llm_events()?;
         while let Some(result) = self.synth.try_recv() {
             match result {
@@ -763,6 +854,8 @@ impl VoiceSession {
                         self.synth_consumed += 1;
                         // 弹出与入队顺序对应的句子文本（播放状态展示）
                         let text = self.pending_speech.pop_front().unwrap_or_default();
+                        // 记入回声参考窗口 + 已播累积（语音打断时入历史）
+                        self.echo.record_played(&text);
                         (self.emit)(VoiceEvent::PlaySentence {
                             sentence: text.clone(),
                         });
@@ -781,6 +874,8 @@ impl VoiceSession {
                     if gen_id == self.current_gen {
                         if self.stream_gate.on_stream_chunk() {
                             let text = self.pending_speech.pop_front().unwrap_or_default();
+                            // 记入回声参考窗口 + 已播累积（先 record 后 emit，text 被 move）
+                            self.echo.record_played(&text);
                             (self.emit)(VoiceEvent::PlaySentence { sentence: text });
                         }
                         self.speaker.play(samples, sample_rate);
@@ -819,19 +914,50 @@ impl VoiceSession {
         Ok(())
     }
 
-    /// Thinking/Speaking 期间喂麦克风给 KWS（打断词/唤醒词监听）。
-    fn listen_barge_in(&mut self) -> Result<(), String> {
+    /// Thinking/Speaking 期间喂麦克风给 KWS（唤醒词打断）+ ASR（语音打断判定）。
+    ///
+    /// 返回 true = 语音打断触发（调用方立即 `do_barge_in_voice` 并返回，不得继续
+    /// 消费 LLM/合成事件）。KWS 命中优先：暂存来源供 run loop 顶部消费（回待唤醒），
+    /// 同轮不再做 ASR 判定，避免双触发。
+    ///
+    /// 语音打断判定仅流式 ASR 后端且开关开启时进行：chunk 喂 ASR 流取 partial，交
+    /// [`VoiceBargeInDetector`]（RMS 门控 + ≥2 汉字 + 回声比对 + 连续命中）。partial
+    /// 只驱动打断判定，**不发 Transcript**（播报期不刷字幕）；未喂入判定路径时
+    /// （离线后端/开关关闭）行为与原有「只喂 KWS」逐字节一致。
+    fn listen_barge_in(&mut self) -> Result<bool, String> {
         let chunk = match self.mic.next(MIC_POLL)? {
             MicEvent::Chunk(c) => c,
-            MicEvent::Timeout => return Ok(()),
+            MicEvent::Timeout => return Ok(false),
             MicEvent::Disconnected => return Err("麦克风已断开".to_string()),
         };
         self.kws.feed(&self.kws_stream, &chunk);
-        let mut reaction = BargeInReaction {
-            flag: &self.barge_in,
-        };
+        let mut reaction = BargeInReaction::default();
         let _ = self.kws.detect(&self.kws_stream, &mut reaction);
-        Ok(())
+        if reaction.hit {
+            self.pending_barge_source = Some(BargeInSource::WakeWord);
+            self.barge_detector.reset();
+            return Ok(false);
+        }
+        if !self.voice_barge_in_enabled() {
+            return Ok(false);
+        }
+        let rms = chunk_rms(&chunk);
+        self.asr
+            .feed_chunk(&chunk, rms > self.cfg.vad_silence_threshold);
+        let mut collector = AsrCollector::default();
+        self.asr.decode_into(&mut collector);
+        Ok(self.barge_detector.observe(
+            &collector.partial,
+            rms,
+            self.cfg.vad_silence_threshold,
+            &self.echo.reference(),
+        ))
+    }
+
+    /// 语音打断是否启用：总开关 + ASR 后端具备流式 partial 能力（离线族自动降级，
+    /// 继续只用唤醒词打断）。
+    fn voice_barge_in_enabled(&self) -> bool {
+        self.cfg.voice_barge_in && self.asr.has_streaming_partial()
     }
 
     /// 回复播完（或无内容可播）→ 依 `decide_finish` 分流：停止 / 进跟听窗口 / 回待唤醒。
@@ -854,9 +980,9 @@ impl VoiceSession {
         Ok(())
     }
 
-    /// 打断序列：取消 LLM、停播、清合成、作废在途结果、回听并丢回声尾巴。
-    fn do_barge_in(&mut self) {
-        (self.emit)(VoiceEvent::BargeIn);
+    /// 打断公共序列：取消 LLM、停播、清合成、作废在途结果、复位打断状态。
+    /// `do_barge_in` 与 `do_barge_in_voice` 共用；差异只在去向与历史处理。
+    fn abort_current_generation(&mut self) {
         self.llm.cancel();
         self.current_gen += 1;
         self.speaker.stop();
@@ -873,12 +999,60 @@ impl VoiceSession {
         self.t_first_sentence = None;
         self.t_first_audio = None;
         self.barge_in.store(false, Ordering::Relaxed);
+        self.pending_barge_source = None;
+        self.barge_echo_ref = None;
+        self.barge_detector.reset();
+    }
+
+    /// 唤醒词/快捷键/文字打断：取消生成、停播，回待唤醒（需再喊唤醒词）。
+    fn do_barge_in(&mut self, source: BargeInSource) {
+        (self.emit)(VoiceEvent::BargeIn { source });
+        self.abort_current_generation();
+        self.echo.clear();
         if let Err(e) = self.set_state(SessionEvent::BargeIn) {
             (self.emit)(VoiceEvent::Error {
                 kind: ErrorKind::BargeIn,
                 message: e,
             });
         }
+        self.mic.skip_for(SKIP_AFTER_BARGE_IN);
+    }
+
+    /// 语音打断（ASR 判定用户在说话）：与 [`Self::do_barge_in`] 的差异——
+    /// 1. 已播出的句子入历史（assistant），LLM 下一轮知道自己说过什么；
+    /// 2. 回声参考快照存入 `barge_echo_ref`，供 `handle_user_final` 后置兜底比对；
+    /// 3. 进 Listening 直接接话（不回待唤醒）。
+    ///
+    /// 进 Listening 会**照常重建 ASR 流**：流式识别是流内累积语义，保留流会把打断
+    /// 前喂入的播报回声与用户语音全部叠加进最终转写（说话内容越叠越多）。重置后
+    /// 转写只含「打断之后」说的话；打断瞬间已出口的半截话随流丢弃，用户重说即可。
+    fn do_barge_in_voice(&mut self) {
+        (self.emit)(VoiceEvent::BargeIn {
+            source: BargeInSource::Voice,
+        });
+        self.abort_current_generation();
+        // 已播部分入历史（Thinking 阶段打断为空 → 不 push，仅保留 user 消息）
+        let spoken = self.echo.take_spoken();
+        if !spoken.trim().is_empty() {
+            self.history.push(InputItem::Message(ChatMessage::new(
+                ChatRole::Assistant,
+                spoken,
+            )));
+            truncate_history(&mut self.history, self.cfg.history_max);
+        }
+        // 回声参考快照（窗口 = 当前播报句 + 上一句；Thinking 阶段未播句为空 → 不过滤）
+        let echo_ref = self.echo.reference();
+        if !echo_ref.is_empty() {
+            self.barge_echo_ref = Some(echo_ref);
+        }
+        self.echo.clear();
+        if let Err(e) = self.set_state(SessionEvent::VoiceBargeIn) {
+            (self.emit)(VoiceEvent::Error {
+                kind: ErrorKind::BargeIn,
+                message: e,
+            });
+        }
+        // 丢回声尾巴：打断瞬间扬声器残余不进新流，避免被判作用户语音。
         self.mic.skip_for(SKIP_AFTER_BARGE_IN);
     }
 
@@ -1099,14 +1273,18 @@ impl Reaction for WakeReaction {
     }
 }
 
-/// KWS 反应（Thinking/Speaking 打断监听）：命中即置位打断标志（继续监听，不 Stop）。
-struct BargeInReaction<'a> {
-    flag: &'a AtomicBool,
+/// KWS 反应（Thinking/Speaking 打断监听）：命中记录 `hit`（继续监听，不 Stop）。
+///
+/// 不再置共享 `barge_in` 标志（那现在只归 Tauri 快捷键）；来源由 `listen_barge_in`
+/// 暂存到 `pending_barge_source`，使打断事件能区分唤醒词与快捷键。
+#[derive(Default)]
+struct BargeInReaction {
+    hit: bool,
 }
 
-impl Reaction for BargeInReaction<'_> {
+impl Reaction for BargeInReaction {
     fn on_keyword(&mut self, _result: &KwsResult) -> ReactionOutcome {
-        self.flag.store(true, Ordering::Relaxed);
+        self.hit = true;
         ReactionOutcome::Continue
     }
 }
@@ -1374,6 +1552,44 @@ mod tests {
         assert!((chunk_rms(&sine) - std::f32::consts::FRAC_1_SQRT_2).abs() < 0.01);
         // 幅度更大 → RMS 更大（用于阈值门控判断）
         assert!(chunk_rms(&[0.9, 0.9]) > chunk_rms(&[0.1, 0.1]));
+    }
+
+    // ---------- classify_post_barge_text：后置回声兜底判定 ----------
+
+    #[test]
+    fn test_post_barge_echo_leak_dropped() {
+        // 打断后识别出的文本与播报参考高相似 → 回声漏网，丢弃
+        assert_eq!(
+            classify_post_barge_text("今天天气不错。", "今天天气不错", 0.5),
+            PostBargeAction::EchoDrop
+        );
+    }
+
+    #[test]
+    fn test_post_barge_unrelated_text_kept() {
+        // 用户新内容与参考无关 → 放行进新一轮
+        assert_eq!(
+            classify_post_barge_text("帮我讲个故事", "今天天气不错", 0.5),
+            PostBargeAction::Keep
+        );
+    }
+
+    #[test]
+    fn test_post_barge_short_query_kept() {
+        // 单字 query（「停」）bigram 为空 → Dice 0 → 放行（保话头）
+        assert_eq!(
+            classify_post_barge_text("停", "今天天气不错", 0.5),
+            PostBargeAction::Keep
+        );
+    }
+
+    #[test]
+    fn test_post_barge_empty_reference_kept() {
+        // Thinking 阶段打断（未播句）→ 参考为空 → 不过滤
+        assert_eq!(
+            classify_post_barge_text("今天天气不错", "", 0.5),
+            PostBargeAction::Keep
+        );
     }
 
     // ---------- SentencePlayGate：pending_speech 每句恰弹一次的不变量 ----------

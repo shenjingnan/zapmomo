@@ -35,10 +35,25 @@ pub enum VoiceEvent {
     FollowUp,
     /// 错误（LLM / 合成 / 打断）
     Error { kind: ErrorKind, message: String },
-    /// 唤醒词打断（`[打断] 检测到唤醒词...`）
-    BargeIn,
+    /// 打断（`source` 区分来源：唤醒词 / 语音 / 快捷键 / 文字输入）
+    BargeIn { source: BargeInSource },
     /// 会话停止（结束 / 达最大轮数）
     Stopped { reason: StoppedReason, turns: u32 },
+}
+
+/// 打断来源（决定打断后的去向与用户提示文案：唤醒词/快捷键回待唤醒，
+/// 语音打断直接进聆听接话，文字输入随后处理文本）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BargeInSource {
+    /// 唤醒词命中（Thinking/Speaking 期间 KWS 监听）
+    WakeWord,
+    /// 语音打断（ASR partial 判定用户在说话，回声过滤通过）
+    Voice,
+    /// 全局快捷键（宿主置位共享标志）
+    Hotkey,
+    /// 文字输入到达（输入条窗口）
+    Text,
 }
 
 /// 错误来源。
@@ -99,7 +114,12 @@ pub fn log_voice_event(ev: &VoiceEvent) {
         VoiceEvent::Error { kind, message } => {
             tracing::warn!("[voice] 错误 kind={kind:?} message={message}")
         }
-        VoiceEvent::BargeIn => tracing::info!("[voice] 唤醒词打断"),
+        VoiceEvent::BargeIn { source } => match source {
+            BargeInSource::WakeWord => tracing::info!("[voice] 唤醒词打断"),
+            BargeInSource::Voice => tracing::info!("[voice] 语音打断：检测到用户说话"),
+            BargeInSource::Hotkey => tracing::info!("[voice] 快捷键打断"),
+            BargeInSource::Text => tracing::info!("[voice] 文字输入打断"),
+        },
         VoiceEvent::Stopped { reason, turns } => {
             tracing::info!("[voice] 会话停止 reason={reason:?} turns={turns}")
         }
@@ -138,7 +158,12 @@ pub fn cli_sink(ev: VoiceEvent) {
             ErrorKind::Synth => eprintln!("[合成错误] {message}"),
             ErrorKind::BargeIn => eprintln!("[打断] {message}"),
         },
-        VoiceEvent::BargeIn => println!("\n[打断] 检测到唤醒词，回到待唤醒"),
+        VoiceEvent::BargeIn { source } => match source {
+            BargeInSource::WakeWord => println!("\n[打断] 检测到唤醒词，回到待唤醒"),
+            BargeInSource::Voice => println!("\n[打断] 检测到你的声音，请继续说"),
+            BargeInSource::Hotkey => println!("\n[打断] 快捷键打断，回到待唤醒"),
+            BargeInSource::Text => println!("\n[打断] 收到文字输入"),
+        },
         VoiceEvent::Stopped { reason, turns } => match reason {
             StoppedReason::MaxTurns { max } => println!("[会话] 已达最大轮数 {max}，退出"),
             StoppedReason::Manual => println!("[会话] 结束（共 {turns} 轮）"),
@@ -193,7 +218,18 @@ mod tests {
                 kind: ErrorKind::Llm,
                 message: "x".to_string(),
             },
-            VoiceEvent::BargeIn,
+            VoiceEvent::BargeIn {
+                source: BargeInSource::WakeWord,
+            },
+            VoiceEvent::BargeIn {
+                source: BargeInSource::Voice,
+            },
+            VoiceEvent::BargeIn {
+                source: BargeInSource::Hotkey,
+            },
+            VoiceEvent::BargeIn {
+                source: BargeInSource::Text,
+            },
             VoiceEvent::Stopped {
                 reason: StoppedReason::Manual,
                 turns: 2,
@@ -290,6 +326,18 @@ mod tests {
             ),
             (VoiceEvent::FollowUp, r#"{"type":"follow_up"}"#),
             (
+                VoiceEvent::BargeIn {
+                    source: BargeInSource::WakeWord,
+                },
+                r#"{"type":"barge_in","source":"wake_word"}"#,
+            ),
+            (
+                VoiceEvent::BargeIn {
+                    source: BargeInSource::Voice,
+                },
+                r#"{"type":"barge_in","source":"voice"}"#,
+            ),
+            (
                 VoiceEvent::Stopped {
                     reason: StoppedReason::MaxTurns { max: 5 },
                     turns: 5,
@@ -351,7 +399,18 @@ mod tests {
                 kind: ErrorKind::BargeIn,
                 message: "x".to_string(),
             },
-            VoiceEvent::BargeIn,
+            VoiceEvent::BargeIn {
+                source: BargeInSource::WakeWord,
+            },
+            VoiceEvent::BargeIn {
+                source: BargeInSource::Voice,
+            },
+            VoiceEvent::BargeIn {
+                source: BargeInSource::Hotkey,
+            },
+            VoiceEvent::BargeIn {
+                source: BargeInSource::Text,
+            },
             VoiceEvent::Stopped {
                 reason: StoppedReason::Manual,
                 turns: 3,

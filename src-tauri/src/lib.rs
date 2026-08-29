@@ -1703,7 +1703,7 @@ fn make_voice_emit(app: AppHandle) -> Box<dyn Fn(VoiceEvent) + Send> {
         zapmomo::voice::events::log_voice_event(&ev);
         match ev {
             VoiceEvent::Started
-            | VoiceEvent::BargeIn
+            | VoiceEvent::BargeIn { .. }
             | VoiceEvent::Stopped { .. }
             | VoiceEvent::FollowUp => {}
             VoiceEvent::State { state } => {
