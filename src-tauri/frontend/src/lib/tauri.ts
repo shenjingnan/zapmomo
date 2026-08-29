@@ -99,6 +99,11 @@ export const api = {
   renameCompanion: (args: { id: string; name: string }) =>
     invoke<CompanionLibraryView>("rename_companion", args),
   removeCompanion: (args: { id: string }) => invoke<CompanionLibraryView>("remove_companion", args),
+  /** 绑定/解绑伙伴音色（voiceId 传 null 解绑）；注意 camelCase，snake_case 会被后端静默丢参 */
+  setCompanionVoice: (args: { id: string; voiceId: string | null }) =>
+    invoke<CompanionLibraryView>("set_companion_voice", args),
+  /** 音色库全量自定义音色（模型无关，供伙伴页音色绑定选择器；区别于按 TTS 模型过滤的 listTtsVoices） */
+  listVoiceLibrary: () => invoke<TtsVoice[]>("list_voice_library"),
   /** 在文件管理器中打开伙伴的托管资产目录（可自行调整音色参考等资产）。 */
   openCompanionDir: (args: { id: string }) => invoke<void>("open_companion_dir", args),
   saveCoverImage: (args: { id: string; png: number[] }) =>

@@ -1253,9 +1253,34 @@ fn save_tts_voice(
 }
 
 /// 删除一个自定义音色（清单 + wav 文件）。
+///
+/// 联动清理：删除成功后清掉伙伴库里指向该音色的绑定（失败仅告警，孤儿绑定会
+/// fail-open 回退全局默认）；若清理命中 active 伙伴则重启运行中的语音会话。
 #[tauri::command]
-fn delete_tts_voice(id: String) -> Result<(), String> {
-    zapmomo::tts::voice_store::delete_voice(&id)
+fn delete_tts_voice(app: AppHandle, id: String) -> Result<(), String> {
+    zapmomo::tts::voice_store::delete_voice(&id)?;
+    match zapmomo::companion::clear_voice_bindings(&id) {
+        Ok(affected) => {
+            let hits_active = affected
+                .as_slice()
+                .iter()
+                .any(|cid| Some(cid.as_str()) == active_companion_id().as_deref());
+            if hits_active {
+                restart_voice_session_if_running(&app);
+            }
+        }
+        Err(e) => tracing::warn!("清理伙伴音色绑定失败（{id}）: {e}"),
+    }
+    Ok(())
+}
+
+/// 列出音色库全部自定义音色（模型无关，供伙伴页音色绑定选择器）。
+///
+/// 与 `list_tts_voices` 的区别：后者按当前 TTS 模型过滤（非克隆模型返回空、
+/// 含 builtin 条目），绑定是持久化元数据、跨模型有效，必须看到全量音色库。
+#[tauri::command]
+fn list_voice_library() -> Result<Vec<zapmomo::tts::TtsVoice>, String> {
+    Ok(zapmomo::tts::voice_store::list_custom_voices())
 }
 
 /// 录制 N 秒麦克风并保存为 16k wav，返回 wav 路径（供后续保存为音色）。
@@ -1334,10 +1359,11 @@ fn synthesize_tts(
     })?;
 
     // 合成音色参数统一解析（克隆 > sid > audiocpp 具名，见 zapmomo::tts::voice）。
-    // 用户显式参数（音色/自定义参考音频）优先；都为空时回落 active 角色包的克隆音色
-    // （设置页试听全局音色不应被角色包劫持）。在后台线程外解析，尽早报错。
+    // 用户显式参数（音色/自定义参考音频）优先；都为空时回落 active 伙伴的克隆音色
+    // （目录自带 > 音色库绑定，见 companion::active_companion_voice；设置页试听
+    // 全局音色不应被伙伴音色劫持）。在后台线程外解析，尽早报错。
     let character = (voice.is_none() && reference_wav.is_none())
-        .then(zapmomo::companion::active_character_voice)
+        .then(zapmomo::companion::active_companion_voice)
         .flatten();
     let custom_wav = reference_wav
         .map(std::path::PathBuf::from)
@@ -3036,7 +3062,12 @@ struct CompanionView {
     cover_image: Option<String>,
     /// 角色包是否带人设（character.md 非空；非角色包恒 false）。
     has_persona: bool,
-    /// 角色包是否带音色克隆参考（voice/reference.wav + reference.txt 成对）。
+    /// 绑定的音色库条目 id（None = 未绑定；绑定失效时字段保留但 `has_voice` 为 false）。
+    voice_id: Option<String>,
+    /// 生效音色的来源："pack"（托管目录 voice/ 自带）/ "library"（音色库绑定）；
+    /// 无生效音色为 null。
+    voice_source: Option<String>,
+    /// 是否有生效音色（目录自带或绑定命中；绑定失效不算）。
     has_voice: bool,
 }
 
@@ -3058,19 +3089,33 @@ fn build_view(lib: &zapmomo::companion::CompanionLibrary) -> CompanionLibraryVie
         models: lib
             .models
             .iter()
-            .map(|m| CompanionView {
-                id: m.id.clone(),
-                name: m.name.clone(),
-                source_path: m.source_path.clone(),
-                model_dir: m.model_dir.clone(),
-                model_file: m.model_file.clone(),
-                format: m.format.clone(),
-                imported_at: m.imported_at.clone(),
-                valid: zapmomo::companion::quick_valid(m),
-                cover_image: zapmomo::live2d::config::find_cover_image(Path::new(&m.model_dir))
-                    .map(|p| p.display().to_string()),
-                has_persona: zapmomo::companion::has_persona(m),
-                has_voice: zapmomo::companion::has_character_voice(m),
+            .map(|m| {
+                // 单次解析同时得出 voice_source 与 has_voice（避免重复目录/清单 IO）。
+                let voice_source = match zapmomo::companion::companion_voice_in(m) {
+                    Some((_, zapmomo::companion::CompanionVoiceSource::Pack)) => {
+                        Some("pack".to_string())
+                    }
+                    Some((_, zapmomo::companion::CompanionVoiceSource::Library)) => {
+                        Some("library".to_string())
+                    }
+                    None => None,
+                };
+                CompanionView {
+                    id: m.id.clone(),
+                    name: m.name.clone(),
+                    source_path: m.source_path.clone(),
+                    model_dir: m.model_dir.clone(),
+                    model_file: m.model_file.clone(),
+                    format: m.format.clone(),
+                    imported_at: m.imported_at.clone(),
+                    valid: zapmomo::companion::quick_valid(m),
+                    cover_image: zapmomo::live2d::config::find_cover_image(Path::new(&m.model_dir))
+                        .map(|p| p.display().to_string()),
+                    has_persona: zapmomo::companion::has_persona(m),
+                    voice_id: m.voice_id.clone(),
+                    has_voice: voice_source.is_some(),
+                    voice_source,
+                }
             })
             .collect(),
         active_model_id: lib.active_model_id.clone(),
@@ -3139,17 +3184,25 @@ fn reconcile_active(
         }
     }
 
-    // active 实际变更 → 人设/音色快照需重建：运行中的语音会话 stop+start
-    // （set_microphone 同款模式；重启同时清 history，人设语义干净）。
-    // 失败仅告警：人设/音色是增强，不应让「切换伙伴」本身失败。
+    // active 实际变更 → 人设/音色快照需重建：重启运行中的语音会话。
+    restart_voice_session_if_running(app);
+    Ok(())
+}
+
+/// 人设/音色快照变更后重启运行中的语音会话（stop+start，set_microphone 同款模式；
+/// 重启同时清 history，人设语义干净）。
+///
+/// 供「切换伙伴」（reconcile_active）、「改音色绑定」（set_companion_voice）、
+/// 「删除被绑定音色」（delete_tts_voice）三个快照失效点复用。
+/// 失败仅告警：人设/音色是增强，不应让触发方本身失败。
+fn restart_voice_session_if_running(app: &AppHandle) {
     let voice = app.state::<VoiceSessionState>();
     if voice.is_running()
         && let Err(e) = stop_voice_session_inner(voice.inner())
             .and_then(|()| start_voice_session_impl(app.clone(), voice.inner()))
     {
-        tracing::warn!("切换伙伴后重启语音会话失败（人设/音色将在下次启动会话时生效）: {e}");
+        tracing::warn!("重启语音会话失败（人设/音色将在下次启动会话时生效）: {e}");
     }
-    Ok(())
 }
 
 /// 启动阶段同步 reconcile（毫秒级，不迁移）：让 settings 与伙伴库 active 一致，
@@ -3284,6 +3337,31 @@ async fn rename_companion(
     reconcile_active(&app, active)?;
     // 重命名后托盘「切换伙伴」label 要更新。
     rebuild_tray_menu_threadsafe(&app);
+    Ok(build_view(&lib))
+}
+
+/// 绑定 / 解绑伙伴音色（写 `library.json` 的 `voice_id`，伙伴库元数据）。
+///
+/// - `voice_id = Some(id)`：绑定音色库条目（不存在报错）；
+/// - `voice_id = None`：解绑，回退托管目录自带或全局默认音色。
+///
+/// 改的是 active 伙伴且语音会话运行中 → 重启会话使人设/音色快照立即生效
+/// （`reconcile_active` 早退分支不会经过这里，需显式触发）。
+#[tauri::command]
+async fn set_companion_voice(
+    app: AppHandle,
+    id: String,
+    voice_id: Option<String>,
+) -> Result<CompanionLibraryView, String> {
+    let cid = id.clone();
+    let lib = tauri::async_runtime::spawn_blocking(move || {
+        zapmomo::companion::set_voice_binding(&cid, voice_id.as_deref())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    if lib.active_model_id.as_deref() == Some(&id) {
+        restart_voice_session_if_running(&app);
+    }
     Ok(build_view(&lib))
 }
 
@@ -5909,6 +5987,7 @@ pub fn run() {
             is_asr_dictating,
             get_tts_config,
             list_tts_voices,
+            list_voice_library,
             save_tts_voice,
             delete_tts_voice,
             record_tts_voice,
@@ -5957,6 +6036,7 @@ pub fn run() {
             import_companion,
             set_active_companion,
             rename_companion,
+            set_companion_voice,
             remove_companion,
             open_companion_dir,
             save_cover_image,
@@ -6726,6 +6806,7 @@ mod companion_menu_tests {
             model_file: format!("{model_dir}/{name}.model3.json"),
             format: "cubism3".to_string(),
             imported_at: "2026-01-01T00:00:00Z".to_string(),
+            voice_id: None,
             layout: None,
         }
     }
@@ -6794,6 +6875,7 @@ mod companion_open_dir_tests {
             model_file: manifest.display().to_string(),
             format: "cubism3".to_string(),
             imported_at: "2026-01-01T00:00:00Z".to_string(),
+            voice_id: None,
             layout: None,
         }
     }

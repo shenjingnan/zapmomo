@@ -6,6 +6,11 @@
 //! - `"character"`：角色包目录（`character.md` 人设 + `character.png` 立绘 +
 //!   可选 `voice/reference.wav` + `voice/reference.txt` 音色克隆参考）
 //!
+//! 音色（任意 format 均可拥有，见 `companion_voice_in` 三级解析）：
+//! 1. 托管目录 `voice/reference.wav + reference.txt`（角色包自带，优先）；
+//! 2. `CompanionModel.voice_id` 绑定的音色库条目（`~/.zapmomo/voices/`，UI 可绑/解绑）；
+//! 3. 都没有 → 上层回退全局默认音色（`[tts].voice`）。
+//!
 //! 数据模型：
 //! - 清单：`~/.zapmomo/companions/library.json`（`CompanionLibrary`，schema_version = 1）
 //! - 模型文件：`~/.zapmomo/companions/{id}/`（导入时把整个源目录复制进来，**应用托管**，
@@ -61,6 +66,14 @@ pub struct CompanionModel {
     pub format: String,
     /// 导入时间（RFC3339）。
     pub imported_at: String,
+    /// 绑定的音色库条目 id（`~/.zapmomo/voices/`；`None` = 未绑定）。
+    ///
+    /// 只存绑定关系不存路径：解析时经 `tts::voice_store::find_voice_by_id` 严格按 id
+    /// 查询，条目被删后 fail-open 回退全局默认（见 `companion_voice_in`）。存 id 不存
+    /// 路径，伙伴托管目录搬迁（`relocate_payload`）天然不影响引用。生效优先级低于
+    /// 托管目录自带的 `voice/`（目录 > 绑定 > 全局默认，见 `companion_voice_in`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice_id: Option<String>,
     /// 伙伴私有窗口布局（尺寸/位置）；`None` = 从未单独配置，沿用全局默认
     /// （`settings.toml [live2d]`）与当前窗口状态。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -638,6 +651,7 @@ fn commit_import(prepared: PreparedImport) -> Result<(CompanionModel, bool), Str
             .to_string(),
         format: prepared.format.clone(),
         imported_at: prepared.imported_at.clone(),
+        voice_id: None,
         layout: None,
     };
 
@@ -923,16 +937,59 @@ pub fn import_character_from_dir(source: &Path) -> Result<(CompanionModel, bool)
 }
 
 // ===========================================================================
-// 角色包运行时探测（人设 / 音色；约定文件名，不入库）
+// 伙伴运行时探测（人设 / 音色；约定文件名 + library.json 绑定）
 // ===========================================================================
 
 /// 角色包音色克隆参考（参考音频 + 逐字转写）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct CharacterVoice {
-    /// 托管目录内 `voice/reference.wav` 绝对路径。
+    /// 托管目录内 `voice/reference.wav` 绝对路径（或音色库条目 wav 路径）。
     pub wav: PathBuf,
-    /// `voice/reference.txt` 内容（逐字转写）。
+    /// 参考音频的逐字转写。
     pub text: String,
+}
+
+/// 伙伴音色的生效来源（`companion_voice_in` 命中哪一级）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompanionVoiceSource {
+    /// 托管目录 `voice/` 自带（第 1 级，角色包自带或用户手动放入）。
+    Pack,
+    /// 音色库绑定（第 2 级，`CompanionModel.voice_id`）。
+    Library,
+}
+
+/// 伙伴音色三级解析（目录自带 > 音色库绑定 > None），同时给出命中来源。
+///
+/// - 第 1 级：托管目录 `voice/reference.wav + reference.txt` 成对非空（任意 format
+///   都可探测，不限定角色包）；
+/// - 第 2 级：`voice_id` 经 `voice_store::find_voice_by_id` 严格按 id 查——刻意
+///   不走 `resolve_reference` 的「id 或名称」宽容匹配与 builtin 回退（名称碰撞 /
+///   绑 builtin 跨模型失效在此是歧义源）；
+/// - 绑定失效（条目已删）fail-open：warn 后返回 None，上层回退全局默认音色。
+pub fn companion_voice_in(
+    model: &CompanionModel,
+) -> Option<(CharacterVoice, CompanionVoiceSource)> {
+    if let Some(voice) = character_voice_in(Path::new(&model.model_dir)) {
+        return Some((voice, CompanionVoiceSource::Pack));
+    }
+    let voice_id = model.voice_id.as_deref()?;
+    match crate::tts::voice_store::find_voice_by_id(voice_id) {
+        Some(v) => Some((
+            CharacterVoice {
+                wav: v.wav_path,
+                text: v.reference_text,
+            },
+            CompanionVoiceSource::Library,
+        )),
+        None => {
+            tracing::warn!(
+                "伙伴 {} 绑定的音色不存在（{}），回退全局默认",
+                model.id,
+                voice_id
+            );
+            None
+        }
+    }
 }
 
 /// 当前 active 的角色包伙伴（无 active 或非角色包 → None）。
@@ -966,12 +1023,18 @@ pub fn active_persona() -> Option<String> {
     }
 }
 
-/// active 角色包的音色克隆参考（voice/reference.wav + reference.txt 成对存在）。
+/// active 伙伴的音色克隆参考（目录 `voice/` > 音色库绑定 > None）。
 ///
-/// 文件缺失/转写为空按「无」降级（warn 日志）。
-pub fn active_character_voice() -> Option<CharacterVoice> {
-    let model = active_character_model()?;
-    character_voice_in(Path::new(&model.model_dir))
+/// 任意 format 均可（不限定角色包）。文件缺失 / 绑定失效按「无」降级（warn 日志）。
+pub fn active_companion_voice() -> Option<CharacterVoice> {
+    let lib = load_library_fast()
+        .map_err(|e| {
+            tracing::warn!("读取伙伴库失败（跳过伙伴音色探测）: {e}");
+            e
+        })
+        .ok()?;
+    let model = active_model(&lib)?;
+    companion_voice_in(model).map(|(voice, _)| voice)
 }
 
 /// 探测托管目录内的角色音色（voice/reference.wav + reference.txt 成对且非空）。
@@ -1007,9 +1070,59 @@ pub fn has_persona(model: &CompanionModel) -> bool {
         .unwrap_or(false)
 }
 
-/// 角色包是否带音色克隆参考（供列表视图 Badge；毫秒级小 IO）。
-pub fn has_character_voice(model: &CompanionModel) -> bool {
-    is_character(model) && character_voice_in(Path::new(&model.model_dir)).is_some()
+/// 伙伴是否有生效音色（目录 `voice/` 自带或音色库绑定命中；供列表视图 Badge）。
+///
+/// 与 `has_character_voice`（已废弃的旧语义）的区别：不限定角色包 format，
+/// 且绑定指向的音色库条目被删后返回 false（fail-open，UI 显示「已失效」）。
+pub fn has_voice(model: &CompanionModel) -> bool {
+    companion_voice_in(model).is_some()
+}
+
+/// 绑定 / 解绑伙伴音色（写 `library.json` 的 `voice_id` 字段）。
+///
+/// - `Some(voice_id)`：必须命中音色库条目（`find_voice_by_id` 严格按 id），
+///   不存在报错，防止绑出失效引用；
+/// - `None`：解绑，回退目录自带或全局默认。
+/// - 与 `set_companion_scale` 等窗口属性命令无关，这里是伙伴库元数据。
+pub fn set_voice_binding(id: &str, voice_id: Option<&str>) -> Result<CompanionLibrary, String> {
+    if let Some(vid) = voice_id
+        && crate::tts::voice_store::find_voice_by_id(vid).is_none()
+    {
+        return Err(format!("未找到音色: {vid}"));
+    }
+    let lib;
+    {
+        let _g = lock();
+        let mut inner = load_library_inner()?;
+        let model = inner
+            .models
+            .iter_mut()
+            .find(|m| m.id == id)
+            .ok_or_else(|| "未找到该伙伴".to_string())?;
+        model.voice_id = voice_id.map(str::to_string);
+        save_library_inner(&inner)?;
+        lib = inner;
+    }
+    Ok(lib)
+}
+
+/// 清理所有指向 `voice_id` 的伙伴绑定（音色库条目被删除时由命令层联动调用）。
+///
+/// 返回被清理的伙伴 id 列表（供上层判断是否需要重启语音会话）；无引用时不写盘。
+pub fn clear_voice_bindings(voice_id: &str) -> Result<Vec<String>, String> {
+    let _g = lock();
+    let mut inner = load_library_inner()?;
+    let mut affected = Vec::new();
+    for model in &mut inner.models {
+        if model.voice_id.as_deref() == Some(voice_id) {
+            model.voice_id = None;
+            affected.push(model.id.clone());
+        }
+    }
+    if !affected.is_empty() {
+        save_library_inner(&inner)?;
+    }
+    Ok(affected)
 }
 
 // ===========================================================================
@@ -1749,6 +1862,7 @@ mod tests {
                         .to_string(),
                     format: "Cubism3".into(),
                     imported_at: "t".into(),
+                    voice_id: None,
                     layout: None,
                 }],
                 active_model_id: Some(id.to_string()),
@@ -2558,7 +2672,7 @@ mod tests {
         run_with_temp_home(|home| {
             // 无 active → None
             assert!(active_persona().is_none());
-            assert!(active_character_voice().is_none());
+            assert!(active_companion_voice().is_none());
 
             let c = home.join("furina");
             make_character_pack(&c);
@@ -2566,21 +2680,192 @@ mod tests {
             let (ch, _) = import_character_from_dir(&c).unwrap();
             let persona = active_persona().unwrap();
             assert!(persona.contains("芙宁娜"), "{persona}");
-            let voice = active_character_voice().unwrap();
+            let voice = active_companion_voice().unwrap();
             assert!(voice.wav.ends_with("voice/reference.wav"));
             assert_eq!(voice.text, "哼~没错，就是我。");
             assert!(has_persona(&ch));
-            assert!(has_character_voice(&ch));
+            assert!(has_voice(&ch));
 
-            // 切到普通 GIF 伙伴 → 探测为 None
+            // 切到普通 GIF 伙伴 → 人设探测为 None（人设仍限定角色包）
             let g = home.join("舞.gif");
             make_valid_gif(&g);
             let (gif, _) = import_gif_from_file(&g).unwrap();
             set_active(&gif.id).unwrap();
             assert!(active_persona().is_none());
-            assert!(active_character_voice().is_none());
             assert!(!has_persona(&gif));
-            assert!(!has_character_voice(&gif));
+            // 音色不再限定角色包：绑定后 GIF 伙伴同样生效（见绑定解析测试）
+        });
+    }
+
+    // ---- 伙伴音色绑定（目录 > 音色库绑定 > 全局默认） ----
+
+    /// 往音色库存一条音色，返回其 id。
+    fn save_library_voice(home: &Path, name: &str, text: &str) -> String {
+        let src = home.join(format!("{name}-src.wav"));
+        make_wav(&src, 1, 16000, 10);
+        crate::tts::voice_store::save_voice(name, &src, text)
+            .unwrap()
+            .id
+    }
+
+    #[test]
+    fn test_companion_voice_resolution_priority() {
+        run_with_temp_home(|home| {
+            let lib_id = save_library_voice(home, "库音色", "库转写");
+            let another_id = save_library_voice(home, "另一个", "另一转写");
+
+            // 角色包自带 voice/ 且绑定另一音色 → 目录优先（Pack）
+            let c = home.join("furina");
+            make_character_pack(&c);
+            add_voice_pack(&c, 100);
+            let (ch, _) = import_character_from_dir(&c).unwrap();
+            set_voice_binding(&ch.id, Some(&another_id)).unwrap();
+            let (voice, source) =
+                companion_voice_in(&load_library_fast().unwrap().models[0]).unwrap();
+            assert_eq!(source, CompanionVoiceSource::Pack);
+            assert!(voice.wav.ends_with("voice/reference.wav"));
+            assert_eq!(voice.text, "哼~没错，就是我。");
+
+            // Live2D 伙伴无目录音色 + 绑定 → 绑定生效（Library，wav 指向音色库）
+            let m = home.join("L");
+            make_valid_model(&m, "l.model3.json");
+            let (l2d, _) = import_from_dir(&m).unwrap();
+            set_voice_binding(&l2d.id, Some(&lib_id)).unwrap();
+            let lib = load_library_fast().unwrap();
+            let model = lib.models.iter().find(|m| m.id == l2d.id).unwrap();
+            let (voice, source) = companion_voice_in(model).unwrap();
+            assert_eq!(source, CompanionVoiceSource::Library);
+            assert_eq!(
+                voice.wav,
+                crate::tts::voice_store::find_voice_by_id(&lib_id)
+                    .unwrap()
+                    .wav_path
+            );
+            assert_eq!(voice.text, "库转写");
+            assert!(has_voice(model));
+
+            // 未绑定且无目录音色 → None（上层回退全局默认）
+            let g = home.join("舞.gif");
+            make_valid_gif(&g);
+            let (gif, _) = import_gif_from_file(&g).unwrap();
+            let lib = load_library_fast().unwrap();
+            let model = lib.models.iter().find(|m| m.id == gif.id).unwrap();
+            assert!(companion_voice_in(model).is_none());
+            assert!(!has_voice(model));
+        });
+    }
+
+    /// 绑定指向的音色被删除 → fail-open 回退 None（不 panic、不误用其它音色）。
+    #[test]
+    fn test_stale_binding_falls_back_to_none() {
+        run_with_temp_home(|home| {
+            let m = home.join("L");
+            make_valid_model(&m, "l.model3.json");
+            let (l2d, _) = import_from_dir(&m).unwrap();
+            let lib_id = save_library_voice(home, "会消失", "转写");
+            set_voice_binding(&l2d.id, Some(&lib_id)).unwrap();
+            assert!(has_voice(&load_library_fast().unwrap().models[0]));
+
+            crate::tts::voice_store::delete_voice(&lib_id).unwrap();
+            let model = &load_library_fast().unwrap().models[0];
+            // 绑定字段还在（引用残留），但解析为 None（fail-open）
+            assert_eq!(model.voice_id.as_deref(), Some(lib_id.as_str()));
+            assert!(companion_voice_in(model).is_none());
+            assert!(!has_voice(model), "失效绑定不算生效音色");
+            assert!(active_companion_voice().is_none());
+        });
+    }
+
+    #[test]
+    fn test_set_voice_binding_validation() {
+        run_with_temp_home(|home| {
+            let m = home.join("L");
+            make_valid_model(&m, "l.model3.json");
+            let (l2d, _) = import_from_dir(&m).unwrap();
+
+            // 绑不存在的 id 报错
+            let err = set_voice_binding(&l2d.id, Some("custom-nope")).unwrap_err();
+            assert!(err.contains("未找到音色"), "err: {err}");
+            // 绑定后字段落库
+            let lib_id = save_library_voice(home, "音色A", "转写");
+            set_voice_binding(&l2d.id, Some(&lib_id)).unwrap();
+            assert_eq!(
+                load_library_fast().unwrap().models[0].voice_id.as_deref(),
+                Some(lib_id.as_str())
+            );
+            // None 解绑
+            set_voice_binding(&l2d.id, None).unwrap();
+            assert!(load_library_fast().unwrap().models[0].voice_id.is_none());
+            // 未知的伙伴 id 报错
+            assert!(set_voice_binding("companion-nope", None).is_err());
+        });
+    }
+
+    #[test]
+    fn test_clear_voice_bindings_only_hits_matching() {
+        run_with_temp_home(|home| {
+            let a = home.join("A");
+            make_valid_model(&a, "a.model3.json");
+            let (ca, _) = import_from_dir(&a).unwrap();
+            let b = home.join("B");
+            make_valid_model(&b, "b.model3.json");
+            let (cb, _) = import_from_dir(&b).unwrap();
+            let gone = save_library_voice(home, "被删", "转写");
+            let keep = save_library_voice(home, "保留", "转写");
+            set_voice_binding(&ca.id, Some(&gone)).unwrap();
+            set_voice_binding(&cb.id, Some(&keep)).unwrap();
+
+            let affected = clear_voice_bindings(&gone).unwrap();
+            assert_eq!(affected, vec![ca.id.clone()]);
+            let lib = load_library_fast().unwrap();
+            let ma = lib.models.iter().find(|m| m.id == ca.id).unwrap();
+            let mb = lib.models.iter().find(|m| m.id == cb.id).unwrap();
+            assert!(ma.voice_id.is_none(), "命中的绑定应被清理");
+            assert_eq!(mb.voice_id.as_deref(), Some(keep.as_str()), "无关绑定不动");
+
+            // 无引用 → 空列表
+            assert!(clear_voice_bindings(&gone).unwrap().is_empty());
+        });
+    }
+
+    /// 老 library.json（条目无 voice_id 字段）宽容加载为 None。
+    #[test]
+    fn test_library_json_without_voice_field_loads() {
+        run_with_temp_home(|home| {
+            let root = get_companions_dir();
+            let id = "companion-abc";
+            make_valid_model(&root.join(id), "cat.model3.json");
+            let json_path = |p: &Path| serde_json::to_string(&p.display().to_string()).unwrap();
+            std::fs::write(
+                root.join(LIBRARY_FILE),
+                format!(
+                    r#"{{"schema_version":1,"models":[{{"id":"{id}","name":"cat","model_dir":{},"model_file":{},"format":"cubism3","imported_at":"t"}}],"active_model_id":"{id}"}}"#,
+                    json_path(&root.join(id)),
+                    json_path(&root.join(id).join("cat.model3.json"))
+                ),
+            )
+            .unwrap();
+            let lib = load_library_fast().unwrap();
+            assert!(lib.models[0].voice_id.is_none());
+            assert!(lib.models[0].layout.is_none());
+        });
+    }
+
+    /// 非 character format 的托管目录手动放入 voice/ 同样生效（第 1 级不限 format）。
+    #[test]
+    fn test_dir_voice_applies_to_any_format() {
+        run_with_temp_home(|home| {
+            let m = home.join("L");
+            make_valid_model(&m, "l.model3.json");
+            let (l2d, _) = import_from_dir(&m).unwrap();
+            // 用户经 open_companion_dir 手动放入音色参考
+            add_voice_pack(Path::new(&l2d.model_dir), 50);
+
+            let model = &load_library_fast().unwrap().models[0];
+            assert!(has_voice(model), "Live2D 伙伴目录自带音色应生效");
+            let (voice, source) = companion_voice_in(model).unwrap();
+            assert_eq!(source, CompanionVoiceSource::Pack);
+            assert!(voice.wav.ends_with("voice/reference.wav"));
         });
     }
 
