@@ -239,8 +239,8 @@ mod tests {
         let models = all_models();
         assert_eq!(
             models.len(),
-            16,
-            "应为 7 个首批（含 1 KWS）+ 5 个 ASR + 2 个新 TTS + 3 个新 ASR + 2 个流式 Paraformer + 1 个 Qwen3-ASR + 1 个 audiocpp OmniVoice + 1 个 audiocpp VoxCPM2 + 2 个 Qwen3-TTS + 1 个 audiocpp Qwen3-ASR（LLM 条目已随本地推理移除；vits/matcha/kokoro/pocket TTS 已移除；3 个纯英文 Zipformer ASR 已移除）"
+            8,
+            "应为 1 KWS + 2 ASR（默认 zipformer + audiocpp Qwen3）+ 5 TTS（zipvoice + 4 audiocpp；small/14M zipformer、Paraformer、SenseVoice、Whisper、sherpa Qwen3-ASR 已从模型库移除，vits/matcha/kokoro/pocket TTS 已移除）"
         );
         assert!(
             models
@@ -292,7 +292,7 @@ mod tests {
 
     #[test]
     fn test_model_by_id_and_order() {
-        let m = model_by_id("asr-sensevoice-zh-en-ja-ko-yue").expect("按 id 查找");
+        let m = model_by_id("asr-streaming-bilingual-zh-en").expect("按 id 查找");
         assert_eq!(m.model_type, ModelType::Asr);
         // 推荐顺序 = registry 原始顺序（首个是 KWS）
         assert_eq!(all_models()[0].model_type, ModelType::Kws);
@@ -417,28 +417,9 @@ mod tests {
     #[test]
     fn test_registry_asr_kind() {
         use crate::asr::config::AsrModelKind;
+        // 离线 Qwen3-ASR（audiocpp 版；sherpa 版已从模型库移除）
         assert_eq!(
-            registry_asr_kind("asr-sensevoice-zh-en-ja-ko-yue"),
-            Some(AsrModelKind::SenseVoice)
-        );
-        assert_eq!(
-            registry_asr_kind("asr-whisper-tiny"),
-            Some(AsrModelKind::Whisper)
-        );
-        assert_eq!(
-            registry_asr_kind("asr-whisper-base"),
-            Some(AsrModelKind::Whisper)
-        );
-        assert_eq!(
-            registry_asr_kind("asr-paraformer-bilingual-zh-en"),
-            Some(AsrModelKind::Paraformer)
-        );
-        assert_eq!(
-            registry_asr_kind("asr-paraformer-trilingual-zh-cantonese-en"),
-            Some(AsrModelKind::Paraformer)
-        );
-        assert_eq!(
-            registry_asr_kind("asr-qwen3-0.6b"),
+            registry_asr_kind("asr-qwen3-0.6b-audiocpp"),
             Some(AsrModelKind::Qwen3Asr)
         );
         // 既有 streaming zipformer：asr_kind 缺省 → None（老行为）
@@ -446,6 +427,22 @@ mod tests {
         // 非 ASR 或不存在 → None
         assert_eq!(registry_asr_kind("tts-zipvoice-distill-int8"), None);
         assert_eq!(registry_asr_kind("不存在"), None);
+        // 已从模型库移除的模型（Paraformer/SenseVoice/Whisper/small/14M/sherpa Qwen3）：
+        // registry 反查不到 → None，已装目录交回 detect_kind_from_dir 探测兜底
+        assert_eq!(registry_asr_kind("asr-qwen3-0.6b"), None);
+        assert_eq!(registry_asr_kind("asr-sensevoice-zh-en-ja-ko-yue"), None);
+        assert_eq!(registry_asr_kind("asr-whisper-tiny"), None);
+        assert_eq!(registry_asr_kind("asr-whisper-base"), None);
+        assert_eq!(registry_asr_kind("asr-paraformer-bilingual-zh-en"), None);
+        assert_eq!(
+            registry_asr_kind("asr-paraformer-trilingual-zh-cantonese-en"),
+            None
+        );
+        assert_eq!(
+            registry_asr_kind("asr-streaming-small-bilingual-zh-en"),
+            None
+        );
+        assert_eq!(registry_asr_kind("asr-streaming-zh-14m"), None);
     }
 
     #[test]

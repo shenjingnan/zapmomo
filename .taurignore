@@ -1,0 +1,10 @@
+# tauri dev 文件监听排除（gitignore 语义，锚定在仓库根/工作区根）。
+# 仅排除与桌面 app 构建无关的顶层目录；根 crate（src/）与工作区清单保持监听，
+# 使根 crate 的 Rust 变更仍能正常触发重建。存在本文件后，tauri 内置规则
+# （node_modules/、target/、gen/、Cargo.lock、.DS_Store）会一并锚定到仓库根生效。
+/docs/
+/models/
+/scripts/
+/tests/
+/.githooks/
+/.github/
