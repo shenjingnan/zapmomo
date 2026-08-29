@@ -33,7 +33,8 @@ pub const PUNCT_REQUIRED_FILES: [&str; 1] = [DEFAULT_PUNCT_MODEL];
 ///
 /// 全链路显式传递：`[asr].model_type`（持久化）→ `ResolvedAsrConfig.model_type` →
 /// 引擎构造分支（`AsrEngine` 流式 / `offline::OfflineAsrEngine` 离线）。默认 Zipformer
-/// （streaming zipformer transducer，现状 6 个注册模型），老配置无该字段时按目录内容探测兜底。
+/// （streaming zipformer transducer），老配置无该字段时按目录内容探测兜底。
+/// 注：模型库已精简为 zipformer + qwen3，但引擎仍识别全部族（兼容已装/手工导入目录）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AsrModelKind {

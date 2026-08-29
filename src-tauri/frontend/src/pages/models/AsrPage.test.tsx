@@ -138,7 +138,7 @@ type LibraryStub = {
   ownership: string;
 };
 
-/** 默认模型库桩：双语已装为当前，zh-14m 未装（弹窗只依赖这两条）。 */
+/** 默认模型库桩：双语已装为当前，qwen3 未装（弹窗只依赖这两条）。 */
 function defaultAsrModelLibrary(): LibraryStub[] {
   return [
     {
@@ -154,8 +154,8 @@ function defaultAsrModelLibrary(): LibraryStub[] {
       ownership: "managed",
     },
     {
-      id: "asr-streaming-zh-14m",
-      displayName: "Streaming Zipformer ASR zh 14M",
+      id: "asr-qwen3-0.6b-audiocpp",
+      displayName: "Qwen3-ASR 0.6B (audio.cpp)",
       modelType: "asr",
       installState: "not_installed",
       current: false,
@@ -220,11 +220,11 @@ function defaultInvoke(cmd: string, args?: Record<string, unknown>) {
     case "set_current_model":
       return Promise.resolve({
         modelType: "asr",
-        modelId: "asr-streaming-zh-14m",
-        path: "/home/user/.zapmomo/models/sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23",
+        modelId: "asr-qwen3-0.6b-audiocpp",
+        path: "/home/user/.zapmomo/models/qwen3-asr-0.6b-audiocpp",
         runtimeAction: "restart_required",
         effectiveImmediately: false,
-        message: "已将 Streaming Zipformer ASR zh 14M 设为 ASR 当前模型，将在下次启动识别时生效",
+        message: "已将 Qwen3-ASR 0.6B (audio.cpp) 设为 ASR 当前模型，将在下次启动识别时生效",
       });
     case "get_tts_config":
       return Promise.resolve({ ...TTS_CONFIG });
@@ -939,28 +939,28 @@ describe("AsrPage（语音识别配置）", () => {
 
     await user.click(screen.getByRole("button", { name: "切换识别模型" }));
     expect(await screen.findByText("选择识别模型")).toBeInTheDocument();
-    // 弹窗内展示内置预设：双语为当前，zh-14m 未装 → 下载按钮
+    // 弹窗内展示内置预设：双语为当前，qwen3 未装 → 下载按钮
     expect(screen.getByText("Streaming Zipformer ASR zh-en")).toBeInTheDocument();
-    expect(screen.getByText("Streaming Zipformer ASR zh 14M")).toBeInTheDocument();
+    expect(screen.getByText("Qwen3-ASR 0.6B (audio.cpp)")).toBeInTheDocument();
     // 「当前模型」徽标依赖 list_model_library 异步返回（列表加载前两行都是下载按钮）；
     // 页面行标签与弹窗徽标同名，取全部匹配断言两者都在
     const currentBadges = await screen.findAllByText("当前模型");
     expect(currentBadges.length).toBeGreaterThanOrEqual(2);
     expect(
-      await screen.findByRole("button", { name: "下载Streaming Zipformer ASR zh 14M" }),
+      await screen.findByRole("button", { name: "下载Qwen3-ASR 0.6B (audio.cpp)" }),
     ).toBeInTheDocument();
   });
 
   it("正在识别时切换模型：set_current_model 后自动重启识别（stop → start）", async () => {
     asrConfig = { ...asrConfig, models_present: true };
-    // zh-14m 已安装，可设为当前
+    // qwen3 已安装，可设为当前
     modelLibrary = defaultAsrModelLibrary().map((m) =>
-      m.id === "asr-streaming-zh-14m"
+      m.id === "asr-qwen3-0.6b-audiocpp"
         ? {
             ...m,
             installState: "installed",
             localPath:
-              "/home/user/.zapmomo/models/sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23",
+              "/home/user/.zapmomo/models/qwen3-asr-0.6b-audiocpp",
             installId: m.id,
           }
         : m,
@@ -976,13 +976,13 @@ describe("AsrPage（语音识别配置）", () => {
     });
     invokeMock.mockClear();
 
-    // 打开切换弹窗，把 zh-14m 设为当前
+    // 打开切换弹窗，把 qwen3 设为当前
     await user.click(screen.getByRole("button", { name: "切换识别模型" }));
     await user.click(await screen.findByRole("button", { name: "设为当前" }));
 
     await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith("set_current_model", {
-        id: "asr-streaming-zh-14m",
+        id: "asr-qwen3-0.6b-audiocpp",
       });
     });
     // 后端返回 restart_required → 前端重启识别使新模型立即生效（只带 device，无 keywords）
@@ -997,12 +997,12 @@ describe("AsrPage（语音识别配置）", () => {
   it("未识别时切换模型：只写配置，不重启识别", async () => {
     asrConfig = { ...asrConfig, models_present: true };
     modelLibrary = defaultAsrModelLibrary().map((m) =>
-      m.id === "asr-streaming-zh-14m"
+      m.id === "asr-qwen3-0.6b-audiocpp"
         ? {
             ...m,
             installState: "installed",
             localPath:
-              "/home/user/.zapmomo/models/sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23",
+              "/home/user/.zapmomo/models/qwen3-asr-0.6b-audiocpp",
             installId: m.id,
           }
         : m,
@@ -1016,7 +1016,7 @@ describe("AsrPage（语音识别配置）", () => {
 
     await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith("set_current_model", {
-        id: "asr-streaming-zh-14m",
+        id: "asr-qwen3-0.6b-audiocpp",
       });
     });
     expect(invokeMock).not.toHaveBeenCalledWith("stop_asr_listen");
@@ -1026,18 +1026,10 @@ describe("AsrPage（语音识别配置）", () => {
   it("模型族切换后高级参数草稿按新键集重建，不崩溃（qwen3→zipformer 回归）", async () => {
     // 初始：qwen3 离线族 → 高级参数数字草稿仅 num_threads 一个键
     asrConfig = { ...asrConfig, model_type: "qwen3_asr", models_present: true };
-    // zh-14m（zipformer 族）已装非当前，供「设为当前」；切换后 get_asr_config 返回
+    // 双语（zipformer 族）已装非当前，供「设为当前」；切换后 get_asr_config 返回
     // zipformer → numericKeys 从 1 个扩到 6 个（补 blank_penalty/断句等）
     modelLibrary = defaultAsrModelLibrary().map((m) =>
-      m.id === "asr-streaming-zh-14m"
-        ? {
-            ...m,
-            installState: "installed",
-            localPath:
-              "/home/user/.zapmomo/models/sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23",
-            installId: m.id,
-          }
-        : m,
+      m.id === "asr-streaming-bilingual-zh-en" ? { ...m, current: false } : m,
     );
     invokeMock.mockImplementation((cmd: string, args?: Record<string, unknown>) => {
       if (cmd === "set_current_model") {
@@ -1053,7 +1045,7 @@ describe("AsrPage（语音识别配置）", () => {
     await user.click(await screen.findByRole("button", { name: "设为当前" }));
     await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith("set_current_model", {
-        id: "asr-streaming-zh-14m",
+        id: "asr-streaming-bilingual-zh-en",
       });
     });
 

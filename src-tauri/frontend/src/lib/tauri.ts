@@ -15,6 +15,7 @@ import type {
   AsrResult,
   CompanionDragMode,
   CompanionLibraryView,
+  CompanionSpriteEvent,
   CompanionWindowLayer,
   ConversationRecord,
   DeviceEventPayload,
@@ -286,6 +287,13 @@ export function onLive2dModelChanged(
   handler: (info: Live2dModelInfo) => void,
 ): Promise<UnlistenFn> {
   return listen<Live2dModelInfo>("live2d-model-changed", (e) => handler(e.payload));
+}
+
+/** `companion-sprite-changed`：LLM 工具切换角色形象（path 为图片绝对路径，default = 默认立绘） */
+export function onCompanionSpriteChanged(
+  handler: (ev: CompanionSpriteEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<CompanionSpriteEvent>("companion-sprite-changed", (e) => handler(e.payload));
 }
 
 export function onCompanionScaleChanged(handler: (scale: number) => void): Promise<UnlistenFn> {

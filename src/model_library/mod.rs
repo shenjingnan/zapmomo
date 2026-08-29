@@ -1574,24 +1574,17 @@ mod tests {
     fn test_set_selected_asr_persists_model_type_from_registry_name() {
         run_with_temp_home(|home| {
             // managed 安装目录名 == registry `name` → 切换时推导并持久化对应 kind
-            let sense = home.join("models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17");
-            set_selected_model(ModelType::Asr, &sense).unwrap();
+            // （sherpa Qwen3-ASR 已移除，registry 中带 asr_kind 的是 audiocpp 条目）
+            let qwen3 = home.join("models/qwen3-asr-0.6b-audiocpp");
+            set_selected_model(ModelType::Asr, &qwen3).unwrap();
             let cfg = settings::load_settings().unwrap().unwrap();
             assert_eq!(
                 cfg.asr.as_ref().and_then(|a| a.model_type),
-                Some(crate::asr::config::AsrModelKind::SenseVoice)
-            );
-
-            let whisper = home.join("models/sherpa-onnx-whisper-tiny");
-            set_selected_model(ModelType::Asr, &whisper).unwrap();
-            let cfg = settings::load_settings().unwrap().unwrap();
-            assert_eq!(
-                cfg.asr.as_ref().and_then(|a| a.model_type),
-                Some(crate::asr::config::AsrModelKind::Whisper)
+                Some(crate::asr::config::AsrModelKind::Qwen3Asr)
             );
 
             // streaming zipformer：asr_kind 缺省 None → 复位 model_type，
-            // 交回 resolve 按目录内容探测（残留 whisper 的 Some 值会用旧探针
+            // 交回 resolve 按目录内容探测（残留 qwen3 的 Some 值会用旧探针
             // 校验新目录，误报「模型文件缺失」）
             let zip =
                 home.join("models/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20");
@@ -1601,6 +1594,17 @@ mod tests {
                 cfg.asr.as_ref().and_then(|a| a.model_type),
                 None,
                 "无 asr_kind 的 streaming 目录应复位 model_type 交回目录探测"
+            );
+
+            // 已从模型库移除的模型目录（老用户已装/外部导入）：registry 反查
+            // 不到 → model_type 保持 None，同样交回目录探测兜底，识别仍可用
+            let removed = home.join("models/sherpa-onnx-whisper-tiny");
+            set_selected_model(ModelType::Asr, &removed).unwrap();
+            let cfg = settings::load_settings().unwrap().unwrap();
+            assert_eq!(
+                cfg.asr.as_ref().and_then(|a| a.model_type),
+                None,
+                "已移除的 registry 模型目录不得持久化 model_type"
             );
 
             // 文件级覆盖与族专属参数全部重置
@@ -1664,8 +1668,10 @@ mod tests {
     #[test]
     fn test_set_selected_asr_audiocpp_backend_and_hotwords() {
         run_with_temp_home(|home| {
-            // 先切 sherpa Qwen3-ASR 并配上热词
-            let sherpa = home.join("models/sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25");
+            // 先切默认 zipformer（sherpa 侧）并配上热词
+            // （sherpa Qwen3-ASR 已移除，zipformer 是仅存的 sherpa ASR 条目）
+            let sherpa =
+                home.join("models/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20");
             set_selected_model(ModelType::Asr, &sherpa).unwrap();
             update_settings(|cfg| {
                 let asr = cfg.asr.get_or_insert_with(Default::default);
@@ -1674,10 +1680,7 @@ mod tests {
             .unwrap();
             let cfg = settings::load_settings().unwrap().unwrap();
             let a = cfg.asr.as_ref().unwrap();
-            assert_eq!(
-                a.model_type,
-                Some(crate::asr::config::AsrModelKind::Qwen3Asr)
-            );
+            assert_eq!(a.model_type, None, "zipformer 条目 asr_kind 缺省应复位");
             assert_eq!(a.backend, None, "sherpa 条目后端归位缺省");
 
             // 切 audiocpp Qwen3-ASR：backend 写 audiocpp + 热词清空（上游无热词能力）
@@ -1801,13 +1804,11 @@ mod tests {
     #[test]
     fn test_staged_assets_excludes_optional() {
         // ASR：required 1 个 + optional punctuation → staging 只装 required，字节两者都计
-        let asr = registry::model_by_id("asr-streaming-zh-14m").unwrap();
+        let asr = registry::model_by_id("asr-streaming-bilingual-zh-en").unwrap();
         let (assets, total) = staged_assets(asr).unwrap();
         assert_eq!(assets.len(), 1, "punctuation 不得进 staging 清单");
-        assert_eq!(assets[0].0.role, "asr-zh-14m");
-        let req = crate::kws::model::asset_by_role("asr-zh-14m")
-            .unwrap()
-            .size_bytes;
+        assert_eq!(assets[0].0.role, "asr");
+        let req = crate::kws::model::asset_by_role("asr").unwrap().size_bytes;
         let opt = crate::kws::model::asset_by_role("punctuation")
             .unwrap()
             .size_bytes;

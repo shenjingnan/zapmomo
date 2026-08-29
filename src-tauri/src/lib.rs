@@ -27,6 +27,7 @@ use zapmomo::companion_click_through::{
     CompanionPointerPolicy, EXIT_MARGIN_PX, HitRect, cursor_hit, desired_ignore_cursor_events,
     next_hold, resolve_smart_click_through,
 };
+use zapmomo::companion_sprites::SpriteEvent;
 use zapmomo::config::settings::{
     self, AsrSettings, BubbleSettings, ChatboxSettings, CompanionDragMode, CompanionWindowLayer,
     CompanionWindowPosition, KwsSettings, Live2dSettings, LlmSettings, TtsSettings,
@@ -1555,6 +1556,17 @@ fn forward_llm_events(
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }
+    }
+}
+
+/// 把根 crate 的形象切换通知转发为前端事件（`companion-sprite-changed`）。
+///
+/// Sender 由 `zapmomo::companion_sprites::register_notifier` 全局持有、进程内
+/// 永不关闭，本线程随应用生命周期常驻（`Disconnected` 不可达，保守处理为退出）；
+/// emit 失败（无接收窗口等）仅忽略。
+fn forward_sprite_events(app: AppHandle, rx: std::sync::mpsc::Receiver<SpriteEvent>) {
+    while let Ok(ev) = rx.recv() {
+        let _ = app.emit("companion-sprite-changed", ev);
     }
 }
 
@@ -5892,6 +5904,16 @@ pub fn run() {
                 } else {
                     tauri::ActivationPolicy::Regular
                 })?;
+            }
+
+            // 角色形象切换桥：LLM 工具（set_character_sprite）在根 crate 内执行，
+            // 经全局通道转发为前端事件（角色窗口换立绘）。Sender 由根 crate 全局持有，
+            // 转发线程随应用生命周期常驻。
+            {
+                let (sprite_tx, sprite_rx) = std::sync::mpsc::channel::<SpriteEvent>();
+                zapmomo::companion_sprites::register_notifier(sprite_tx);
+                let handle = app.handle().clone();
+                std::thread::spawn(move || forward_sprite_events(handle, sprite_rx));
             }
 
             // 启动自动启动语音会话（若用户启用 voice）：进入待唤醒（Armed），失败静默降级。

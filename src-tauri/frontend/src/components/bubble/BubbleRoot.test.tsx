@@ -128,6 +128,26 @@ describe("BubbleRoot（气泡窗口根组件）", () => {
     await waitFor(() => expect(setIgnoreMock).toHaveBeenLastCalledWith(false));
   });
 
+  it("用户句经 transcript is_final 渲染「我：」前缀并恢复接收鼠标", async () => {
+    render(<BubbleRoot />);
+    await waitFor(() => expect(setIgnoreMock).toHaveBeenCalledWith(true));
+    emit("voice-session-transcript", { text: "你好", is_final: true });
+    expect(screen.getByText("我：你好")).toBeTruthy();
+    await waitFor(() => expect(setIgnoreMock).toHaveBeenCalledWith(false));
+  });
+
+  it("同文本连发（turnSeq 递增）仍开启新一轮，顶掉上一轮静置回复", async () => {
+    render(<BubbleRoot />);
+    emit("voice-session-transcript", { text: "继续", is_final: true });
+    emit("voice-session-token", { delta: "好的" });
+    emit("voice-session-reply-finished", { reason: "Eos", text: "好的" });
+    expect(screen.getByText("好的")).toBeTruthy();
+    // 同文本第二轮：仅按 userText 值判不出新轮，靠 turnSeq 自增顶掉静置旧回复
+    emit("voice-session-transcript", { text: "继续", is_final: true });
+    expect(screen.getByText("我：继续")).toBeTruthy();
+    expect(screen.queryByText("好的")).toBeNull();
+  });
+
   it("拖动停止后以逻辑像素回写位置（save_bubble_position）", async () => {
     render(<BubbleRoot />);
     await waitFor(() => expect(onMovedHandlers.current).toBeTruthy());

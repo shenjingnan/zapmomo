@@ -195,6 +195,16 @@ export interface Live2dModelInfo {
   window_position?: { x: number; y: number } | null;
 }
 
+/** `companion-sprite-changed` 事件载荷（LLM 工具切换角色形象；形象是会话态，不持久化） */
+export interface CompanionSpriteEvent {
+  /** 事件所属伙伴 id（前端以路径前缀校验归属，此字段供诊断/未来使用） */
+  companion_id: string;
+  /** 形象名（sprites/ 文件名 stem）；"default" = 恢复默认立绘 */
+  name: string;
+  /** 图片绝对路径（default 时为该伙伴的 character.png） */
+  path: string;
+}
+
 // ---- 表演（BongoCat 兼容模拟键鼠）----
 
 /** 表演场景（"both" = 键鼠同动，同时驱动键盘 + 鼠标两个通道） */

@@ -1,0 +1,7 @@
+# tauri dev 文件监听排除（gitignore 语义，锚定在 src-tauri/）。
+# 前端变更由 Vite HMR 直接热更新到各 webview，无需杀掉/重启整个 app；
+# 排除后仅 Rust 源码（src/）、tauri.conf.json、capabilities、Cargo.toml 等变更才触发重建。
+# 注意：内置忽略规则（node_modules/、target/、gen/ 等）只有在存在 .taurignore 时才会生效，
+#   故本文件不能删——否则 frontend/node_modules 下的任何写入（vitest 缓存、tsbuildinfo、
+#   编辑器临时文件）都会触发整 app 重启，语音会话会被反复打断、状态长期卡在「启动中」。
+frontend/
