@@ -482,6 +482,7 @@ export interface DshConfigInfo {
   enabled: boolean;
   port: number;
   voice_enabled: boolean;
+  llm_enabled: boolean;
   record_to_history: boolean;
   running: boolean;
   actual_port: number | null;
@@ -493,6 +494,7 @@ export interface DshConfigInfo {
 /** `set_dsh_params` 载荷（snake_case 直传，缺省项不修改） */
 export interface DshParamsPatch {
   voice_enabled?: boolean;
+  llm_enabled?: boolean;
   record_to_history?: boolean;
   port?: number;
 }

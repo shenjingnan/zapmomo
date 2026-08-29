@@ -53,7 +53,11 @@ export function DshSection() {
     }
   };
 
-  const patchParams = async (params: { voice_enabled?: boolean; record_to_history?: boolean }) => {
+  const patchParams = async (params: {
+    voice_enabled?: boolean;
+    llm_enabled?: boolean;
+    record_to_history?: boolean;
+  }) => {
     setBusy(true);
     try {
       await api.setDshParams({ params });
@@ -101,6 +105,15 @@ export function DshSection() {
             checked={info.voice_enabled}
             disabled={busy || !info.enabled}
             onCheckedChange={(v) => void patchParams({ voice_enabled: v })}
+          />
+        </div>
+        <div className="flex items-center justify-between gap-4 text-sm">
+          <span>LLM 播报文案（未连接或生成中回退固定台词）</span>
+          <Switch
+            aria-label="LLM 播报文案"
+            checked={info.llm_enabled}
+            disabled={busy || !info.enabled}
+            onCheckedChange={(v) => void patchParams({ llm_enabled: v })}
           />
         </div>
         <div className="flex items-center justify-between gap-4 text-sm">
