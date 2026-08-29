@@ -2049,6 +2049,8 @@ struct DshBridgeState {
     last_error: Mutex<Option<String>>,
     /// 懒构建的播报器（TTS 模型未就绪时为 None，下次事件重试构建；失败不缓存）
     announcer: Mutex<Option<std::sync::Arc<zapmomo::dsh::announce::Announcer>>>,
+    /// 懒构建的 LLM 播报 worker（进程级单例；桥重启不重建）
+    llm_worker: Mutex<Option<std::sync::Arc<DshLlmWorker>>>,
 }
 
 impl DshBridgeState {
@@ -2059,6 +2061,7 @@ impl DshBridgeState {
             port: Mutex::new(Arc::new(AtomicU16::new(0))),
             last_error: Mutex::new(None),
             announcer: Mutex::new(None),
+            llm_worker: Mutex::new(None),
         }
     }
 
@@ -2104,7 +2107,11 @@ struct DshBridgeStatusPayload {
     error: Option<String>,
 }
 
-/// dsh 事件处理管线：节流 → 模板台词 → `dsh-speak` emit → TTS 播报 + 对话记录落盘。
+/// dsh 事件处理管线：节流 → 投递给 LLM 播报 worker（覆盖式单槽）。
+///
+/// 桥线程只投递不等待：LLM 生成秒级耗时，原地等待会阻塞 serve 收下一条事件
+/// （sink 在桥线程内联执行）；文案生成、气泡 emit、TTS 播报、落盘都在
+/// dsh-llm worker 内完成。
 fn handle_dsh_event(
     app: &AppHandle,
     throttle: &zapmomo::dsh::EventThrottle,
@@ -2118,9 +2125,131 @@ fn handle_dsh_event(
         );
         return;
     }
-    let text = zapmomo::dsh::lines::pick_line(&event, zapmomo::dsh::lines::next_roll());
+    dsh_llm_worker(app).submit(event);
+}
+
+/// dsh LLM 播报 worker：覆盖式单槽 + 条件变量，串行执行「文案生成 → 气泡/TTS/落盘」。
+///
+/// - 桥线程只投递不等待（见 [`handle_dsh_event`]）
+/// - 覆盖式：上一条未处理完时新事件替换旧事件——最新任务状态最值得播报
+///   （同节流护栏口径：风暴场景只留最新）
+/// - 线程常驻进程生命周期：空闲时阻塞在 Condvar 无 CPU 消耗，无独立资源需释放
+struct DshLlmWorker {
+    slot: Arc<WorkerSlot>,
+}
+
+struct WorkerSlot {
+    event: Mutex<Option<zapmomo::dsh::event::DshEvent>>,
+    signal: std::sync::Condvar,
+}
+
+impl DshLlmWorker {
+    fn spawn(app: AppHandle) -> Self {
+        let slot = Arc::new(WorkerSlot {
+            event: Mutex::new(None),
+            signal: std::sync::Condvar::new(),
+        });
+        let worker_slot = slot.clone();
+        // 命名线程便于日志定位（同 dsh-announce / llm-worker 惯例）
+        std::thread::Builder::new()
+            .name("dsh-llm".to_string())
+            .spawn(move || {
+                loop {
+                    let event = {
+                        let mut guard = worker_slot
+                            .event
+                            .lock()
+                            .expect("dsh-llm slot lock poisoned");
+                        loop {
+                            match guard.take() {
+                                Some(ev) => break ev,
+                                // 虚假唤醒安全：槽空继续等
+                                None => {
+                                    guard = worker_slot
+                                        .signal
+                                        .wait(guard)
+                                        .expect("dsh-llm slot lock poisoned");
+                                }
+                            }
+                        }
+                    };
+                    narrate_event(&app, event);
+                }
+            })
+            .expect("spawn dsh-llm 线程失败");
+        Self { slot }
+    }
+
+    /// 投递事件：槽中未处理事件被本条替换（只保留最新状态）。
+    fn submit(&self, event: zapmomo::dsh::event::DshEvent) {
+        let mut guard = self.slot.event.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.is_some() {
+            tracing::debug!("dsh LLM 播报忙，未处理事件被最新事件替换");
+        }
+        *guard = Some(event);
+        self.slot.signal.notify_one();
+    }
+}
+
+/// 取（或懒构建）LLM 播报 worker（进程级单例；桥重启不重建）。
+fn dsh_llm_worker(app: &AppHandle) -> Arc<DshLlmWorker> {
+    let state = app.state::<DshBridgeState>();
+    let mut slot = state.llm_worker.lock().unwrap_or_else(|e| e.into_inner());
+    slot.get_or_insert_with(|| Arc::new(DshLlmWorker::spawn(app.clone())))
+        .clone()
+}
+
+/// 决策并产出播报文本：LLM 文案或模板台词（气泡 / TTS / 落盘共用同一份）。
+///
+/// 走 LLM 的条件见 `narrate::should_use_llm`（dsh/LLM 开关 + 引擎就绪 + 空闲）；
+/// 生成发起失败 / 出错 / 超时 / 清洗后无文本一律回退模板台词（气泡永不缺席）。
+fn narrate_text(app: &AppHandle, event: &zapmomo::dsh::event::DshEvent) -> String {
+    // 事件时实时读设置，开关即时生效
+    let settings = zapmomo::config::settings::load_settings().unwrap_or_default();
+    let dsh_cfg = zapmomo::dsh::config::resolve(settings.as_ref().and_then(|s| s.dsh.as_ref()));
+    let llm_cfg =
+        match zapmomo::llm::config::resolve(settings.as_ref().and_then(|s| s.llm.as_ref())) {
+            Ok(c) => c,
+            // 配置解析异常视为 LLM 不可用，模板台词兜底
+            Err(e) => {
+                tracing::warn!("dsh LLM 配置解析失败，回退模板台词: {e}");
+                return zapmomo::dsh::lines::pick_line(event, zapmomo::dsh::lines::next_roll());
+            }
+        };
+    let engine = app
+        .state::<LlmState>()
+        .engine
+        .lock()
+        .expect("llm lock poisoned")
+        .clone();
+    let engine_ready = engine.as_ref().is_some_and(|e| e.is_ready());
+    let engine_generating = engine.as_ref().is_some_and(|e| e.is_generating());
+    if !zapmomo::dsh::narrate::should_use_llm(
+        dsh_cfg.llm_enabled,
+        llm_cfg.enabled,
+        engine_ready,
+        engine_generating,
+    ) {
+        return zapmomo::dsh::lines::pick_line(event, zapmomo::dsh::lines::next_roll());
+    }
+    let engine = engine.expect("should_use_llm 通过后引擎必然存在");
+    zapmomo::dsh::narrate::generate_narration(
+        &engine,
+        event,
+        &llm_cfg.params,
+        zapmomo::dsh::narrate::NARRATE_TIMEOUT,
+    )
+    .unwrap_or_else(|| {
+        tracing::info!("dsh LLM 播报未产出文本，回退模板台词");
+        zapmomo::dsh::lines::pick_line(event, zapmomo::dsh::lines::next_roll())
+    })
+}
+
+/// 单事件播报（在 dsh-llm worker 线程串行执行）：
+/// LLM 文案（不可用/失败降级模板）→ `dsh-speak` 气泡 → TTS 播报 → 对话记录落盘。
+fn narrate_event(app: &AppHandle, event: zapmomo::dsh::event::DshEvent) {
+    let text = narrate_text(app, &event);
     tracing::info!("dsh 事件播报: kind={} text={text}", event.kind());
-    // 先 emit 气泡（立即，不等语音），再异步语音与落盘
     let _ = app.emit(
         "dsh-speak",
         DshSpeakPayload {
@@ -2129,7 +2258,6 @@ fn handle_dsh_event(
         },
     );
 
-    // 事件时实时读设置，开关即时生效
     let settings = zapmomo::config::settings::load_settings().unwrap_or_default();
     let cfg = zapmomo::dsh::config::resolve(settings.as_ref().and_then(|s| s.dsh.as_ref()));
     // 语音播报：voice 会话运行中不出声（不打断对话）；TTS 未就绪只出气泡
@@ -2144,7 +2272,7 @@ fn handle_dsh_event(
     if cfg.record_to_history && !text.is_empty() {
         records::append_record(records::ConversationRecord {
             role: records::RecordRole::Assistant,
-            text: text.clone(),
+            text,
             at: iso_timestamp_now(),
         });
     }
@@ -2302,6 +2430,7 @@ struct DshConfigInfo {
     enabled: bool,
     port: u16,
     voice_enabled: bool,
+    llm_enabled: bool,
     record_to_history: bool,
     running: bool,
     /// 实际监听端口（RuntimeActual；None = 未就绪）
@@ -2320,6 +2449,7 @@ fn get_dsh_config(state: State<'_, DshBridgeState>) -> Result<DshConfigInfo, Str
         enabled: cfg.enabled,
         port: cfg.port,
         voice_enabled: cfg.voice_enabled,
+        llm_enabled: cfg.llm_enabled,
         record_to_history: cfg.record_to_history,
         running: state.is_running(),
         actual_port: (actual != 0).then_some(actual),
@@ -2359,6 +2489,7 @@ fn set_dsh_enabled(
 #[derive(Debug, Clone, Default, Deserialize)]
 struct DshParamsPatch {
     voice_enabled: Option<bool>,
+    llm_enabled: Option<bool>,
     record_to_history: Option<bool>,
     port: Option<u16>,
 }
@@ -2383,6 +2514,9 @@ fn set_dsh_params(
     let dsh = settings.dsh.get_or_insert_with(Default::default);
     if let Some(v) = params.voice_enabled {
         dsh.voice_enabled = Some(v);
+    }
+    if let Some(v) = params.llm_enabled {
+        dsh.llm_enabled = Some(v);
     }
     if let Some(v) = params.record_to_history {
         dsh.record_to_history = Some(v);

@@ -8,6 +8,7 @@ pub mod announce;
 pub mod config;
 pub mod event;
 pub mod lines;
+pub mod narrate;
 
 use crate::config::settings;
 use serde::{Deserialize, Serialize};
