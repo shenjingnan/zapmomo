@@ -195,7 +195,21 @@ mod tests {
             synth_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
             "你好"
         );
-        let plays = plays.lock().unwrap().clone();
+        // 合成闭包**先回传文本、后产出音频块**：recv 命中不保证 on_chunk 已执行完
+        // （worker 在另一线程，tarpaulin 插桩会进一步拉大线程间隔），立即断言是
+        // 时序竞争——轮询等两块都落进共享 Vec 再比较（有界，不吞真失败）。
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let plays = loop {
+            let snapshot = plays.lock().unwrap().clone();
+            if snapshot.len() >= 2 {
+                break snapshot;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "音频块未按时到达播放器: {snapshot:?}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
         assert_eq!(
             plays,
             vec![(vec![0.1, 0.2], 24000), (vec![0.3], 24000),],
