@@ -26,7 +26,7 @@
 ///
 /// 打断序列（四来源）：KWS 命中 → 暂存来源回 Armed；快捷键 → 共享标志回 Armed；
 /// 文字输入 → 打断后处理文本；语音打断（ASR partial 判定 + 回声过滤通过）→ 已播
-/// 句子入历史、**保留 ASR 流**进 Listening 直接接话。公共序列：`llm.cancel()` +
+/// 句子入历史、重建 ASR 流进 Listening 直接接话（转写只含打断后的话）。公共序列：`llm.cancel()` +
 /// `speaker.stop()` + `synth.cancel_all()` + `current_gen += 1`（作废在途合成结果）
 /// + `skip_for` 丢回声尾巴。
 use crate::asr::{AsrReaction, AsrResult};
@@ -165,10 +165,6 @@ pub struct VoiceSession {
     barge_echo_ref: Option<String>,
     /// 语音打断触发判定器（Speaking/Thinking 期间每 chunk 观察，连续命中即触发）。
     barge_detector: VoiceBargeInDetector,
-    /// 一次性跳过「进 Listening 时的 ASR 流复位」：语音打断要保留流上下文保住用户
-    /// 话头（回声漏网由 `handle_user_final` 后置过滤兜底）；其余进 Listening 路径
-    /// （跟听/等说话/文字输入）保持复位行为不变。
-    skip_asr_reset_once: bool,
     /// KWS 命中的来源暂存（`listen_barge_in` 内置位，run loop 顶部消费）：区别于
     /// 快捷键（共享标志置位时此处为 None → 归 `BargeInSource::Hotkey`）。
     pending_barge_source: Option<BargeInSource>,
@@ -287,7 +283,6 @@ impl VoiceSession {
             echo: EchoTracker::default(),
             barge_echo_ref: None,
             barge_detector,
-            skip_asr_reset_once: false,
             pending_barge_source: None,
             t_wake: None,
             t_reply_start: None,
@@ -442,11 +437,9 @@ impl VoiceSession {
         match next {
             SessionState::Listening => {
                 // 复位后端：流式重建流（丢上轮识别状态）；离线清空 PCM 缓冲。
-                // 例外：语音打断（skip_asr_reset_once）保留流上下文保住用户话头，
-                // 已喂入的播报期音频的回声残留由 handle_user_final 后置过滤兜底。
-                if !std::mem::take(&mut self.skip_asr_reset_once) {
-                    self.asr.reset(&self.cfg.asr);
-                }
+                // 语音打断同样复位（转写只含打断之后说的话）：流式识别是流内累积
+                // 语义，保留流会把打断前喂入的播报回声与用户语音叠加进最终转写。
+                self.asr.reset(&self.cfg.asr);
                 self.silence_accum = 0.0;
             }
             SessionState::WaitingSpeech => {
@@ -1028,7 +1021,11 @@ impl VoiceSession {
     /// 语音打断（ASR 判定用户在说话）：与 [`Self::do_barge_in`] 的差异——
     /// 1. 已播出的句子入历史（assistant），LLM 下一轮知道自己说过什么；
     /// 2. 回声参考快照存入 `barge_echo_ref`，供 `handle_user_final` 后置兜底比对；
-    /// 3. 进 Listening 直接接话（不回待唤醒），且**保留 ASR 流**保住用户话头。
+    /// 3. 进 Listening 直接接话（不回待唤醒）。
+    ///
+    /// 进 Listening 会**照常重建 ASR 流**：流式识别是流内累积语义，保留流会把打断
+    /// 前喂入的播报回声与用户语音全部叠加进最终转写（说话内容越叠越多）。重置后
+    /// 转写只含「打断之后」说的话；打断瞬间已出口的半截话随流丢弃，用户重说即可。
     fn do_barge_in_voice(&mut self) {
         (self.emit)(VoiceEvent::BargeIn {
             source: BargeInSource::Voice,
@@ -1049,15 +1046,13 @@ impl VoiceSession {
             self.barge_echo_ref = Some(echo_ref);
         }
         self.echo.clear();
-        self.skip_asr_reset_once = true;
         if let Err(e) = self.set_state(SessionEvent::VoiceBargeIn) {
             (self.emit)(VoiceEvent::Error {
                 kind: ErrorKind::BargeIn,
                 message: e,
             });
         }
-        // 丢回声尾巴：打断瞬间扬声器残余会污染收音。已知代价：话头中间约 300ms
-        // 不进流——打断判定发生时用户已说了几百 ms，且主体内容在其后，可接受。
+        // 丢回声尾巴：打断瞬间扬声器残余不进新流，避免被判作用户语音。
         self.mic.skip_for(SKIP_AFTER_BARGE_IN);
     }
 
