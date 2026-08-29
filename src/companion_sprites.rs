@@ -13,7 +13,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc::Sender;
 
 use serde::Serialize;
 
@@ -194,6 +194,7 @@ pub fn apply_tool_call(arguments: &str) -> String {
 mod tests {
     use super::*;
     use crate::test_util::run_with_temp_home;
+    use std::sync::mpsc;
     use std::time::Duration;
 
     /// 构造最小合法角色包（character.md + character.png）。

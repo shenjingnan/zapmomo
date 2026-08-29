@@ -563,7 +563,7 @@ describe("CompanionRoot（角色形象切换）", () => {
     configState.format = "character";
   });
 
-  it("收到 sprite 事件（路径在当前伙伴目录内）→ 切换 img src", async () => {
+  it("收到 sprite 事件（路径在当前伙伴目录内）→ 切换 img src 为 asset 协议 URL", async () => {
     render(<CompanionRoot />);
     await waitForConfigApplied();
     expect(currentImgSrc()).toContain("character.png");
@@ -573,6 +573,9 @@ describe("CompanionRoot（角色形象切换）", () => {
       name: "happy",
       path: "/zap/companions/c/sprites/happy.png",
     });
+    // 事件载荷是裸文件路径，必须经 toAssetUrl 转成 asset:// 协议 URL 才能
+    // 被 WebView 加载（回归防护：直接传裸路径会静默 404 白屏）。
+    expect(currentImgSrc()).toMatch(/^asset:\/\/localhost\//);
     expect(currentImgSrc()).toContain("sprites/happy.png");
   });
 
