@@ -34,6 +34,7 @@ const baseInfo = {
   enabled: true,
   port: 0,
   voice_enabled: true,
+  llm_enabled: true,
   record_to_history: true,
   running: true,
   actual_port: 52341,
@@ -70,6 +71,19 @@ describe("DshSection", () => {
     await waitFor(() => expect(invokeMock).toHaveBeenCalled());
     await userEvent.click(screen.getByRole("button", { name: /测试播报/ }));
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("test_dsh_announce"));
+  });
+
+  it("LLM 播报开关调用 set_dsh_params", async () => {
+    invokeMock.mockResolvedValue(baseInfo);
+    render(<DshSection />);
+    await waitFor(() => expect(invokeMock).toHaveBeenCalled());
+    const toggle = screen.getByRole("switch", { name: "LLM 播报文案" });
+    await userEvent.click(toggle);
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("set_dsh_params", {
+        params: { llm_enabled: false },
+      }),
+    );
   });
 
   it("桥错误经 status 事件渲染", async () => {
