@@ -16,6 +16,7 @@ const { invokeMock, startDraggingMock, setSizeMock, setPositionMock, configState
       locked: null as boolean | null,
       dragMode: null as CompanionDragMode | null,
       modelFile: null as string | null,
+      modelDir: null as string | null,
       format: null as string | null,
     },
     /** 按事件名捕获 listen 回调，供测试主动推送后端事件。 */
@@ -111,6 +112,7 @@ beforeEach(() => {
   configState.locked = null;
   configState.dragMode = null;
   configState.modelFile = null;
+  configState.modelDir = null;
   configState.format = null;
   for (const key of Object.keys(listenHandlers)) delete listenHandlers[key];
 
@@ -118,7 +120,7 @@ beforeEach(() => {
     switch (cmd) {
       case "get_live2d_config":
         return Promise.resolve({
-          model_dir: null,
+          model_dir: configState.modelDir,
           model_file: configState.modelFile,
           format: configState.format,
           models_present: configState.modelFile != null,
@@ -538,5 +540,107 @@ describe("CompanionRoot（智能穿透上报）", () => {
     expect(gifPayload).toEqual({
       rects: [{ x: 0, y: 72, width: 360, height: 480 }],
     });
+  });
+});
+
+describe("CompanionRoot（角色形象切换）", () => {
+  function pushSpriteEvent(payload: Record<string, unknown>) {
+    act(() => listenHandlers["companion-sprite-changed"](payload));
+  }
+
+  function pushModelChanged(payload: Record<string, unknown>) {
+    act(() => listenHandlers["live2d-model-changed"](payload));
+  }
+
+  function currentImgSrc() {
+    return screen.getByRole("img").getAttribute("src");
+  }
+
+  beforeEach(() => {
+    // 角色包伙伴：config 恢复自带托管目录，sprite 事件路径以此为归属校验基准。
+    configState.modelFile = "/zap/companions/c/character.png";
+    configState.modelDir = "/zap/companions/c";
+    configState.format = "character";
+  });
+
+  it("收到 sprite 事件（路径在当前伙伴目录内）→ 切换 img src", async () => {
+    render(<CompanionRoot />);
+    await waitForConfigApplied();
+    expect(currentImgSrc()).toContain("character.png");
+
+    pushSpriteEvent({
+      companion_id: "companion-c",
+      name: "happy",
+      path: "/zap/companions/c/sprites/happy.png",
+    });
+    expect(currentImgSrc()).toContain("sprites/happy.png");
+  });
+
+  it("default 事件（character.png 路径）→ 恢复默认立绘", async () => {
+    render(<CompanionRoot />);
+    await waitForConfigApplied();
+
+    pushSpriteEvent({
+      companion_id: "companion-c",
+      name: "happy",
+      path: "/zap/companions/c/sprites/happy.png",
+    });
+    expect(currentImgSrc()).toContain("sprites/happy.png");
+
+    pushSpriteEvent({
+      companion_id: "companion-c",
+      name: "default",
+      path: "/zap/companions/c/character.png",
+    });
+    expect(currentImgSrc()).toContain("character.png");
+  });
+
+  it("路径不在当前伙伴托管目录内 → 忽略（防切伙伴竞态下的陈旧事件）", async () => {
+    render(<CompanionRoot />);
+    await waitForConfigApplied();
+
+    pushSpriteEvent({
+      companion_id: "companion-other",
+      name: "happy",
+      path: "/zap/companions/OTHER/sprites/happy.png",
+    });
+    expect(currentImgSrc()).toContain("character.png");
+  });
+
+  it("切换伙伴 → sprite 覆盖重置回新伙伴默认立绘，旧伙伴的 sprite 事件被忽略", async () => {
+    render(<CompanionRoot />);
+    await waitForConfigApplied();
+    pushSpriteEvent({
+      companion_id: "companion-c",
+      name: "happy",
+      path: "/zap/companions/c/sprites/happy.png",
+    });
+    expect(currentImgSrc()).toContain("sprites/happy.png");
+
+    // 切到伙伴 B（角色包）：覆盖失效，回 B 的默认立绘。
+    pushModelChanged({
+      model_dir: "/zap/companions/b",
+      model_file: "/zap/companions/b/character.png",
+      format: "character",
+      props: null,
+    });
+    expect(currentImgSrc()).toContain("companions/b/character.png");
+    expect(currentImgSrc()).not.toContain("happy");
+
+    // 旧伙伴 A 的 sprite 事件迟到：路径不在 B 目录内 → 忽略。
+    pushSpriteEvent({
+      companion_id: "companion-c",
+      name: "sad",
+      path: "/zap/companions/c/sprites/sad.png",
+    });
+    expect(currentImgSrc()).toContain("companions/b/character.png");
+
+    // B 自己的 sprite 事件正常生效。
+    pushSpriteEvent({
+      companion_id: "companion-b",
+      name: "angry",
+      path: "/zap/companions/b/sprites/angry.png",
+    });
+    expect(currentImgSrc()).toContain("companions/b/sprites/angry.png");
   });
 });

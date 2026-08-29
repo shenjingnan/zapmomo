@@ -12,6 +12,8 @@ ZapMomo 当前支持 Live2D（`format="cubism3"`）和 GIF（`format="gif"`）�
 furina/
 ├── character.md            # 必选：角色人设（作为 LLM system prompt）
 ├── character.png           # 必选：静态立绘
+├── sprites/                # 可选：LLM 可切换的形象图（文件名 stem = 形象语义）
+│   └── happy.png 等        #     png/gif/webp；见 docs/plans/2026-08-29-llm-sprite-switch-design.md
 └── voice/                  # 可选：TTS 音色克隆参考
     ├── reference.wav       # 参考音频
     └── reference.txt       # 逐字转写（ZipVoice 克隆必填）
@@ -24,6 +26,7 @@ furina/
 | `character.md` | 必须存在且 trim 后非空；角色名从 H1（`# 名字`）提取，缺失回退目录名 |
 | `character.png` | 必须存在，前 8 字节 == `\x89PNG\r\n\x1a\n` |
 | `voice/` | 可选；存在则 `reference.wav` + `reference.txt` 必须成对（缺其一报错）；wav 校验 RIFF/WAVE 头，txt 非空 |
+| `sprites/` | 可选；不参与导入校验。存在且非空时 LLM 动态注册 `set_character_sprite` 工具切换形象（文件名 stem 即形象名，支持 png/gif/webp），详见 `docs/plans/2026-08-29-llm-sprite-switch-design.md` |
 
 ### 1.2 已确认的产品决策
 
