@@ -33,7 +33,7 @@ An open-source, real-time desktop **AI companion** with voice, memory, and a cus
 <summary>✨ Features</summary>
 
 - **Voice Wake Word (KWS)** — sherpa-onnx based zipformer keyword spotting with live microphone listening and offline wav detection; custom keywords typed directly in Chinese, auto-converted to pinyin tokens
-- **Speech Recognition (ASR)** — sherpa-onnx streaming recognition (Zipformer / Paraformer, bilingual Chinese-English), real-time captions with automatic punctuation; hotword boosting on Zipformer, plus offline SenseVoice/Whisper options
+- **Speech Recognition (ASR)** — sherpa-onnx streaming recognition (bilingual Chinese-English Zipformer), real-time captions with automatic punctuation and hotword boosting, plus offline Qwen3-ASR (29-language auto-detection)
 - **Text-to-Speech (TTS)** — sherpa-onnx ZipVoice zero-shot voice cloning (bilingual), with built-in voices and custom reference audio
 - **Local LLM** — llama.cpp local inference (any GGUF, streaming chat + agent tool calls), or an OpenAI-compatible remote API
 - **Voice Session** — wake word → ASR → LLM sentence-level streaming reply → TTS playback, with wake-word barge-in and hands-free follow-up

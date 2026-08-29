@@ -126,15 +126,13 @@ cargo test -- --test-threads=1
 接入 sherpa-onnx 语音识别模型，把麦克风语音实时转成文本（支持中英混说）。模型族：
 
 - **流式 Zipformer**（默认，中英双语）— 实时识别，支持热词
-- **流式 Paraformer**（中英 / 中粤英）— 准确率更高，包体较大（约 1GB），仅 greedy_search、不支持热词
-- **离线 SenseVoice / Whisper** — 整段文件转写与免提听写（VAD 分段），不参与实时会话
+- **离线 Qwen3-ASR** — 29 语言自动识别；整段文件转写与免提听写（VAD 分段），不参与实时会话
 
 ```bash
 # 1. 下载模型（约 790MB：ASR int8 + 标点，默认安装到 ~/.zapmomo/models/<模型名>，不入库）
 cargo run -- asr install-model
 
-# 1b. 或按 registry id 安装其它模型（含流式 Paraformer、离线 SenseVoice/Whisper）
-cargo run -- asr install-model --model asr-paraformer-bilingual-zh-en
+# 1b. 其它模型（如离线 Qwen3-ASR）在桌面应用「模型」页下载安装
 
 # 2. 离线转写（无需麦克风）：对模型自带 wav 输出转写文本（最终结果自动加标点）
 cargo run -- asr test
@@ -147,7 +145,7 @@ cargo run -- asr devices
 ```
 
 - **标点恢复（自动开启）**：`install-model` 会同时下载标点模型，识别出的**最终结果自动加标点**（如「昨天是 Monday，是星期三。」）。标点模型缺失时 ASR 仍可用，仅无标点（降级不报错）。
-- **热词增强**：对专有名词/易错词提权。命令行用 `--hotwords "尼日尔河 文森特卡索"`（空格分隔、中文直接写），或写入 `settings.toml` 的 `[asr] hotwords`。热词与空白符惩罚（`blank_penalty`）仅流式 zipformer（transducer）生效；Paraformer 固定 greedy_search，热词配置会被忽略（日志警告）。
+- **热词增强**：对专有名词/易错词提权。命令行用 `--hotwords "尼日尔河 文森特卡索"`（空格分隔、中文直接写），或写入 `settings.toml` 的 `[asr] hotwords`。热词与空白符惩罚（`blank_penalty`）仅流式 zipformer（transducer）生效。
 
 | 命令 | 说明 |
 |------|------|
