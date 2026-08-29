@@ -697,6 +697,10 @@ pub struct DshSettings {
     /// 事件是否语音播报（voice 会话运行中只出气泡），缺省 true
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub voice_enabled: Option<bool>,
+    /// 事件是否经 LLM 生成播报文案（未连接/生成中/失败回退模板台词），缺省 true；
+    /// 生效前提是 [llm].enabled 且引擎已连接
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_enabled: Option<bool>,
     /// 事件是否写入对话记录，缺省 true
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub record_to_history: Option<bool>,

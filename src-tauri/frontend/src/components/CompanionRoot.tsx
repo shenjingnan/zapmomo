@@ -23,6 +23,7 @@ import {
   onCompanionLockedChanged,
   onCompanionOpacityChanged,
   onCompanionScaleChanged,
+  onCompanionSpriteChanged,
   onDshSpeak,
   onLive2dModelChanged,
   toAssetUrl,
@@ -77,6 +78,13 @@ export function CompanionRoot() {
     url: null,
     isGif: false,
   });
+  // LLM 切换的形象图 asset:// URL（companion-sprite-changed 路径经 toAssetUrl 转换；
+  // null = 默认立绘）。形象是会话态：切伙伴即重置（见 live2d-model-changed 订阅），
+  // 重启自然回默认。
+  const [spriteOverride, setSpriteOverride] = useState<string | null>(null);
+  // 当前伙伴托管目录：sprite 事件的归属校验基准（事件路径必在该目录内，
+  // 防切伙伴竞态下旧伙伴的事件污染新伙伴画面）。
+  const modelDirRef = useRef<string | null>(null);
   const [aspectRatio, setAspectRatio] = useState(DEFAULT_ASPECT_RATIO);
   const [scale, setScale] = useState(1.0);
   const [opacity, setOpacity] = useState(1.0);
@@ -219,6 +227,8 @@ export function CompanionRoot() {
 
   // 启动时恢复持久化的模型（顺带重放行 asset 协议 scope）与 BongoCat 道具资源。
   useEffect(() => {
+    modelDirRef.current = config?.model_dir ?? null;
+    setSpriteOverride(null);
     if (config?.models_present && config.model_file) {
       setStage({ url: toAssetUrl(config.model_file), isGif: isStaticImageFormat(config.format) });
     }
@@ -248,11 +258,28 @@ export function CompanionRoot() {
           ? { url: toAssetUrl(info.model_file), isGif: isStaticImageFormat(info.format) }
           : { url: null, isGif: false },
       );
+      // 形象覆盖是伙伴会话态：切伙伴 / 清屏即回默认立绘。
+      modelDirRef.current = info.model_dir;
+      setSpriteOverride(null);
       setProps(info.props ?? null);
       // 暂存该伙伴的私有布局，等模型加载出真实宽高比后恢复（见 handleModelMetrics）。
       pendingLayoutRef.current = info.model_file
         ? { scale: info.window_scale ?? null, position: info.window_position ?? null }
         : null;
+    });
+    return () => {
+      void unlisten.then((fn) => fn());
+    };
+  }, []);
+
+  // LLM 切换角色形象：事件路径必须落在当前伙伴托管目录内（归属校验），
+  // 不匹配（切伙伴竞态下的陈旧事件）直接忽略。事件载荷是裸文件路径，
+  // 存入 state 前先转 asset:// URL（<img> 无法直接加载本地路径）。
+  useEffect(() => {
+    const unlisten = onCompanionSpriteChanged((ev) => {
+      const dir = modelDirRef.current;
+      if (!dir || !ev.path.startsWith(dir)) return;
+      setSpriteOverride(toAssetUrl(ev.path));
     });
     return () => {
       void unlisten.then((fn) => fn());
@@ -485,7 +512,7 @@ export function CompanionRoot() {
         <div className="relative" style={{ marginTop: BUBBLE_STRIP }}>
           {stage.isGif ? (
             <GifStage
-              url={stage.url}
+              url={spriteOverride ?? stage.url}
               width={size.width}
               height={size.height - BUBBLE_STRIP}
               onModelMetrics={handleModelMetrics}
