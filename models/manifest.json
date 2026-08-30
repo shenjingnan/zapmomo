@@ -118,6 +118,17 @@
       "sha256": "6c44ec2fb4cee513892d7863c1fcc3ea6b699ffa4d899b0ef4ab19956d9544f7",
       "size_bytes": 1151272416,
       "license": "Apache-2.0"
+    },
+    {
+      "name": "3dspeaker-speech-campplus-sv-zh-cn-16k-common",
+      "role": "speaker-embedding",
+      "version": "2023-12-08",
+      "kind": "raw",
+      "archive": "3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx",
+      "source": "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx",
+      "sha256": "f682b514c05d947ee3fa91cd6ec6c5c7543479a128373fa29b1faedccd21fd11",
+      "size_bytes": 28281138,
+      "license": "Apache-2.0"
     }
   ]
 }

@@ -136,6 +136,18 @@ describe("BubbleRoot（气泡窗口根组件）", () => {
     await waitFor(() => expect(setIgnoreMock).toHaveBeenCalledWith(false));
   });
 
+  it("聆听中 partial（transcript 非最终）以「我（识别中）：」逐字上屏，final 后替换", async () => {
+    render(<BubbleRoot />);
+    emit("voice-session-transcript", { text: "你", is_final: false });
+    expect(screen.getByText("我（识别中）：你")).toBeTruthy();
+    emit("voice-session-transcript", { text: "你好呀", is_final: false });
+    expect(screen.getByText("我（识别中）：你好呀")).toBeTruthy();
+    // 说完：正式用户句接管，识别中句消失
+    emit("voice-session-transcript", { text: "你好呀", is_final: true });
+    expect(screen.getByText("我：你好呀")).toBeTruthy();
+    expect(screen.queryByText("我（识别中）：你好呀")).toBeNull();
+  });
+
   it("同文本连发（turnSeq 递增）仍开启新一轮，顶掉上一轮静置回复", async () => {
     render(<BubbleRoot />);
     emit("voice-session-transcript", { text: "继续", is_final: true });

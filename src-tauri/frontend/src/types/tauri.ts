@@ -205,26 +205,13 @@ export interface CompanionSpriteEvent {
   path: string;
 }
 
-// ---- 表演（BongoCat 兼容模拟键鼠）----
-
-/** 表演场景（"both" = 键鼠同动，同时驱动键盘 + 鼠标两个通道） */
-export type PerformanceScene = "typing" | "mouse" | "both";
-
-/** `performance-started` 事件载荷（含鼠标通道时带 play_area） */
-export type PerformanceStartedPayload =
-  | { scene: "typing" }
-  | { scene: "mouse" | "both"; play_area: { x: number; y: number; width: number; height: number } };
-
-/** `performance-stopped` 事件载荷 */
-export interface PerformanceStoppedPayload {
-  scene: PerformanceScene;
+/** `companion-play-motion` 事件载荷（右键菜单「状态切换」播放 Live2D 动作） */
+export interface CompanionPlayMotionPayload {
+  /** 动作组名（model3.json FileReferences.Motions 的键） */
+  group: string;
+  /** 组内下标（播放一次，播完自动回待机） */
+  index: number;
 }
-
-/** `device-changed` 事件载荷（与 BongoCat device.rs 逐字节同构） */
-export type DeviceEventPayload =
-  | { kind: "KeyboardPress" | "KeyboardRelease"; value: string }
-  | { kind: "MousePress" | "MouseRelease"; value: string }
-  | { kind: "MouseMove"; value: { x: number; y: number } };
 
 /** `list_companions` / `set_active_companion` 里的单个伙伴 */
 export interface CompanionModelInfo {
@@ -503,6 +490,75 @@ export interface DshParamsPatch {
   llm_enabled?: boolean;
   record_to_history?: boolean;
   port?: number;
+}
+
+// ---- 声纹识别（Speaker Recognition）----
+
+/** `get_speaker_config` 返回 */
+export interface SpeakerConfigInfo {
+  /** 是否在语音会话中启用声纹打标（[speaker].enabled，默认关） */
+  enabled: boolean;
+  /** 说话人相似度判定阈值（余弦，0~1，越大越严格） */
+  threshold: number;
+  /** 参与识别的最短语音时长（秒），低于则跳过识别 */
+  min_audio_duration_secs: number;
+  provider: string;
+  num_threads: number;
+  debug: boolean;
+  model_dir: string;
+  model_present: boolean;
+  model_downloading: boolean;
+  speaker_profiles_dir: string;
+  settings_path: string;
+}
+
+/** `set_speaker_params` 载荷（snake_case 直传，缺省项不修改） */
+export interface SpeakerParamsPatch {
+  threshold?: number;
+  min_audio_duration_secs?: number;
+  num_threads?: number;
+  provider?: string;
+  debug?: boolean;
+}
+
+/** 已注册说话人（`list_speakers` 返回项） */
+export interface SpeakerInfo {
+  speaker_id: string;
+  sample_count: number;
+  model: string;
+  dim: number;
+  updated_at: string;
+}
+
+/** `speaker_enroll` 成功响应 */
+export interface SpeakerEnrollResult {
+  speaker_id: string;
+  sample_count: number;
+  dim: number;
+  embedding_ms: number;
+}
+
+/** `speaker_identify_wav` 的一行得分 */
+export interface SpeakerScore {
+  speaker_id: string;
+  score: number;
+}
+
+/** `speaker_identify_wav` 结果（测试弹窗） */
+export interface SpeakerIdentifyResult {
+  matched: boolean;
+  speaker_id: string | null;
+  score: number | null;
+  threshold: number;
+  /** 跳过原因（人类可读文案；未跳过为 null） */
+  skipped: string | null;
+  scores: SpeakerScore[];
+  latency: {
+    audio_duration_ms: number;
+    embedding_ms: number;
+    matching_ms: number;
+    total_ms: number;
+  };
 }
 
 // ---- dsh 集成（插件检测 / 一键安装；「插件集成」页）----

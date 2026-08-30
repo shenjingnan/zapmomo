@@ -1,5 +1,11 @@
 import type { ModelLayout } from "@/components/live2d/Live2dStage";
-import type { PressedKey } from "./usePerformance";
+
+/** 一个按键贴图（爪子按在某键上的预渲染图）。 */
+export interface PressedKey {
+  key: string;
+  url: string;
+  hand: "left" | "right";
+}
 
 interface PropsLayerProps {
   /** 模型画布→屏幕映射（模型未加载为 null，此时不渲染）。 */
