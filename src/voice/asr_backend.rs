@@ -71,6 +71,14 @@ impl AsrBackend {
         }
     }
 
+    /// 是否具备流式 partial 能力（语音打断「有意义内容」判定的前提）。
+    ///
+    /// 以枚举臂为单一事实来源：离线/audiocpp 臂只缓冲 PCM、无 partial，语音打断
+    /// 自动降级为不支持；避免在调用方重算 `backend`/`model_type` 分派规则（漂移风险）。
+    pub(crate) fn has_streaming_partial(&self) -> bool {
+        matches!(self, Self::Streaming { .. })
+    }
+
     /// 处理已喂入的音频（流式：decode_loop 产出 partial/final；离线：空操作，无 partial）。
     pub(crate) fn decode_into(&self, reaction: &mut dyn AsrReaction) {
         if let Self::Streaming { engine, stream } = self {
@@ -316,6 +324,16 @@ mod tests {
             !text.trim().is_empty(),
             "audiocpp 整句转写应非空，实际: {text}"
         );
+    }
+
+    /// 语音打断能力门控：audiocpp 臂无流式 partial → `has_streaming_partial` 为 false
+    /// （Streaming 臂需真实 zipformer 引擎，无法离线构造；`matches!` 穷举 +
+    /// `#[ignore]` 真机测试覆盖）。
+    #[test]
+    fn test_audiocpp_backend_has_no_streaming_partial() {
+        let cfg = cfg_with(AsrModelKind::Qwen3Asr);
+        let backend = AsrBackend::new_audiocpp_with_base_url(&cfg, "http://127.0.0.1:1");
+        assert!(!backend.has_streaming_partial());
     }
 
     /// OfflinePcm 纯逻辑：push 累积 / speech_seen OR / clear / take 排空复位。

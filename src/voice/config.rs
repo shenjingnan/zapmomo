@@ -10,6 +10,11 @@ use std::path::PathBuf;
 pub const DEFAULT_HISTORY_MAX: usize = 12;
 /// 默认打断 KWS 触发阈值（高于监听阈值 0.25，缓解回声误触发）。
 pub const DEFAULT_BARGE_IN_THRESHOLD: f32 = 0.5;
+/// 语音打断（ASR barge-in）缺省开启；非流式 ASR 后端不生效（自动降级）。
+pub const DEFAULT_VOICE_BARGE_IN: bool = true;
+/// 语音打断回声比对阈值：字符 bigram Dice ≥ 此值判回声忽略（外放保守值）。
+/// 注意与 [`DEFAULT_BARGE_IN_THRESHOLD`]（KWS RMS 触发阈值）语义不同。
+pub const DEFAULT_BARGE_IN_SIMILARITY_THRESHOLD: f32 = 0.5;
 /// 默认唤醒欢迎语（TTS 用当前音色合成播放）。
 pub const DEFAULT_WELCOME_TEXT: &str = "你好，我在。";
 /// 默认「真正说话」RMS 音量阈值。
@@ -33,6 +38,8 @@ pub struct CliOverrides {
     pub no_bargein: bool,
     /// true = CLI 显式 `--no-follow-up` 强制关闭跟听窗口（缺省 false 不强制，交给 settings）
     pub no_follow_up: bool,
+    /// true = CLI 显式 `--no-voice-barge-in` 强制关闭语音打断（缺省 false 不强制，交给 settings）
+    pub no_voice_barge_in: bool,
     pub barge_in_threshold: Option<f32>,
     pub welcome_text: Option<String>,
     pub vad_silence_threshold: Option<f32>,
@@ -66,6 +73,11 @@ pub struct ResolvedSessionConfig {
     pub history_max: usize,
     /// 播报/思考中唤醒词打断
     pub barge_in: bool,
+    /// 播报/思考中语音打断（ASR 识别到用户说话即打断；仅流式 ASR 后端生效，
+    /// 能力门控见 `AsrBackend::has_streaming_partial`）
+    pub voice_barge_in: bool,
+    /// 语音打断的回声比对阈值（字符 bigram Dice，≥ 判回声忽略）
+    pub barge_in_similarity_threshold: f32,
     /// 回复播完后自动进入 ASR 聆听（跟听免唤醒；空识别保持聆听，不回待唤醒）
     pub follow_up: bool,
     /// 打断用 KWS 触发阈值
@@ -78,7 +90,8 @@ pub struct ResolvedSessionConfig {
     pub asr_max_trailing_silence: f32,
     /// 欢迎语后等用户说话的超时（秒）
     pub welcome_wait_timeout: f32,
-    /// active 角色包的音色克隆参考（`apply_companion_overrides` 注入；None = 无角色音色）
+    /// active 伙伴的音色克隆参考（`apply_companion_overrides` 注入；None = 无伙伴音色，
+    /// 上层回退 `[voice].voice` > `[tts].voice` > 内置默认）。
     pub character_voice: Option<crate::companion::CharacterVoice>,
 }
 
@@ -139,6 +152,16 @@ pub fn resolve(
             .unwrap_or(DEFAULT_HISTORY_MAX),
         // CLI `--no-bargein` 强制关；未指定时尊重 settings（缺省开）
         barge_in: !cli.no_bargein && voice.and_then(|v| v.barge_in).unwrap_or(true),
+        // CLI `--no-voice-barge-in` 强制关；未指定时尊重 settings（缺省开；
+        // 仅流式 ASR 后端真正生效，能力门控在会话侧）
+        voice_barge_in: !cli.no_voice_barge_in
+            && voice
+                .and_then(|v| v.voice_barge_in)
+                .unwrap_or(DEFAULT_VOICE_BARGE_IN),
+        // 回声比对阈值仅 settings 可调（无 CLI flag；外放保守默认值）
+        barge_in_similarity_threshold: voice
+            .and_then(|v| v.barge_in_similarity_threshold)
+            .unwrap_or(DEFAULT_BARGE_IN_SIMILARITY_THRESHOLD),
         // CLI `--no-follow-up` 强制关；未指定时尊重 settings（缺省开）
         follow_up: !cli.no_follow_up && voice.and_then(|v| v.follow_up).unwrap_or(true),
         barge_in_threshold: cli
@@ -166,18 +189,19 @@ pub fn resolve(
     })
 }
 
-/// 应用 active 角色包覆盖（人设 + 音色），在 `resolve` 之后调用。
+/// 应用 active 伙伴覆盖（人设 + 音色），在 `resolve` 之后调用。
 ///
 /// - 人设：active 伙伴是角色包且 character.md 非空 → **完全覆盖** `cfg.llm.system_prompt`
 ///   （不写盘，切回普通伙伴后下次会话自然回退全局 `[llm].system_prompt`）；
-/// - 音色：仅当前 TTS 模型支持参考音频克隆（ZipVoice/OmniVoice）时注入
+/// - 音色：伙伴音色三级解析（托管目录 `voice/` > 音色库绑定 > None，任意 format 均可，
+///   见 `companion::companion_voice_in`）；仅当前 TTS 模型支持参考音频克隆时注入
 ///   `cfg.character_voice`（非克隆模型走全局音色，优雅降级）。
 pub fn apply_companion_overrides(cfg: &mut ResolvedSessionConfig) {
     if let Some(persona) = crate::companion::active_persona() {
         cfg.llm.system_prompt = persona;
     }
     if cfg.tts.uses_reference_audio()
-        && let Some(voice) = crate::companion::active_character_voice()
+        && let Some(voice) = crate::companion::active_companion_voice()
     {
         cfg.character_voice = Some(voice);
     }
@@ -203,6 +227,11 @@ mod tests {
             assert_eq!(cfg.history_max, DEFAULT_HISTORY_MAX);
             assert!(cfg.barge_in);
             assert!(cfg.follow_up);
+            assert!(cfg.voice_barge_in);
+            assert_eq!(
+                cfg.barge_in_similarity_threshold,
+                DEFAULT_BARGE_IN_SIMILARITY_THRESHOLD
+            );
             assert_eq!(cfg.barge_in_threshold, DEFAULT_BARGE_IN_THRESHOLD);
             assert_eq!(cfg.welcome_text, DEFAULT_WELCOME_TEXT);
             assert_eq!(cfg.vad_silence_threshold, DEFAULT_VAD_SILENCE_THRESHOLD);
@@ -247,6 +276,8 @@ mod tests {
                 history_max: Some(20),
                 barge_in: Some(false),
                 follow_up: Some(false),
+                voice_barge_in: Some(false),
+                barge_in_similarity_threshold: Some(0.6),
                 barge_in_threshold: Some(0.7),
                 welcome_text: Some("我在呢".to_string()),
                 vad_silence_threshold: Some(0.03),
@@ -262,6 +293,8 @@ mod tests {
             assert_eq!(cfg.history_max, 20);
             assert!(!cfg.barge_in);
             assert!(!cfg.follow_up);
+            assert!(!cfg.voice_barge_in);
+            assert_eq!(cfg.barge_in_similarity_threshold, 0.6);
             assert_eq!(cfg.barge_in_threshold, 0.7);
             assert_eq!(cfg.welcome_text, "我在呢");
             assert_eq!(cfg.vad_silence_threshold, 0.03);
@@ -345,6 +378,44 @@ mod tests {
     }
 
     #[test]
+    fn test_cli_no_voice_barge_in_forces_off() {
+        run_with_temp_home(|_| {
+            // settings 缺省开，CLI --no-voice-barge-in 强制关
+            let cli = CliOverrides {
+                no_voice_barge_in: true,
+                ..Default::default()
+            };
+            let cfg = resolve(None, &cli).unwrap();
+            assert!(!cfg.voice_barge_in);
+        });
+    }
+
+    #[test]
+    fn test_voice_barge_in_respects_settings_when_cli_unset() {
+        run_with_temp_home(|_| {
+            // CLI 缺省（no_voice_barge_in=false）时，settings voice_barge_in=false 生效
+            let voice = VoiceSettings {
+                voice_barge_in: Some(false),
+                ..Default::default()
+            };
+            let cfg = resolve(Some(&settings_with_voice(voice)), &CliOverrides::default()).unwrap();
+            assert!(!cfg.voice_barge_in);
+        });
+    }
+
+    #[test]
+    fn test_barge_in_similarity_threshold_from_settings() {
+        run_with_temp_home(|_| {
+            let voice = VoiceSettings {
+                barge_in_similarity_threshold: Some(0.7),
+                ..Default::default()
+            };
+            let cfg = resolve(Some(&settings_with_voice(voice)), &CliOverrides::default()).unwrap();
+            assert_eq!(cfg.barge_in_similarity_threshold, 0.7);
+        });
+    }
+
+    #[test]
     fn test_voice_settings_serde_roundtrip() {
         run_with_temp_home(|_| {
             let voice = VoiceSettings {
@@ -361,6 +432,8 @@ mod tests {
                 vad_silence_threshold: Some(0.02),
                 asr_max_trailing_silence: Some(3.0),
                 welcome_wait_timeout: Some(8.0),
+                voice_barge_in: Some(true),
+                barge_in_similarity_threshold: Some(0.55),
             };
             let app = settings_with_voice(voice);
             let toml_str = toml::to_string(&app).unwrap();
@@ -426,6 +499,68 @@ mod tests {
             cfg.tts.model_type = crate::tts::config::TtsModelKind::Kitten;
             apply_companion_overrides(&mut cfg);
             assert!(cfg.llm.system_prompt.contains("芙宁娜"));
+            assert!(cfg.character_voice.is_none());
+        });
+    }
+
+    /// 导入一个最小合法 Live2D 伙伴（无角色包结构），返回其 id。
+    fn import_live2d_companion(home: &std::path::Path) -> String {
+        let dir = home.join("大月下");
+        std::fs::create_dir_all(dir.join("textures")).unwrap();
+        std::fs::write(dir.join("model.moc3"), b"moc").unwrap();
+        std::fs::write(dir.join("textures/texture_00.png"), b"png").unwrap();
+        std::fs::write(
+            dir.join("l.model3.json"),
+            r#"{"FileReferences":{"Moc":"model.moc3","Textures":["textures/texture_00.png"]}}"#,
+        )
+        .unwrap();
+        crate::companion::import_from_dir(&dir).unwrap().0.id
+    }
+
+    /// 往音色库存一条音色，返回 (id, wav_path)。
+    fn save_library_voice(home: &std::path::Path) -> (String, std::path::PathBuf) {
+        let wav = home.join("lib-voice.wav");
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut w = hound::WavWriter::create(&wav, spec).unwrap();
+        w.write_sample(0i16).unwrap();
+        w.finalize().unwrap();
+        let v = crate::tts::voice_store::save_voice("绑定的音色", &wav, "库音色转写").unwrap();
+        (v.id, v.wav_path)
+    }
+
+    /// 音色库绑定对非角色包伙伴同样注入（第 2 级解析，任意 format）。
+    #[test]
+    fn test_apply_companion_overrides_binding_for_live2d() {
+        run_with_temp_home(|home| {
+            let companion_id = import_live2d_companion(home);
+            let (voice_id, wav_path) = save_library_voice(home);
+            crate::companion::set_voice_binding(&companion_id, Some(&voice_id)).unwrap();
+
+            let mut cfg = resolve(None, &CliOverrides::default()).unwrap();
+            assert!(cfg.character_voice.is_none());
+            apply_companion_overrides(&mut cfg);
+            let voice = cfg.character_voice.unwrap();
+            assert_eq!(voice.wav, wav_path);
+            assert_eq!(voice.text, "库音色转写");
+        });
+    }
+
+    /// 绑定指向的音色被删 → fail-open：不注入，走全局默认。
+    #[test]
+    fn test_apply_companion_overrides_stale_binding_falls_back() {
+        run_with_temp_home(|home| {
+            let companion_id = import_live2d_companion(home);
+            let (voice_id, _) = save_library_voice(home);
+            crate::companion::set_voice_binding(&companion_id, Some(&voice_id)).unwrap();
+            crate::tts::voice_store::delete_voice(&voice_id).unwrap();
+
+            let mut cfg = resolve(None, &CliOverrides::default()).unwrap();
+            apply_companion_overrides(&mut cfg);
             assert!(cfg.character_voice.is_none());
         });
     }

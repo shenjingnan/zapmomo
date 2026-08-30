@@ -36,16 +36,37 @@ fn manifest_path() -> std::path::PathBuf {
     voices_dir().join(MANIFEST_NAME)
 }
 
-/// 读取清单；文件缺失或解析失败返回空（不报错，视为尚无自定义音色）。
+/// 读取清单；文件缺失返回空。文件损坏时告警并返回空（枚举语义与缺失一致，
+/// 但写入侧由 [`save_manifest`] 拒绝覆盖，防损坏清单被空列表冲掉）。
 fn load_manifest() -> Vec<VoiceEntry> {
     let Ok(content) = std::fs::read_to_string(manifest_path()) else {
         return Vec::new();
     };
-    serde_json::from_str(&content).unwrap_or_default()
+    match serde_json::from_str(&content) {
+        Ok(entries) => entries,
+        Err(e) => {
+            tracing::warn!("音色清单损坏（{}）: {e}", manifest_path().display());
+            Vec::new()
+        }
+    }
 }
 
 /// 原子写清单：先写临时文件再 rename，避免中断留下半截清单。
+///
+/// 防护：目标清单已存在但解析失败时拒绝写入——此刻内存里的 entries 很可能
+/// 来自「损坏读成的空列表」，直接覆盖会把用户全部音色清掉（对齐
+/// `companion::load_library_inner`「损坏不覆盖」防护），提示用户手动处理。
 fn save_manifest(entries: &[VoiceEntry]) -> Result<(), String> {
+    if let Ok(content) = std::fs::read_to_string(manifest_path())
+        && serde_json::from_str::<Vec<VoiceEntry>>(&content).is_err()
+    {
+        let msg = format!(
+            "音色清单已损坏（{}），为避免覆盖丢失全部音色已拒绝写入，请手动修复或删除该文件后重试",
+            manifest_path().display()
+        );
+        tracing::warn!("{msg}");
+        return Err(msg);
+    }
     std::fs::create_dir_all(voices_dir()).map_err(|e| format!("创建音色目录失败: {e}"))?;
     let tmp = manifest_path().with_extension("json.tmp");
     let content =
@@ -81,6 +102,15 @@ pub fn list_custom_voices() -> Vec<TtsVoice> {
             custom: true,
         })
         .collect()
+}
+
+/// 按 id 严格匹配音色库条目（不匹配展示名、不回退模型包内置音色）。
+///
+/// 结构化绑定（伙伴音色 `companion::CompanionModel.voice_id`）专用：`resolve_reference`
+/// 的「id 或名称」宽容语义与 builtin 回退在这里是歧义源（名称碰撞 / 绑到 builtin
+/// 后跨模型失效），绑定校验与解析必须走本函数。
+pub fn find_voice_by_id(id: &str) -> Option<TtsVoice> {
+    list_custom_voices().into_iter().find(|v| v.id == id)
 }
 
 /// 保存一个自定义音色：把源 wav 拷贝到音色目录并写入清单。
@@ -236,6 +266,51 @@ mod tests {
 
             // 删除不存在的 id 报错
             assert!(delete_voice("custom-nope").is_err());
+        });
+    }
+
+    #[test]
+    fn test_find_voice_by_id_strict() {
+        run_with_temp_home(|home| {
+            // 空库 → None
+            assert!(find_voice_by_id("custom-x").is_none());
+
+            let src = home.join("src.wav");
+            std::fs::write(&src, sample_wav_bytes()).unwrap();
+            let v = save_voice("我的声音", &src, "参考转写").unwrap();
+
+            // 按 id 命中
+            let found = find_voice_by_id(&v.id).unwrap();
+            assert_eq!(found.wav_path, v.wav_path);
+            assert_eq!(found.reference_text, "参考转写");
+            // 按展示名**不**命中（严格语义，区别于 resolve_reference 的宽容匹配）
+            assert!(find_voice_by_id("我的声音").is_none());
+        });
+    }
+
+    /// 清单损坏时：枚举返回空不 panic；写入侧拒绝覆盖（防全部音色被空列表冲掉）。
+    #[test]
+    fn test_corrupt_manifest_blocks_write() {
+        run_with_temp_home(|home| {
+            let src = home.join("src.wav");
+            std::fs::write(&src, sample_wav_bytes()).unwrap();
+            save_voice("先存一个", &src, "文本").unwrap();
+
+            std::fs::write(manifest_path(), "{not-json").unwrap();
+            assert!(list_custom_voices().is_empty());
+            assert!(find_voice_by_id("custom-x").is_none());
+
+            let err = save_voice("再存一个", &src, "文本").unwrap_err();
+            assert!(err.contains("损坏"), "err: {err}");
+            // 原损坏文件未被覆盖
+            assert_eq!(
+                std::fs::read_to_string(manifest_path()).unwrap(),
+                "{not-json"
+            );
+            assert!(
+                delete_voice("custom-x").is_err(),
+                "删除同样走写路径，应被拒"
+            );
         });
     }
 }

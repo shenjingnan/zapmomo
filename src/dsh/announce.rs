@@ -67,9 +67,9 @@ impl Announcer {
         // 逐文件预检（backend 感知，与 synthesize_tts 一致），给出明确的
         // 「模型未就绪」错误而非深层引擎报错
         tts::config::preflight(&cfg).map_err(|e| format!("TTS 模型未就绪: {e}"))?;
-        // 合成音色参数统一解析：active 角色包带克隆音色时优先（Announcer 每次构建时
-        // 探测，天然跟随伙伴切换），否则用配置默认音色/语速播报。
-        let character = crate::companion::active_character_voice();
+        // 合成音色参数统一解析：active 伙伴带克隆音色（目录自带或音色库绑定）时优先
+        // （Announcer 每次构建时探测，天然跟随伙伴切换），否则用配置默认音色/语速播报。
+        let character = crate::companion::active_companion_voice();
         let voice = tts::voice::resolve_voice_params(
             &cfg,
             None,
@@ -195,7 +195,21 @@ mod tests {
             synth_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
             "你好"
         );
-        let plays = plays.lock().unwrap().clone();
+        // 合成闭包**先回传文本、后产出音频块**：recv 命中不保证 on_chunk 已执行完
+        // （worker 在另一线程，tarpaulin 插桩会进一步拉大线程间隔），立即断言是
+        // 时序竞争——轮询等两块都落进共享 Vec 再比较（有界，不吞真失败）。
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let plays = loop {
+            let snapshot = plays.lock().unwrap().clone();
+            if snapshot.len() >= 2 {
+                break snapshot;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "音频块未按时到达播放器: {snapshot:?}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
         assert_eq!(
             plays,
             vec![(vec![0.1, 0.2], 24000), (vec![0.3], 24000),],
