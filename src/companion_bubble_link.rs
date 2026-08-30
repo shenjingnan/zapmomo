@@ -5,6 +5,10 @@
 //! 气泡被联动移动后由其自身 `onMoved` → debounce 写回 `[bubble.window_position]`，
 //! 相对关系随启动恢复自然还原，无需新增持久化字段。
 //!
+//! 仅 Windows/Linux 走本模块的事件联动；macOS 改用 NSWindow 子窗口原生
+//! 联动（AppKit 同事务随父移动，零延迟；见 src-tauri setup 气泡面板块），
+//! 事件联动在 macOS 会与原生随动叠加位移，已 cfg 门控禁用。
+//!
 //! 与 [`crate::companion_click_through`] 同理：只放**可纯计算**的函数，
 //! 放根 crate 是因为 CI 的 `cargo test` 只编译 workspace default-members，
 //! src-tauri 内嵌测试不进 CI。
