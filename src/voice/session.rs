@@ -110,6 +110,11 @@ pub struct VoiceSession {
     barge_in: Arc<AtomicBool>,
 
     history: Vec<InputItem>,
+    /// 本轮已执行的工具调用+结果（`LlmEvent::ToolRound` 暂存）。轮次完整结束
+    /// （有最终可见回复）才随 assistant 文本一起入史；`start_reply` / `do_barge_in`
+    /// 清空；无最终回复的轮（打断 / 空回复 / 错误）整组丢弃，保证历史永远是
+    /// user → tools → assistant 的完整形状。
+    pending_tools: Vec<InputItem>,
     reply: ReplyAccumulator,
     reply_done: bool,
     current_gen: u64,
@@ -229,6 +234,7 @@ impl VoiceSession {
             running,
             barge_in: Arc::new(AtomicBool::new(false)),
             history: Vec::new(),
+            pending_tools: Vec::new(),
             reply: ReplyAccumulator::new(),
             reply_done: false,
             current_gen: 0,
@@ -589,8 +595,6 @@ impl VoiceSession {
                 if matches!(self.state, SessionState::Listening) {
                     self.asr.reset(&self.cfg.asr);
                 }
-                // 排空上一轮遗留的 LLM 事件，再发起新一轮
-                while self.llm_rx.try_recv().is_ok() {}
                 self.handle_user_final(text)?;
             }
             SessionState::Idle => {
@@ -620,6 +624,9 @@ impl VoiceSession {
             .push(InputItem::Message(ChatMessage::new(ChatRole::User, text)));
         truncate_history(&mut self.history, self.cfg.history_max);
         self.start_reply();
+        // 排空上一轮/外来遗留的 LLM 事件（dsh 播报经同一广播 channel，Armed 态插播
+        // 产生的事件会滞留），避免滞留的 ToolRound/Token 被当作本轮回复消费
+        while self.llm_rx.try_recv().is_ok() {}
         let input = build_llm_input(&self.cfg.llm.system_prompt, &self.history);
         match self.llm.generate(input, self.cfg.llm.params.clone()) {
             Ok(()) => {}
@@ -647,6 +654,7 @@ impl VoiceSession {
         self.current_gen += 1;
         self.reply = ReplyAccumulator::new();
         self.reply_done = false;
+        self.pending_tools.clear();
         self.first_sentence = false;
         self.synth_enqueued = 0;
         self.synth_consumed = 0;
@@ -701,20 +709,27 @@ impl VoiceSession {
                         }
                     }
                 }
+                LlmEvent::ToolRound { items } => {
+                    // 门控：dsh 播报与 voice 共用引擎/广播 channel，滞留在 channel 里的
+                    // 播报工具轮不得混入 voice 上下文（仅本轮生成未结束时才接收）
+                    if !self.reply_done {
+                        self.pending_tools = items;
+                    }
+                }
                 LlmEvent::Finished(reason) => {
                     self.reply_done = true;
                     if let Some(tail) = self.reply.finish() {
                         self.enqueue_sentence(tail);
                     }
                     // 完整可见回复：入历史（LLM 上下文）+ 随 ReplyFinished 下发（宿主持久化记录）
+                    // 工具轮一并入史（user → tools → assistant），下一轮回传给 LLM
                     let reply_text = self.reply.take_text();
-                    if let Some(reply) = reply_text.clone() {
-                        self.history.push(InputItem::Message(ChatMessage::new(
-                            ChatRole::Assistant,
-                            reply,
-                        )));
-                        truncate_history(&mut self.history, self.cfg.history_max);
-                    }
+                    commit_round_to_history(
+                        &mut self.history,
+                        &mut self.pending_tools,
+                        reply_text.as_deref(),
+                        self.cfg.history_max,
+                    );
                     (self.emit)(VoiceEvent::ReplyFinished {
                         reason: format!("{reason:?}"),
                         text: reply_text,
@@ -722,6 +737,7 @@ impl VoiceSession {
                 }
                 LlmEvent::Error(e) => {
                     self.reply_done = true;
+                    self.pending_tools.clear();
                     (self.emit)(VoiceEvent::Error {
                         kind: ErrorKind::Llm,
                         message: e,
@@ -862,6 +878,7 @@ impl VoiceSession {
         self.speaker.stop();
         self.reply = ReplyAccumulator::new();
         self.reply_done = false;
+        self.pending_tools.clear();
         self.first_sentence = false;
         self.pending_speech.clear();
         self.stream_gate = SentencePlayGate::default();
@@ -1003,11 +1020,78 @@ fn build_llm_input(system_prompt: &str, history: &[InputItem]) -> Vec<InputItem>
     input
 }
 
+/// 工具结果入史截断阈值（字符数）。`run_command` 的结果上限 8K 字符
+/// （`llm::tools::CMD_OUTPUT_MAX_CHARS`），全量入史会随历史条数线性放大每次
+/// 请求的 token；只截「历史副本」——当轮 Agent Loop 内回灌给模型的完整结果
+/// 不受影响（agent 内部上下文与 history 是两份数据）。
+const TOOL_RESULT_HISTORY_MAX_CHARS: usize = 1024;
+
+/// 工具条目入史前的收敛：超长 `ToolResult.content` 截断并附标记。
+///
+/// `ToolCall.arguments` 不截——模型需要回忆自己当时请求了什么。
+fn clamp_tool_items_for_history(items: Vec<InputItem>) -> Vec<InputItem> {
+    items
+        .into_iter()
+        .map(|item| match item {
+            InputItem::ToolResult(mut t) => {
+                if t.content.chars().count() > TOOL_RESULT_HISTORY_MAX_CHARS {
+                    let kept: String = t
+                        .content
+                        .chars()
+                        .take(TOOL_RESULT_HISTORY_MAX_CHARS)
+                        .collect();
+                    t.content = format!("{kept}\n...（历史已截断）");
+                }
+                InputItem::ToolResult(t)
+            }
+            other => other,
+        })
+        .collect()
+}
+
+/// 轮次完整结束时入史：user 已在 `handle_user_final` 入史，此处补
+/// 「工具轮 → assistant 文本」，使下一轮 `build_llm_input` 的顺序为
+/// user → tools → assistant。
+///
+/// `reply` 为 `None`（打断 / 空回复 / 清洗后为空）时不入史并**整组丢弃**工具轮：
+/// 半截工具轮没有 assistant 收尾，入史会让历史以 tool_result 结尾，形成
+/// 非规范的对话上下文。返回是否入史（供测试断言）。
+fn commit_round_to_history(
+    history: &mut Vec<InputItem>,
+    pending_tools: &mut Vec<InputItem>,
+    reply: Option<&str>,
+    max: usize,
+) -> bool {
+    let Some(text) = reply else {
+        pending_tools.clear();
+        return false;
+    };
+    history.extend(clamp_tool_items_for_history(std::mem::take(pending_tools)));
+    history.push(InputItem::Message(ChatMessage::new(
+        ChatRole::Assistant,
+        text,
+    )));
+    truncate_history(history, max);
+    true
+}
+
 /// 裁剪历史到最近 `max` 条（丢弃最早的多余消息）。
+///
+/// 裁剪后做配对修复：从头部 drain 可能把工具对切成「ToolResult 露头」（工具对
+/// 中 ToolCall 在前，不可能反过来产生「头部 ToolCall 无 result」）；一并匹配
+/// `ToolCall` 是零成本防御，且能顺带处理「首个 Message 被裁掉后整组工具条目
+/// 露头」——循环删到头部为 Message 为止，保证发给 provider 的历史永远以消息
+/// 开头（Anthropic 要求首条为 user）。
 fn truncate_history(history: &mut Vec<InputItem>, max: usize) {
     if history.len() > max {
         let drop = history.len() - max;
         history.drain(..drop);
+    }
+    while matches!(
+        history.first(),
+        Some(InputItem::ToolCall(_)) | Some(InputItem::ToolResult(_))
+    ) {
+        history.remove(0);
     }
 }
 
@@ -1320,6 +1404,191 @@ mod tests {
         ];
         truncate_history(&mut history, 4);
         assert_eq!(history.len(), 2);
+    }
+
+    // ---------- 工具轮入史（commit_round_to_history / clamp_tool_items） ----------
+
+    use crate::llm::types::{ToolCall, ToolResult};
+
+    /// 构造一个 set_character_sprite 工具调用条目（id 同时当形象名）。
+    fn sprite_call(id: &str) -> InputItem {
+        InputItem::ToolCall(ToolCall {
+            name: "set_character_sprite".to_string(),
+            arguments: format!(r#"{{"name":"{id}"}}"#),
+            id: Some(id.to_string()),
+        })
+    }
+
+    /// 构造对应的工具结果条目。
+    fn sprite_result(id: &str, content: &str) -> InputItem {
+        InputItem::ToolResult(ToolResult {
+            id: id.to_string(),
+            name: "set_character_sprite".to_string(),
+            content: content.to_string(),
+        })
+    }
+
+    #[test]
+    fn test_commit_round_orders_user_tools_assistant() {
+        let mut history = vec![InputItem::Message(ChatMessage::new(
+            ChatRole::User,
+            "开心一点",
+        ))];
+        let mut pending = vec![
+            sprite_call("happy"),
+            sprite_result("happy", "已切换形象：happy"),
+        ];
+        assert!(commit_round_to_history(
+            &mut history,
+            &mut pending,
+            Some("好耶！"),
+            24
+        ));
+        assert_eq!(history.len(), 4, "user → call → result → assistant");
+        assert!(matches!(&history[0], InputItem::Message(m) if m.role == ChatRole::User));
+        assert!(matches!(&history[1], InputItem::ToolCall(_)));
+        assert!(matches!(&history[2], InputItem::ToolResult(_)));
+        assert!(
+            matches!(&history[3], InputItem::Message(m) if m.role == ChatRole::Assistant && m.content == "好耶！")
+        );
+        assert!(pending.is_empty(), "入史后暂存应清空");
+    }
+
+    #[test]
+    fn test_commit_round_without_tools() {
+        let mut history = vec![InputItem::Message(ChatMessage::new(ChatRole::User, "你好"))];
+        let mut pending = Vec::new();
+        assert!(commit_round_to_history(
+            &mut history,
+            &mut pending,
+            Some("你好！"),
+            24
+        ));
+        assert_eq!(history.len(), 2, "无工具轮 = user + assistant");
+        assert!(matches!(&history[1], InputItem::Message(m) if m.role == ChatRole::Assistant));
+    }
+
+    #[test]
+    fn test_commit_round_drops_tools_when_no_reply() {
+        let mut history = vec![InputItem::Message(ChatMessage::new(ChatRole::User, "你好"))];
+        let mut pending = vec![sprite_call("happy"), sprite_result("happy", "已切换")];
+        // 打断 / 空回复：工具轮整组丢弃，历史保持半截轮不入史
+        assert!(!commit_round_to_history(
+            &mut history,
+            &mut pending,
+            None,
+            24
+        ));
+        assert_eq!(history.len(), 1, "只有 user，工具轮不入史");
+        assert!(pending.is_empty(), "暂存应整组丢弃");
+    }
+
+    #[test]
+    fn test_commit_round_clamps_long_tool_result() {
+        let long = "x".repeat(5000);
+        let mut history = vec![InputItem::Message(ChatMessage::new(
+            ChatRole::User,
+            "跑个命令",
+        ))];
+        let mut pending = vec![
+            InputItem::ToolCall(ToolCall {
+                name: "run_command".to_string(),
+                arguments: r#"{"command":"ls"}"#.to_string(),
+                id: Some("call_1".to_string()),
+            }),
+            InputItem::ToolResult(ToolResult {
+                id: "call_1".to_string(),
+                name: "run_command".to_string(),
+                content: long.clone(),
+            }),
+        ];
+        assert!(commit_round_to_history(
+            &mut history,
+            &mut pending,
+            Some("跑完了"),
+            24
+        ));
+        match &history[2] {
+            InputItem::ToolResult(t) => {
+                let expected = format!(
+                    "{}\n...（历史已截断）",
+                    "x".repeat(TOOL_RESULT_HISTORY_MAX_CHARS)
+                );
+                assert_eq!(t.content, expected, "超长结果应截断到阈值并附标记");
+            }
+            other => panic!("应为 ToolResult，实际：{other:?}"),
+        }
+        // ToolCall.arguments 不截
+        match &history[1] {
+            InputItem::ToolCall(c) => {
+                assert_eq!(c.arguments, r#"{"command":"ls"}"#, "调用参数应原样保留");
+            }
+            other => panic!("应为 ToolCall，实际：{other:?}"),
+        }
+        let _ = long; // 已通过上面断言覆盖
+    }
+
+    // ---------- truncate_history 工具对配对修复 ----------
+
+    #[test]
+    fn test_truncate_history_splits_tool_pair_leaves_no_orphan() {
+        // u1, tc1, tr1, a1, u2, tc2, tr2, a2 → max=6，drain 2 条恰好切在 tc1/tr1
+        // 之间，孤儿 tr1 露头，修复循环应把它也删掉，头部回到 Message
+        let mut history = vec![
+            InputItem::Message(ChatMessage::new(ChatRole::User, "1")),
+            sprite_call("happy"),
+            sprite_result("happy", "已切换"),
+            InputItem::Message(ChatMessage::new(ChatRole::Assistant, "好耶")),
+            InputItem::Message(ChatMessage::new(ChatRole::User, "2")),
+            sprite_call("sad"),
+            sprite_result("sad", "已切换"),
+            InputItem::Message(ChatMessage::new(ChatRole::Assistant, "抱抱")),
+        ];
+        truncate_history(&mut history, 6);
+        assert_eq!(history.len(), 5, "孤儿 ToolResult 应被顺带删除");
+        assert!(
+            matches!(&history[0], InputItem::Message(m) if m.role == ChatRole::Assistant),
+            "头部应回到 Message，实际：{:?}",
+            history[0]
+        );
+    }
+
+    #[test]
+    fn test_truncate_history_drops_leading_tool_pair_together() {
+        // 直接构造头部为工具对的历史：修复循环应把整对一起删到 Message
+        let mut history = vec![
+            sprite_call("happy"),
+            sprite_result("happy", "已切换"),
+            InputItem::Message(ChatMessage::new(ChatRole::Assistant, "好耶")),
+        ];
+        truncate_history(&mut history, 99);
+        assert_eq!(history.len(), 1);
+        assert!(matches!(&history[0], InputItem::Message(_)));
+    }
+
+    #[test]
+    fn test_truncate_history_all_tool_items_at_head() {
+        // 全是工具条目：删空不 panic
+        let mut history = vec![sprite_call("happy"), sprite_result("happy", "已切换")];
+        truncate_history(&mut history, 1);
+        assert!(history.is_empty(), "无 Message 可落脚时应删空");
+    }
+
+    #[test]
+    fn test_build_llm_input_includes_tool_items_in_order() {
+        let history = vec![
+            InputItem::Message(ChatMessage::new(ChatRole::User, "开心一点")),
+            sprite_call("happy"),
+            sprite_result("happy", "已切换形象：happy"),
+            InputItem::Message(ChatMessage::new(ChatRole::Assistant, "好耶！")),
+        ];
+        let input = build_llm_input("你是助手", &history);
+        assert_eq!(input.len(), 5, "system + 4 条历史原样透传");
+        assert!(matches!(&input[0], InputItem::Message(m) if m.role == ChatRole::System));
+        assert!(matches!(&input[1], InputItem::Message(m) if m.role == ChatRole::User));
+        assert!(matches!(&input[2], InputItem::ToolCall(_)));
+        assert!(matches!(&input[3], InputItem::ToolResult(_)));
+        assert!(matches!(&input[4], InputItem::Message(m) if m.role == ChatRole::Assistant));
     }
 
     #[test]

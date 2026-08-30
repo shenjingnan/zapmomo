@@ -23,6 +23,7 @@ use std::thread::JoinHandle;
 use agent::Agent;
 use config::ResolvedLlmConfig;
 use error::LlmError;
+use provider::LlmProvider;
 use tools::ToolRuntime;
 use types::{FinishReason, GenParams, InputItem, OutputItem, TokenDelta};
 
@@ -31,6 +32,10 @@ use types::{FinishReason, GenParams, InputItem, OutputItem, TokenDelta};
 pub enum LlmEvent {
     /// 一次文本增量
     Token(TokenDelta),
+    /// 一次生成中回填的工具调用+结果（成组原子送达，供跨轮 history 回传模型）。
+    /// **先于**同一次生成的 [`LlmEvent::Finished`]（worker 单线程串行 send，mpsc 保序）；
+    /// 生成 `Err` 时不广播。
+    ToolRound { items: Vec<InputItem> },
     /// 生成结束（含结束原因）
     Finished(FinishReason),
     /// 错误（含中文描述）
@@ -285,21 +290,15 @@ fn worker_loop(
                 params,
                 cancel,
             } => {
-                let mut emit = |item: OutputItem| match item {
-                    OutputItem::MessageDelta(delta) => {
-                        broadcast_to(&subs, &LlmEvent::Token(delta));
-                    }
-                    OutputItem::ToolCall(_) => {
-                        // 工具调用由 Agent Loop 内部处理，不外传（未来可发 llm-tool-call 事件）
-                    }
-                };
-                let result = agent.run(&mut *provider, &input, &params, &mut emit, cancel);
-                // 生成结束（含错误/取消）→ 释放互斥标志
-                generating.store(false, Ordering::SeqCst);
-                match result {
-                    Ok(reason) => broadcast_to(&subs, &LlmEvent::Finished(reason)),
-                    Err(e) => broadcast_to(&subs, &LlmEvent::Error(e.to_string())),
-                }
+                run_generate_and_broadcast(
+                    &agent,
+                    &mut *provider,
+                    &subs,
+                    &generating,
+                    input,
+                    params,
+                    cancel,
+                );
             }
             LlmCommand::Shutdown => break,
         }
@@ -307,6 +306,47 @@ fn worker_loop(
 
     provider.unload();
     ready.store(false, Ordering::Relaxed);
+}
+
+/// 执行一次生成并按序广播：`ToolRound`（如有）→ `Finished` / `Error`。
+///
+/// 独立成函数便于用 mock provider 单测（`worker_loop` 内部自建 provider，无法注入）。
+/// 广播顺序依赖 worker 单线程串行 send + mpsc FIFO：订阅方（voice session）先收到
+/// 工具轮、再收到结束事件，从而把两者一并写入跨轮 history（user → tools → assistant）。
+fn run_generate_and_broadcast(
+    agent: &Agent,
+    provider: &mut dyn LlmProvider,
+    subs: &Arc<Mutex<Vec<Sender<LlmEvent>>>>,
+    generating: &AtomicBool,
+    input: Vec<InputItem>,
+    params: GenParams,
+    cancel: Arc<AtomicBool>,
+) {
+    let mut emit = |item: OutputItem| match item {
+        OutputItem::MessageDelta(delta) => {
+            broadcast_to(subs, &LlmEvent::Token(delta));
+        }
+        OutputItem::ToolCall(_) => {
+            // 工具调用由 Agent Loop 内部处理；完整工具轮经 LlmEvent::ToolRound 外传
+        }
+    };
+    let result = agent.run(provider, &input, &params, &mut emit, cancel);
+    // 生成结束（含错误/取消）→ 释放互斥标志
+    generating.store(false, Ordering::SeqCst);
+    match result {
+        Ok(outcome) => {
+            if !outcome.tool_items.is_empty() {
+                broadcast_to(
+                    subs,
+                    &LlmEvent::ToolRound {
+                        items: outcome.tool_items,
+                    },
+                );
+            }
+            broadcast_to(subs, &LlmEvent::Finished(outcome.reason));
+        }
+        Err(e) => broadcast_to(subs, &LlmEvent::Error(e.to_string())),
+    }
 }
 
 #[cfg(test)]
@@ -395,5 +435,186 @@ mod tests {
             // 空闲时可发起（入队成功）
             assert!(engine.generate(vec![], GenParams::default()).is_ok());
         });
+    }
+
+    // ---------- ToolRound 广播（run_generate_and_broadcast） ----------
+
+    use crate::llm::types::{ChatMessage, ChatRole, ToolCall, ToolDefinition};
+
+    /// mock provider：第一轮产出 tool call，回填后第二轮产出纯文本
+    /// （按 input 是否含 ToolResult 区分轮次）。
+    struct ToolThenText;
+
+    /// mock provider：第一轮产出 tool call，第二轮返回 Err（模拟生成失败）。
+    struct ToolThenErr;
+
+    /// 共享的单轮脚本：非回填轮 emit tool call，回填轮按 `err` 决定纯文本或 Err。
+    fn scripted_generate(
+        input: &[InputItem],
+        emit: &mut (dyn FnMut(OutputItem) + Send),
+        err: bool,
+    ) -> Result<FinishReason, LlmError> {
+        let has_tool_result = input.iter().any(|i| matches!(i, InputItem::ToolResult(_)));
+        if has_tool_result {
+            if err {
+                return Err(LlmError::InferenceFailed("mock 第二轮失败".into()));
+            }
+            emit(OutputItem::MessageDelta(TokenDelta::new("done")));
+        } else {
+            emit(OutputItem::ToolCall(ToolCall {
+                name: "get_current_time".into(),
+                arguments: "{}".into(),
+                id: Some("call_1".into()),
+            }));
+        }
+        Ok(FinishReason::Eos)
+    }
+
+    impl LlmProvider for ToolThenText {
+        fn is_ready(&self) -> bool {
+            true
+        }
+        fn load(&mut self) -> Result<(), LlmError> {
+            Ok(())
+        }
+        fn unload(&mut self) {}
+        fn generate(
+            &mut self,
+            input: &[InputItem],
+            _tools: &[ToolDefinition],
+            _params: &GenParams,
+            emit: &mut (dyn FnMut(OutputItem) + Send),
+            _cancel: Arc<AtomicBool>,
+        ) -> Result<FinishReason, LlmError> {
+            scripted_generate(input, emit, false)
+        }
+    }
+
+    impl LlmProvider for ToolThenErr {
+        fn is_ready(&self) -> bool {
+            true
+        }
+        fn load(&mut self) -> Result<(), LlmError> {
+            Ok(())
+        }
+        fn unload(&mut self) {}
+        fn generate(
+            &mut self,
+            input: &[InputItem],
+            _tools: &[ToolDefinition],
+            _params: &GenParams,
+            emit: &mut (dyn FnMut(OutputItem) + Send),
+            _cancel: Arc<AtomicBool>,
+        ) -> Result<FinishReason, LlmError> {
+            scripted_generate(input, emit, true)
+        }
+    }
+
+    /// 两个订阅者的 subs + generating 标志。
+    fn test_subs() -> (
+        Arc<Mutex<Vec<Sender<LlmEvent>>>>,
+        Receiver<LlmEvent>,
+        Receiver<LlmEvent>,
+        AtomicBool,
+    ) {
+        let subs = Arc::new(Mutex::new(Vec::<Sender<LlmEvent>>::new()));
+        let (tx1, rx1) = mpsc::channel();
+        let (tx2, rx2) = mpsc::channel();
+        subs.lock().unwrap().push(tx1);
+        subs.lock().unwrap().push(tx2);
+        (subs, rx1, rx2, AtomicBool::new(false))
+    }
+
+    #[test]
+    fn test_generate_broadcasts_tool_round_before_finished() {
+        // HOME 隔离：definitions() 会探测角色包 sprites 工具（磁盘 IO），测试需确定性
+        run_with_temp_home(|_| {
+            let (subs, rx1, rx2, generating) = test_subs();
+            let agent = Agent::new(ToolRuntime::new(false));
+            let mut provider = ToolThenText;
+            run_generate_and_broadcast(
+                &agent,
+                &mut provider,
+                &subs,
+                &generating,
+                vec![InputItem::Message(ChatMessage::new(
+                    ChatRole::User,
+                    "现在几点？",
+                ))],
+                GenParams::default(),
+                Arc::new(AtomicBool::new(false)),
+            );
+            assert!(!generating.load(Ordering::SeqCst), "结束后应释放互斥标志");
+            for rx in [&rx1, &rx2] {
+                // 顺序契约：第二轮文本增量流式透传（Token）→ ToolRound → Finished；
+                // ToolRound 必须先于 Finished（订阅方在 Finished 分支一并入史）
+                assert_eq!(
+                    rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+                    LlmEvent::Token(TokenDelta::new("done")),
+                    "回填轮的文本增量应先流出"
+                );
+                match rx.recv_timeout(Duration::from_secs(2)).unwrap() {
+                    LlmEvent::ToolRound { items } => {
+                        assert_eq!(items.len(), 2, "call + result 成对");
+                        assert!(
+                            matches!(&items[0], InputItem::ToolCall(c) if c.name == "get_current_time")
+                        );
+                        assert!(matches!(&items[1], InputItem::ToolResult(t) if t.id == "call_1"));
+                    }
+                    other => panic!("第二个事件应为 ToolRound，实际：{other:?}"),
+                }
+                assert_eq!(
+                    rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+                    LlmEvent::Finished(FinishReason::Eos)
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn test_generate_error_does_not_broadcast_tool_round() {
+        run_with_temp_home(|_| {
+            let (subs, rx1, _rx2, generating) = test_subs();
+            let agent = Agent::new(ToolRuntime::new(false));
+            let mut provider = ToolThenErr;
+            run_generate_and_broadcast(
+                &agent,
+                &mut provider,
+                &subs,
+                &generating,
+                vec![InputItem::Message(ChatMessage::new(
+                    ChatRole::User,
+                    "现在几点？",
+                ))],
+                GenParams::default(),
+                Arc::new(AtomicBool::new(false)),
+            );
+            // Err 路径：只有 Error，无 ToolRound、无 Finished
+            assert!(matches!(
+                rx1.recv_timeout(Duration::from_secs(2)).unwrap(),
+                LlmEvent::Error(_)
+            ));
+            assert!(
+                rx1.recv_timeout(Duration::from_millis(100)).is_err(),
+                "不应有额外事件"
+            );
+        });
+    }
+
+    #[test]
+    fn test_llm_event_tool_round_eq_and_clone() {
+        let item = || {
+            InputItem::ToolCall(ToolCall {
+                name: "t".into(),
+                arguments: "{}".into(),
+                id: Some("1".into()),
+            })
+        };
+        let a = LlmEvent::ToolRound {
+            items: vec![item()],
+        };
+        assert_eq!(a, a.clone(), "Clone 后应相等（LlmEvent 的 PartialEq 契约）");
+        let b = LlmEvent::ToolRound { items: vec![] };
+        assert_ne!(a, b);
     }
 }

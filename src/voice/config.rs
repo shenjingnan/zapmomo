@@ -6,8 +6,9 @@
 use crate::config::settings::{AppConfig, VoiceSettings};
 use std::path::PathBuf;
 
-/// 默认历史消息条数上限（传给 LLM 的多轮上下文）。
-pub const DEFAULT_HISTORY_MAX: usize = 12;
+/// 默认历史消息条数上限（传给 LLM 的多轮上下文；按条数计。工具轮一条对话
+/// 占 4 条——user + call + result + assistant——24 条 ≈ 6 个单工具轮）。
+pub const DEFAULT_HISTORY_MAX: usize = 24;
 /// 默认打断 KWS 触发阈值（高于监听阈值 0.25，缓解回声误触发）。
 pub const DEFAULT_BARGE_IN_THRESHOLD: f32 = 0.5;
 /// 默认唤醒欢迎语（TTS 用当前音色合成播放）。
