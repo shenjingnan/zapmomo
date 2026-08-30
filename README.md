@@ -138,7 +138,7 @@ dsh plugin --profile web add @zapmomo-ai/dsh-plugin
 | `[tts]` | 文本转语音：默认音色参考音频、语速、解码步数等 |
 | `[llm]` | 大语言模型：模型路径、采样参数、OpenAI 兼容远程 API 等 |
 | `[voice]` | 语音会话：唤醒词、回复音色、打断与免唤醒续聊开关等 |
-| `[speaker]` | 声纹识别：enabled 开关（默认关）、相似度阈值、最短语音时长等 |
+| `[speaker]` | 声纹识别：enabled 开关（默认关）、相似度阈值、仅响应已注册说话人门控等 |
 | `[live2d]` | Live2D 角色：模型目录、窗口位置记忆与缩放 |
 | `[dsh]` | deepseek-harness 集成：桥开关、监听端口、语音播报与对话记录开关 |
 

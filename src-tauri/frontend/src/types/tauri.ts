@@ -515,6 +515,8 @@ export interface SpeakerConfigInfo {
   threshold: number;
   /** 参与识别的最短语音时长（秒），低于则跳过识别 */
   min_audio_duration_secs: number;
+  /** 仅响应已注册说话人：不匹配的语音被完全忽略（门控，默认关） */
+  respond_only_matched: boolean;
   provider: string;
   num_threads: number;
   debug: boolean;
@@ -529,6 +531,7 @@ export interface SpeakerConfigInfo {
 export interface SpeakerParamsPatch {
   threshold?: number;
   min_audio_duration_secs?: number;
+  respond_only_matched?: boolean;
   num_threads?: number;
   provider?: string;
   debug?: boolean;

@@ -498,6 +498,7 @@ struct SpeakerConfigInfo {
     enabled: bool,
     threshold: f32,
     min_audio_duration_secs: f32,
+    respond_only_matched: bool,
     provider: String,
     num_threads: i32,
     debug: bool,
@@ -513,6 +514,7 @@ struct SpeakerConfigInfo {
 struct SpeakerParamsPatch {
     threshold: Option<f32>,
     min_audio_duration_secs: Option<f32>,
+    respond_only_matched: Option<bool>,
     num_threads: Option<i32>,
     provider: Option<String>,
     debug: Option<bool>,
@@ -551,6 +553,9 @@ impl SpeakerParamsPatch {
         if let Some(v) = self.min_audio_duration_secs {
             speaker.min_audio_duration_secs = Some(v);
         }
+        if let Some(v) = self.respond_only_matched {
+            speaker.respond_only_matched = Some(v);
+        }
         if let Some(v) = self.num_threads {
             speaker.num_threads = Some(v);
         }
@@ -572,6 +577,7 @@ fn get_speaker_config(state: State<'_, SpeakerState>) -> Result<SpeakerConfigInf
         enabled: cfg.enabled,
         threshold: cfg.threshold,
         min_audio_duration_secs: cfg.min_audio_duration_secs,
+        respond_only_matched: cfg.respond_only_matched,
         provider: cfg.provider.clone(),
         num_threads: cfg.num_threads,
         debug: cfg.debug,
@@ -7638,6 +7644,7 @@ mod speaker_params_tests {
         SpeakerParamsPatch {
             threshold: Some(0.75),
             min_audio_duration_secs: Some(0.5),
+            respond_only_matched: Some(true),
             num_threads: Some(4),
             provider: Some("coreml".to_string()),
             debug: Some(true),
@@ -7646,6 +7653,7 @@ mod speaker_params_tests {
         .unwrap();
         assert_eq!(settings.threshold, Some(0.75));
         assert_eq!(settings.min_audio_duration_secs, Some(0.5));
+        assert_eq!(settings.respond_only_matched, Some(true));
         assert_eq!(settings.num_threads, Some(4));
         assert_eq!(settings.provider.as_deref(), Some("coreml"));
         assert_eq!(settings.debug, Some(true));

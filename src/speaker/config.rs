@@ -35,6 +35,8 @@ pub struct ResolvedSpeakerConfig {
     pub threshold: f32,
     /// 参与识别的最短语音时长（秒）
     pub min_audio_duration_secs: f32,
+    /// 仅响应已注册说话人（语音会话声纹门控）：不匹配的语音被完全忽略
+    pub respond_only_matched: bool,
     /// 推理后端
     pub provider: String,
     /// 推理线程数
@@ -55,6 +57,7 @@ impl Default for ResolvedSpeakerConfig {
             model: None,
             threshold: DEFAULT_THRESHOLD,
             min_audio_duration_secs: DEFAULT_MIN_AUDIO_DURATION_SECS,
+            respond_only_matched: false,
             provider: "cpu".to_string(),
             num_threads: 1,
             auto_download: true,
@@ -125,6 +128,7 @@ pub fn resolve(settings: Option<&SpeakerSettings>) -> Result<ResolvedSpeakerConf
     cfg.min_audio_duration_secs = s
         .and_then(|s| s.min_audio_duration_secs)
         .unwrap_or(DEFAULT_MIN_AUDIO_DURATION_SECS);
+    cfg.respond_only_matched = s.and_then(|s| s.respond_only_matched).unwrap_or(false);
     cfg.provider = s
         .and_then(|s| s.provider.clone())
         .unwrap_or_else(|| "cpu".to_string());
@@ -150,6 +154,7 @@ mod tests {
             assert!(!cfg.enabled);
             assert_eq!(cfg.threshold, 0.6);
             assert_eq!(cfg.min_audio_duration_secs, 1.0);
+            assert!(!cfg.respond_only_matched);
             assert_eq!(cfg.num_threads, 1);
             assert_eq!(cfg.provider, "cpu");
             assert!(cfg.auto_download);
@@ -168,6 +173,7 @@ mod tests {
                 model: Some("my.onnx".to_string()),
                 threshold: Some(0.75),
                 min_audio_duration_secs: Some(0.5),
+                respond_only_matched: Some(true),
                 provider: Some("coreml".to_string()),
                 num_threads: Some(4),
                 auto_download: Some(false),
@@ -184,6 +190,7 @@ mod tests {
             );
             assert!((cfg.threshold - 0.75).abs() < f32::EPSILON);
             assert!((cfg.min_audio_duration_secs - 0.5).abs() < f32::EPSILON);
+            assert!(cfg.respond_only_matched);
             assert_eq!(cfg.provider, "coreml");
             assert_eq!(cfg.num_threads, 4);
             assert!(!cfg.auto_download);

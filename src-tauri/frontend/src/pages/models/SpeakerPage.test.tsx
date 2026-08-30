@@ -32,6 +32,7 @@ const SPEAKER_CONFIG = {
   enabled: false,
   threshold: 0.6,
   min_audio_duration_secs: 1.0,
+  respond_only_matched: false,
   provider: "cpu",
   num_threads: 1,
   debug: false,

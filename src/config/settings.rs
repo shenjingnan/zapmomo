@@ -733,6 +733,10 @@ pub struct SpeakerSettings {
     /// 参与识别的最短语音时长（秒），低于则跳过识别，缺省 1.0
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_audio_duration_secs: Option<f32>,
+    /// 仅响应已注册说话人：语音会话中声纹不匹配的语音被完全忽略（不进 LLM/TTS、
+    /// 不入历史），缺省 false（只打标不拦截）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub respond_only_matched: Option<bool>,
     /// 推理后端，缺省 "cpu"
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,

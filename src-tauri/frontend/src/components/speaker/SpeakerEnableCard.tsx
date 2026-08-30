@@ -15,7 +15,8 @@ export function SpeakerEnableCard() {
           <p className="text-sm font-medium text-text-primary">启用声纹识别</p>
           <p className="mt-0.5 text-xs text-text-muted">
             语音会话中对用户语音打说话人标签（识别在转写前完成，不依赖文本内容）。
-            仅用于区分说话人，不构成安全认证。
+            可在下方「识别参数」叠加「仅响应已注册说话人」门控；欢迎语对所有人
+            播放，尚未注册声纹时按未启用处理。仅用于区分说话人，不构成安全认证。
           </p>
         </div>
       </div>

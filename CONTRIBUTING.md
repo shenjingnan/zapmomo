@@ -155,6 +155,7 @@ cargo run -- speaker remove owner
 enabled = false                   # 语音会话内启用声纹打标，默认 false
 threshold = 0.6                   # 相似度阈值（余弦），越大越严格
 min_audio_duration_secs = 1.0     # 短于该时长直接跳过识别（防「嗯/啊」短促声误识别）
+respond_only_matched = false      # 声纹门控：仅匹配的说话人进 LLM/TTS，不匹配整句忽略
 model_dir = "/path/to/model"      # 模型目录（支持 ${env.VAR}）
 model = "xxx.onnx"                # 模型文件名（缺省扫描目录探测 campplus 模型）
 provider = "cpu"                  # 推理后端
