@@ -407,4 +407,68 @@ describe("VoiceReplyBubble（回复气泡）", () => {
     expect(screen.getByText("回复中")).toBeTruthy(); // 静置保留，未因重渲染清场
     expect(screen.getByText("我：继续")).toBeTruthy();
   });
+
+  // ---- 聆听通道（listeningText，ASR 部分识别逐字上屏）----
+
+  it("聆听中 partial 以「我（识别中）：」斜体句展示", () => {
+    const { container } = render(<VoiceReplyBubble text="" listeningText="你好" />);
+    expect(screen.getByText("我（识别中）：你好")).toBeTruthy();
+    expect((container.querySelector("p") as HTMLElement).className).toMatch(/italic/);
+  });
+
+  it("聆听中 partial 逐字刷新跟随最新识别文本", () => {
+    const { rerender } = render(<VoiceReplyBubble text="" listeningText="你" />);
+    rerender(<VoiceReplyBubble text="" listeningText="你好，我" />);
+    expect(screen.getByText("我（识别中）：你好，我")).toBeTruthy();
+    expect(screen.queryByText("我（识别中）：你")).toBeNull();
+  });
+
+  it("is_final 到达（turnSeq 递增）替换为正式用户句，识别中样式解除", () => {
+    const { container, rerender } = render(<VoiceReplyBubble text="" listeningText="你好" />);
+    expect(screen.getByText("我（识别中）：你好")).toBeTruthy();
+    rerender(<VoiceReplyBubble text="" userText="你好呀" turnSeq={1} listeningText="" />);
+    expect(screen.getByText("我：你好呀")).toBeTruthy();
+    expect(screen.queryByText("我（识别中）：你好")).toBeNull();
+    expect((container.querySelector("p") as HTMLElement).className).not.toMatch(/italic/);
+  });
+
+  it("聆听首字到达即顶掉旧轮静置内容（新一轮发言开始）", () => {
+    const { rerender } = render(<VoiceReplyBubble text="旧回复" userText="旧问题" />);
+    rerender(<VoiceReplyBubble text="" userText="旧问题" />);
+    rerender(<VoiceReplyBubble text="" userText="旧问题" listeningText="新" />);
+    expect(screen.getByText("我（识别中）：新")).toBeTruthy();
+    expect(screen.queryByText("旧回复")).toBeNull();
+    expect(screen.queryByText("我：旧问题")).toBeNull();
+  });
+
+  it("聆听中点击不响应（内容未定稿）", () => {
+    const { rerender } = render(<VoiceReplyBubble text="" listeningText="识别中" />);
+    rerender(<VoiceReplyBubble text="" listeningText="识别中" />);
+    const el = screen.getByText("我（识别中）：识别中");
+    press(el);
+    release(el);
+    expect(screen.getByText("我（识别中）：识别中")).toBeTruthy();
+    rerender(<VoiceReplyBubble text="" listeningText="识别中" />);
+    expect(screen.getByText("我（识别中）：识别中")).toBeTruthy();
+  });
+
+  it("聆听结束无 final（空 flush 清屏）时不残留识别中句", () => {
+    const { container, rerender } = render(<VoiceReplyBubble text="" listeningText="半截" />);
+    expect(screen.getByText("我（识别中）：半截")).toBeTruthy();
+    // 空识别/回声丢弃：后端发空 partial flush（listeningText 变空），无 final
+    rerender(<VoiceReplyBubble text="" listeningText="" />);
+    expect(container.firstChild).toBeNull();
+  });
+
+  it("聆听中插播保持压制不抢屏，聆听结束（flush）后按新鲜期补展示", () => {
+    const { rerender } = render(
+      <VoiceReplyBubble text="" listeningText="说" announcement="插播台词" />,
+    );
+    expect(screen.getByText("我（识别中）：说")).toBeTruthy();
+    expect(screen.queryByText("插播台词")).toBeNull();
+    // 该句作废（flush）：聆听句清掉，新鲜期内暂存的插播补展示
+    rerender(<VoiceReplyBubble text="" listeningText="" announcement="插播台词" />);
+    expect(screen.queryByText("我（识别中）：说")).toBeNull();
+    expect(screen.getByText("插播台词")).toBeTruthy();
+  });
 });
