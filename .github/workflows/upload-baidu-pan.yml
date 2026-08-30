@@ -79,10 +79,11 @@ jobs:
         # 生成两份纯文本写入 dist/，由 Upload 步随安装包一并上传：
         #   更新说明.txt — Release body 的自动变更日志（## What's Changed 起，与 Release 页
         #                  一致）；截取不到时回退完整 body（下载表格经同一管线清理）
-        #   安装说明.txt — README「下载桌面应用」至「功能说明」前章节的纯文本化
+        #   安装说明.txt — README「应用下载」章节至下一个二级标题的纯文本化
         # 格式：UTF-8 带 BOM + CRLF（受众为 Windows 记事本）；链接统一丢 URL 留文字。
-        # 维护契约：README 章节标题「下载桌面应用」「功能说明」是提取锚点，改名需同步
-        # 下方 awk 模式（提取失败 fail-fast，不会静默上传空文件）。
+        # 维护契约：README 二级标题「应用下载」是提取起点，改名需同步下方 awk 模式
+        # （提取失败 fail-fast，不会静默上传空文件）；终点自动取下一个二级标题，
+        # 无需随 README 后续章节增删而维护。
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -125,20 +126,27 @@ jobs:
           } | to_notepad > "dist/更新说明.txt"
 
           # --- 2) 安装说明.txt ---
-          awk '/^## 下载桌面应用/{flag=1} /^## 功能说明/{flag=0} flag' README.md > install.md
+          # 起点为「应用下载」二级标题（该行显式输出保持章节标题），终点自动为
+          # 下一个二级标题；README 后续章节增删无需同步本模式
+          awk '/^## 应用下载/{flag=1; print; next} flag && /^## /{exit} flag' README.md > install.md
           if [ ! -s install.md ]; then
-            echo "::error::README 未找到「下载桌面应用」章节，安装说明提取失败。README 章节标题变更时需同步本步骤的 awk 匹配模式。"
+            echo "::error::README 未找到「应用下载」章节，安装说明提取失败。README 章节标题变更时需同步本步骤的 awk 匹配模式。"
             exit 1
           fi
 
           {
             echo "ZapMomo 安装说明"
-            echo "本说明由项目 README 自动生成，最新内容见：https://github.com/${GITHUB_REPOSITORY}#下载桌面应用"
+            echo "本说明由项目 README 自动生成，最新内容见：https://github.com/${GITHUB_REPOSITORY}#应用下载"
             echo "============================================================"
             echo
-            # 表格行先删末列（「立即下载」徽章列纯文本化后为空，无信息量），再走公共
-            # 清理；最后删在线下载语境的引导句（连其后的空行）与表格分隔行、代码围栏
-            sed -E -e '/^\|/s/\|[^|]*\| *$/|/' install.md | md_to_text | sed -E \
+            # 先删章节内 HTML 折叠块结构行（<details>/<summary>，纯文本无意义）与
+            # 表格末列（「立即下载」徽章列纯文本化后为空，无信息量），再走公共清理；
+            # 最后删在线下载语境的引导句（连其后的空行）与表格分隔行、代码围栏
+            sed -E \
+              -e '/^<details>$/d' \
+              -e '/^<\/details>$/d' \
+              -e '/^<summary>/d' \
+              -e '/^\|/s/\|[^|]*\| *$/|/' install.md | md_to_text | sed -E \
               -e '/^点击下方按钮/,/^$/d' \
               -e '/^\|[-| ]+\|$/d' \
               -e '/^```/d'
