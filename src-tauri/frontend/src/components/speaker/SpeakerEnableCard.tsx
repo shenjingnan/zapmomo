@@ -1,0 +1,30 @@
+import { Fingerprint } from "lucide-react";
+import { Switch } from "@/components/ui/switch";
+import { useRuntime } from "@/providers/RuntimeContext";
+
+/** 启用声纹识别卡：写入 [speaker].enabled；运行中的语音会话由后端自动重启以生效。 */
+export function SpeakerEnableCard() {
+  const { speaker } = useRuntime();
+  const enabled = speaker.config.config?.enabled ?? false;
+
+  return (
+    <section className="flex items-center justify-between gap-3 rounded-[16px] border border-panel-border bg-panel-background px-5 py-4">
+      <div className="flex items-start gap-2.5">
+        <Fingerprint className="mt-0.5 h-4 w-4 shrink-0 text-text-secondary" />
+        <div>
+          <p className="text-sm font-medium text-text-primary">启用声纹识别</p>
+          <p className="mt-0.5 text-xs text-text-muted">
+            语音会话中对用户语音打说话人标签（识别在转写前完成，不依赖文本内容）。
+            仅用于区分说话人，不构成安全认证。
+          </p>
+        </div>
+      </div>
+      <Switch
+        checked={enabled}
+        onCheckedChange={(v) => void speaker.config.setEnabled(v)}
+        aria-label="启用声纹识别"
+        trackClass="bg-emerald-500"
+      />
+    </section>
+  );
+}

@@ -81,6 +81,10 @@ pub struct TtsSwap {
 /// TTS 热切换邮箱（宿主 `VoiceSessionState` 与会话各持一份 Arc）。
 pub type TtsSwapSlot = Arc<Mutex<Option<TtsSwap>>>;
 
+/// 声纹识别共享引擎槽（宿主 Tauri `SpeakerState` 与会话各持一份 Arc）：
+/// GUI 注册/识别与语音会话打标共用同一实例，注册即时生效。
+pub type SpeakerSlot = Arc<Mutex<Option<Arc<crate::speaker::SpeakerRecognizer>>>>;
+
 /// 打断后识别文本的去向（后置回声兜底的结果）。
 #[derive(Debug, PartialEq, Eq)]
 enum PostBargeAction {
@@ -124,8 +128,9 @@ pub struct VoiceSession {
     /// 引擎，编排循环每轮开头取走并句间换入。`None` = CLI，不感知外部切换。
     tts_swap_slot: Option<TtsSwapSlot>,
     speaker: Box<dyn AudioPlayer>,
-    /// 声纹识别器（`[speaker].enabled` 且初始化成功才为 Some；失败降级 None 不阻断会话）
-    speaker_rec: Option<crate::speaker::SpeakerRecognizer>,
+    /// 声纹识别器（`[speaker].enabled` 且初始化成功才为 Some；失败降级 None 不阻断会话）。
+    /// Arc 指向可能与宿主 `SpeakerState` 槽共享的同一实例（见 [`SpeakerSlot`]）。
+    speaker_rec: Option<Arc<crate::speaker::SpeakerRecognizer>>,
     /// 当前说话段的 PCM 缓冲（speech 块攒入，finalize 时整段识别后清空）
     speaker_buf: Vec<f32>,
     synth: SynthHandle,
@@ -191,6 +196,7 @@ impl VoiceSession {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -204,6 +210,9 @@ impl VoiceSession {
     ///   运行中切 TTS 模型时句间换引擎（见 [`TtsSwap`]）；`None` 不感知（CLI）。
     /// - `text_rx`：`Some` 接宿主的文字输入收件箱（输入条窗口），文字与 ASR 最终文本
     ///   等价进入对话链路；`None` 仅语音（CLI）。
+    /// - `speaker_slot`：`Some` 接宿主（Tauri `SpeakerState`）的声纹共享引擎槽，GUI
+    ///   注册/识别与会话打标共用同一实例（注册即时生效）；槽空且 `[speaker].enabled`
+    ///   时构造并回填。**enabled=false 时槽有实例也忽略**（不打标）；`None` = CLI 自建。
     /// - **说完判定由 session 内 RMS 静音统一控制**，因此这里强制禁用 sherpa endpoint
     ///   （避免其 rule1/rule2 的 1.2s/2.4s 尾静音在期望的 3s 前提前断句并 reset 流）。
     pub fn new_with_parts(
@@ -213,6 +222,7 @@ impl VoiceSession {
         llm_slot: Option<Arc<Mutex<Option<Arc<LlmEngine>>>>>,
         tts_swap_slot: Option<TtsSwapSlot>,
         text_rx: Option<Receiver<String>>,
+        speaker_slot: Option<SpeakerSlot>,
     ) -> Result<Self, String> {
         cfg.asr.enable_endpoint = false;
         let kws = KwsEngine::new(cfg.kws.clone())?;
@@ -251,25 +261,48 @@ impl VoiceSession {
         let kws_stream = Self::make_kws_stream(&kws, &cfg)?;
         // 打断判定器在 cfg 被 move 进结构体前构造（阈值来自会话配置快照）
         let barge_detector = VoiceBargeInDetector::new(cfg.barge_in_similarity_threshold);
-        // 声纹识别（[speaker].enabled，默认关）：构造失败（模型缺失/下载失败）
-        // 只降级为无声纹，不阻断会话
-        let speaker_rec = if cfg.speaker.enabled {
-            match crate::speaker::SpeakerRecognizer::new(cfg.speaker.clone()) {
-                Ok(rec) => {
+        // 声纹识别（[speaker].enabled，默认关）：优先复用宿主共享槽（GUI 注册/识别与
+        // 会话打标共用同一实例，注册即时生效）；槽空则构造并回填。enabled=false 时槽有
+        // 实例也忽略（不打标）。构造失败（模型缺失/下载失败）只降级为无声纹，不阻断会话。
+        // 注意：槽内实例的 threshold 等参数以其构造时快照为准（参数修改会清槽）。
+        let speaker_rec: Option<Arc<crate::speaker::SpeakerRecognizer>> = if !cfg.speaker.enabled {
+            None
+        } else {
+            let shared = speaker_slot.as_ref().and_then(|slot| {
+                slot.lock()
+                    .map_err(|_| "speaker lock poisoned")
+                    .ok()
+                    .and_then(|guard| guard.clone())
+            });
+            match shared {
+                Some(rec) => {
                     tracing::info!(
-                        "[voice] 声纹识别已启用（threshold {:.2}，已注册 {} 人）",
-                        cfg.speaker.threshold,
+                        "[voice] 声纹识别已启用（复用共享引擎，已注册 {} 人）",
                         rec.num_registered()
                     );
                     Some(rec)
                 }
-                Err(e) => {
-                    tracing::warn!("[voice] 声纹识别初始化失败，本次会话禁用: {e}");
-                    None
-                }
+                None => match crate::speaker::SpeakerRecognizer::new(cfg.speaker.clone()) {
+                    Ok(rec) => {
+                        tracing::info!(
+                            "[voice] 声纹识别已启用（threshold {:.2}，已注册 {} 人）",
+                            cfg.speaker.threshold,
+                            rec.num_registered()
+                        );
+                        let rec = Arc::new(rec);
+                        if let Some(slot) = &speaker_slot
+                            && let Ok(mut guard) = slot.lock()
+                        {
+                            *guard = Some(rec.clone());
+                        }
+                        Some(rec)
+                    }
+                    Err(e) => {
+                        tracing::warn!("[voice] 声纹识别初始化失败，本次会话禁用: {e}");
+                        None
+                    }
+                },
             }
-        } else {
-            None
         };
 
         Ok(Self {
@@ -656,7 +689,8 @@ impl VoiceSession {
     /// 还被键盘文字输入路径复用，那里没有语音缓冲。无论结果如何都清空缓冲；
     /// 识别失败只 warn，不影响会话。
     fn emit_speaker_tag(&mut self) {
-        let Some(recognizer) = self.speaker_rec.as_ref() else {
+        // clone 出 owned Arc，识别期间不借用 self（emit 回调可安全触发）
+        let Some(recognizer) = self.speaker_rec.clone() else {
             return;
         };
         let buf = std::mem::take(&mut self.speaker_buf);

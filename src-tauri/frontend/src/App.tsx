@@ -10,6 +10,7 @@ import { ModelsOverviewPage } from "@/pages/ModelsOverviewPage";
 import { AsrPage } from "@/pages/models/AsrPage";
 import { KwsPage } from "@/pages/models/KwsPage";
 import { LlmPage } from "@/pages/models/LlmPage";
+import { SpeakerPage } from "@/pages/models/SpeakerPage";
 import { TtsPage } from "@/pages/models/TtsPage";
 import { SettingsPage } from "@/pages/SettingsPage";
 import { AppRuntimeProvider } from "@/providers/AppRuntimeProvider";
@@ -31,6 +32,7 @@ export default function App() {
               <Route path="models/asr" element={<AsrPage />} />
               <Route path="models/llm" element={<LlmPage />} />
               <Route path="models/tts" element={<TtsPage />} />
+              <Route path="models/speaker" element={<SpeakerPage />} />
               <Route path="settings" element={<SettingsPage />} />
             </Route>
           </Routes>

@@ -1,7 +1,7 @@
 import { isLlmConfigured } from "@/components/llm/llmMeta";
 import type { RuntimeState } from "@/providers/RuntimeContext";
 
-export type GuideCapability = "kws" | "asr" | "llm" | "tts";
+export type GuideCapability = "kws" | "asr" | "llm" | "tts" | "speaker";
 
 export interface GuideIssue {
   capability: GuideCapability;
@@ -19,9 +19,10 @@ const CAPABILITY_ORDER: ReadonlyArray<{ capability: GuideCapability; name: strin
     { capability: "asr", name: "语音识别（ASR）", href: "/models/asr" },
     { capability: "llm", name: "AI 大脑（LLM）", href: "/models/llm" },
     { capability: "tts", name: "语音合成（TTS）", href: "/models/tts" },
+    { capability: "speaker", name: "声纹识别", href: "/models/speaker" },
   ];
 
-export type SetupGuideInput = Pick<RuntimeState, "kws" | "asr" | "llm" | "tts">;
+export type SetupGuideInput = Pick<RuntimeState, "kws" | "asr" | "llm" | "tts" | "speaker">;
 
 /** 各能力的错误与未配置判定（config 层与运行层错误都算）。 */
 function capabilityIssue(
@@ -62,6 +63,14 @@ function capabilityIssue(
       if (tts.configError || tts.error) return { capability, name, kind: "error", href };
       // enabled=false 是用户主动关闭，不算问题；只看 models_present。
       if (tts.config && !tts.config.models_present) {
+        return { capability, name, kind: "unconfigured", href };
+      }
+      return null;
+    }
+    case "speaker": {
+      const { config } = runtime.speaker;
+      if (config.error) return { capability, name, kind: "error", href };
+      if (config.config && !config.config.model_present) {
         return { capability, name, kind: "unconfigured", href };
       }
       return null;

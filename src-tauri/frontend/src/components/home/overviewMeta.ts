@@ -1,6 +1,14 @@
-import { AudioLines, AudioWaveform, Brain, type LucideIcon, Mic, Volume2 } from "lucide-react";
-import { deriveListenerStatus, type ListenerKind } from "@/components/models/capabilityStatus";
+import {
+  AudioLines,
+  AudioWaveform,
+  Brain,
+  Fingerprint,
+  type LucideIcon,
+  Mic,
+  Volume2,
+} from "lucide-react";
 import { isLlmConfigured } from "@/components/llm/llmMeta";
+import { deriveListenerStatus, type ListenerKind } from "@/components/models/capabilityStatus";
 import type { LlmState } from "@/hooks/useLlm";
 import type { TtsState } from "@/hooks/useTts";
 import type { VoiceSessionState } from "@/hooks/useVoiceSession";
@@ -18,7 +26,7 @@ export const OVERVIEW_STATUS_COLOR: Record<OverviewTone, string> = {
 
 /** AI 能力小卡数据（纯展示：Icon + 名称 + 缩写 + 状态）。 */
 export interface CapabilityStatus {
-  key: "kws" | "asr" | "llm" | "tts" | "voice";
+  key: "kws" | "asr" | "llm" | "tts" | "speaker" | "voice";
   name: string;
   code: string;
   icon: LucideIcon;
@@ -32,6 +40,7 @@ export interface OverviewInput {
   asr: RuntimeState["asr"];
   llm: LlmState;
   tts: TtsState;
+  speaker: RuntimeState["speaker"];
   voice: VoiceSessionState;
 }
 
@@ -101,6 +110,16 @@ function ttsStatus(tts: TtsState): { label: string; tone: OverviewTone } {
   return { label: "已就绪", tone: "good" };
 }
 
+/** 声纹识别状态：错误 > 未配置（模型缺失）> 未启用 > 已就绪（无运行态，开关即全部）。 */
+function speakerStatus(speaker: RuntimeState["speaker"]): { label: string; tone: OverviewTone } {
+  if (speaker.config.error) return { label: "异常", tone: "error" };
+  const cfg = speaker.config.config;
+  if (!cfg) return { label: "加载中", tone: "idle" };
+  if (!cfg.model_present) return { label: "未配置", tone: "idle" };
+  if (!cfg.enabled) return { label: "未启用", tone: "idle" };
+  return { label: "已就绪", tone: "good" };
+}
+
 /** 语音会话状态：错误 > 启动中 > 欢迎中/待唤醒/聆听中/思考中/播报中 > 未启动。 */
 function voiceStatus(voice: VoiceSessionState): { label: string; tone: OverviewTone } {
   if (voice.error) return { label: "异常", tone: "error" };
@@ -124,14 +143,15 @@ function voiceStatus(voice: VoiceSessionState): { label: string; tone: OverviewT
 
 /**
  * 概览页 AI 能力状态推导（纯函数）：基于真实 runtime 字段推导，
- * 不维护第二套状态源。顺序固定为 KWS / ASR / LLM / TTS（与模型摘要一致）。
+ * 不维护第二套状态源。顺序固定为 KWS / ASR / LLM / TTS / 声纹（与模型摘要一致）。
  */
 export function deriveOverview(input: OverviewInput): CapabilityStatus[] {
-  const { kws, asr, llm, tts, voice } = input;
+  const { kws, asr, llm, tts, speaker, voice } = input;
   const kwsState = kwsStatus(kws);
   const asrState = asrStatus(asr);
   const llmState = llmStatus(llm);
   const ttsState = ttsStatus(tts);
+  const speakerState = speakerStatus(speaker);
   const voiceState = voiceStatus(voice);
 
   return [
@@ -166,6 +186,14 @@ export function deriveOverview(input: OverviewInput): CapabilityStatus[] {
       icon: Volume2,
       accent: "bg-amber-100 text-amber-600",
       ...ttsState,
+    },
+    {
+      key: "speaker",
+      name: "声纹识别",
+      code: "SPK",
+      icon: Fingerprint,
+      accent: "bg-teal-100 text-teal-600",
+      ...speakerState,
     },
     {
       key: "voice",

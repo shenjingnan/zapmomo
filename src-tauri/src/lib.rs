@@ -442,6 +442,507 @@ fn get_kws_config(state: State<'_, DownloadState>) -> Result<KwsConfigInfo, Stri
     })
 }
 
+// ---- 声纹识别（Speaker Recognition）----
+
+/// 声纹识别共享状态：模型下载防重入 + 共享引擎槽。
+///
+/// GUI 注册/识别与语音会话打标共用同一 `SpeakerRecognizer` 实例（槽内 Arc），
+/// 注册/删除即时生效；参数或模型变更时清槽（下次按新配置重建）。
+/// **锁只护 Arc 读写，识别/注册推理必须在锁外**（会话编排循环同锁打标）。
+struct SpeakerState {
+    download: Arc<AtomicBool>,
+    recognizer: Arc<Mutex<Option<Arc<zapmomo::speaker::SpeakerRecognizer>>>>,
+}
+
+impl SpeakerState {
+    fn new() -> Self {
+        Self {
+            download: Arc::new(AtomicBool::new(false)),
+            recognizer: Arc::new(Mutex::new(None)),
+        }
+    }
+}
+
+/// 解析声纹配置（settings.toml `[speaker]` + 默认值）。
+fn speaker_resolved_cfg() -> Result<zapmomo::speaker::config::ResolvedSpeakerConfig, String> {
+    let settings = zapmomo::config::settings::load_settings()?;
+    zapmomo::speaker::config::resolve(settings.as_ref().and_then(|s| s.speaker.as_ref()))
+}
+
+/// 模型文件是否存在（未配置/未下载返回 false）。
+fn speaker_model_present(cfg: &zapmomo::speaker::config::ResolvedSpeakerConfig) -> bool {
+    cfg.model_path().is_some_and(|p| p.is_file())
+}
+
+/// GUI 展示用的声纹配置信息。
+#[derive(Serialize)]
+struct SpeakerConfigInfo {
+    enabled: bool,
+    threshold: f32,
+    min_audio_duration_secs: f32,
+    provider: String,
+    num_threads: i32,
+    debug: bool,
+    model_dir: String,
+    model_present: bool,
+    model_downloading: bool,
+    speaker_profiles_dir: String,
+    settings_path: String,
+}
+
+/// `set_speaker_params` 载荷：可调整的声纹参数（snake_case 直传，缺省项不修改）。
+#[derive(Debug, Clone, Default, Deserialize)]
+struct SpeakerParamsPatch {
+    threshold: Option<f32>,
+    min_audio_duration_secs: Option<f32>,
+    num_threads: Option<i32>,
+    provider: Option<String>,
+    debug: Option<bool>,
+}
+
+impl SpeakerParamsPatch {
+    /// 先整体校验（任一越界立即 Err），再逐项写入 `SpeakerSettings`。
+    fn apply_to(
+        &self,
+        speaker: &mut zapmomo::config::settings::SpeakerSettings,
+    ) -> Result<(), String> {
+        if let Some(v) = self.threshold
+            && !(0.0..=1.0).contains(&v)
+        {
+            return Err(format!("相似度阈值需在 0~1，当前 {v}"));
+        }
+        if let Some(v) = self.min_audio_duration_secs
+            && !(0.1..=5.0).contains(&v)
+        {
+            return Err(format!("最短语音时长需在 0.1~5 秒，当前 {v}"));
+        }
+        if let Some(v) = self.num_threads
+            && !(1..=32).contains(&v)
+        {
+            return Err(format!("线程数需在 1~32，当前 {v}"));
+        }
+        if let Some(v) = self.provider.as_deref()
+            && !matches!(v, "cpu" | "cuda" | "coreml")
+        {
+            return Err(format!("推理后端仅支持 cpu/cuda/coreml，当前 {v}"));
+        }
+
+        if let Some(v) = self.threshold {
+            speaker.threshold = Some(v);
+        }
+        if let Some(v) = self.min_audio_duration_secs {
+            speaker.min_audio_duration_secs = Some(v);
+        }
+        if let Some(v) = self.num_threads {
+            speaker.num_threads = Some(v);
+        }
+        if let Some(v) = self.provider.clone() {
+            speaker.provider = Some(v);
+        }
+        if let Some(v) = self.debug {
+            speaker.debug = Some(v);
+        }
+        Ok(())
+    }
+}
+
+/// 读取合并后的声纹配置（settings.toml + 默认值），并给出模型/档案目录状态。
+#[tauri::command]
+fn get_speaker_config(state: State<'_, SpeakerState>) -> Result<SpeakerConfigInfo, String> {
+    let cfg = speaker_resolved_cfg()?;
+    Ok(SpeakerConfigInfo {
+        enabled: cfg.enabled,
+        threshold: cfg.threshold,
+        min_audio_duration_secs: cfg.min_audio_duration_secs,
+        provider: cfg.provider.clone(),
+        num_threads: cfg.num_threads,
+        debug: cfg.debug,
+        model_dir: cfg.model_dir.display().to_string(),
+        model_present: speaker_model_present(&cfg),
+        model_downloading: state.download.load(Ordering::Relaxed),
+        speaker_profiles_dir: zapmomo::speaker::profiles::profiles_dir()
+            .display()
+            .to_string(),
+        settings_path: zapmomo::config::settings::get_settings_path()
+            .display()
+            .to_string(),
+    })
+}
+
+/// 持久化声纹识别启用状态，写入 `[speaker].enabled`。
+///
+/// 运行中的语音会话自动重启：开启后打标生效、关闭后停止打标（会话内声纹
+/// 引擎在构造时按 enabled 决定是否挂载）。
+#[tauri::command]
+fn set_speaker_enabled(app: AppHandle, enabled: bool) -> Result<(), String> {
+    let mut settings = settings::load_settings()?.unwrap_or_default();
+    settings
+        .speaker
+        .get_or_insert_with(zapmomo::config::settings::SpeakerSettings::default)
+        .enabled = Some(enabled);
+    settings::save_settings(&settings)?;
+    restart_voice_session_if_running(&app);
+    Ok(())
+}
+
+/// 持久化声纹参数（阈值/最短时长/线程/后端/调试），写入 `[speaker]`。
+///
+/// 参数在引擎构造时固化：保存后清共享引擎槽并重启运行中的会话，使其立即生效。
+#[tauri::command]
+fn set_speaker_params(
+    app: AppHandle,
+    state: State<'_, SpeakerState>,
+    params: SpeakerParamsPatch,
+) -> Result<(), String> {
+    let mut settings = settings::load_settings()?.unwrap_or_default();
+    let speaker = settings
+        .speaker
+        .get_or_insert_with(zapmomo::config::settings::SpeakerSettings::default);
+    params.apply_to(speaker)?;
+    settings::save_settings(&settings)?;
+    if let Ok(mut guard) = state.recognizer.lock() {
+        *guard = None;
+    }
+    restart_voice_session_if_running(&app);
+    Ok(())
+}
+
+/// 下载并安装声纹 embedding 模型（安装到解析后的 `[speaker].model_dir`）。
+///
+/// 防重入；下载在阻塞线程池执行，进度经 `speaker-model-download-progress` 事件
+/// 推给前端；完成后清共享引擎槽并重启运行中的会话（此前因缺模型降级的会话得以挂载）。
+#[tauri::command]
+async fn download_speaker_model(
+    app: AppHandle,
+    state: State<'_, SpeakerState>,
+) -> Result<(), String> {
+    let flag = state.download.clone();
+    if flag.swap(true, Ordering::SeqCst) {
+        return Err("模型下载已在进行中，请稍候".to_string());
+    }
+    // 目标目录尊重自定义 [speaker].model_dir（raw 单文件：dest = <model_dir>/<archive>）
+    let dest = match speaker_resolved_cfg() {
+        Ok(cfg) => cfg
+            .model_dir
+            .join(&zapmomo::kws::model::speaker_asset().archive),
+        Err(e) => {
+            flag.store(false, Ordering::SeqCst);
+            return Err(e);
+        }
+    };
+    let slot = state.recognizer.clone();
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = ResetOnDrop(flag);
+        let mut progress = |p: zapmomo::kws::model::DownloadProgress| {
+            let stage = match p.stage {
+                zapmomo::kws::model::DownloadStage::Downloading => "downloading",
+                zapmomo::kws::model::DownloadStage::Verifying => "verifying",
+                zapmomo::kws::model::DownloadStage::Extracting => "extracting",
+                zapmomo::kws::model::DownloadStage::Done => "done",
+            };
+            let _ = app.emit(
+                "speaker-model-download-progress",
+                DownloadProgressPayload {
+                    stage: stage.to_string(),
+                    percent: p.percent,
+                    message: p.message,
+                },
+            );
+        };
+        let result = zapmomo::kws::model::install_raw_file_to(
+            zapmomo::kws::model::speaker_asset(),
+            &dest,
+            false,
+            &mut progress,
+        )
+        .map_err(|e| e.to_string());
+        if result.is_ok() {
+            // 模型文件就绪：清槽（下次识别按当前配置重建）+ 重启会话
+            if let Ok(mut guard) = slot.lock() {
+                *guard = None;
+            }
+            restart_voice_session_if_running(&app);
+        }
+        result
+    })
+    .await
+    .map_err(|e| format!("下载任务异常: {e}"))?
+}
+
+/// 录制一段声纹样本（固定 N 秒，16k 单声道 wav），返回 wav 路径。
+///
+/// 麦克风被语音会话 / KWS 监听 / ASR 监听 / 听写占用时直接报错
+/// （cpal 同设备双路采集不报错但会采到空/降级数据，项目以约定互斥）；
+/// 时长 clamp 到 1~30 秒（`record_voice` 本身无上限）。
+#[tauri::command]
+async fn record_speaker_sample(
+    app: AppHandle,
+    seconds: u32,
+    device: Option<String>,
+) -> Result<String, String> {
+    if app.state::<VoiceSessionState>().is_running() {
+        return Err("语音会话正在使用麦克风，请先停止会话再录制声纹样本。".to_string());
+    }
+    if app.state::<ListenState>().is_listening()
+        || app.state::<AsrListenState>().is_listening()
+        || app.state::<AsrDictateState>().is_dictating()
+    {
+        return Err("有监听/识别任务正在使用麦克风，请先停止后再录制声纹样本。".to_string());
+    }
+    let seconds = seconds.clamp(1, 30);
+    tauri::async_runtime::spawn_blocking(move || {
+        zapmomo::audio::record_voice(seconds, device.as_deref()).map(|p| p.display().to_string())
+    })
+    .await
+    .map_err(|e| format!("录音任务异常: {e}"))?
+}
+
+/// `speaker_enroll` 的成功响应。
+#[derive(Serialize)]
+struct SpeakerEnrollResult {
+    speaker_id: String,
+    sample_count: usize,
+    dim: i32,
+    embedding_ms: f64,
+}
+
+/// 临时录音删除守卫（纯函数）：仅当路径位于 TTS 输出目录且文件名形如
+/// `rec-<纯数字>.wav` 时才允许删。**绝不做目录 glob**——同目录还有用户在
+/// TTS「添加音色」弹窗里录完但尚未保存的参考音频。
+fn is_deletable_recorded_sample(path: &Path) -> bool {
+    let Ok(canonical) = path.canonicalize() else {
+        return false;
+    };
+    let Some(parent) = canonical.parent() else {
+        return false;
+    };
+    let Ok(tts_dir) = zapmomo::config::settings::get_tts_output_dir().canonicalize() else {
+        return false;
+    };
+    if parent != tts_dir {
+        return false;
+    }
+    let Some(name) = canonical.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    let Some(stem) = name
+        .strip_prefix("rec-")
+        .and_then(|s| s.strip_suffix(".wav"))
+    else {
+        return false;
+    };
+    !stem.is_empty() && stem.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// 取共享槽内的识别器（无则按当前配置构造并回填）。
+///
+/// 锁只护 Arc 读写，构造/推理均发生在锁外。调用方需保证模型已就绪
+/// （`SpeakerRecognizer::new` 会按 `auto_download` 隐式联网下载，命令层先拦截）。
+fn get_or_init_recognizer(
+    slot: &Arc<Mutex<Option<Arc<zapmomo::speaker::SpeakerRecognizer>>>>,
+    cfg: &zapmomo::speaker::config::ResolvedSpeakerConfig,
+) -> Result<Arc<zapmomo::speaker::SpeakerRecognizer>, String> {
+    let mut guard = slot
+        .lock()
+        .map_err(|_| "speaker lock poisoned".to_string())?;
+    if let Some(rec) = guard.as_ref() {
+        return Ok(rec.clone());
+    }
+    let rec = Arc::new(zapmomo::speaker::SpeakerRecognizer::new(cfg.clone())?);
+    *guard = Some(rec.clone());
+    Ok(rec)
+}
+
+/// 注册说话人：对每段 wav 提取 embedding 并写入档案（同名覆盖重建）。
+///
+/// `wav_paths` 支持录音命令产出的临时文件（成功后自动清理）与用户自选的任意
+/// wav；注册走共享引擎槽，运行中的语音会话立即可识别新说话人。
+#[tauri::command]
+async fn speaker_enroll(
+    state: State<'_, SpeakerState>,
+    speaker_id: String,
+    wav_paths: Vec<String>,
+) -> Result<SpeakerEnrollResult, String> {
+    if wav_paths.is_empty() {
+        return Err("请先录制或选择至少一段 wav 音频".to_string());
+    }
+    // 模型缺失时明确报错（不静默触发 27MB 联网下载，前端长时间无响应）
+    let cfg = speaker_resolved_cfg()?;
+    if !speaker_model_present(&cfg) {
+        return Err(format!(
+            "声纹模型不存在（{}）：请在「模型与能力 → 声纹识别」页下载模型",
+            cfg.model_dir.display()
+        ));
+    }
+    zapmomo::speaker::profiles::validate_speaker_id(&speaker_id)?;
+    for p in &wav_paths {
+        if p.contains('\0') {
+            return Err("音频路径包含非法字符".to_string());
+        }
+    }
+    let slot = state.recognizer.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let recognizer = get_or_init_recognizer(&slot, &cfg)?;
+        let mut samples = Vec::with_capacity(wav_paths.len());
+        for raw in &wav_paths {
+            let (samples_f32, rate) =
+                zapmomo::audio::read_wav_samples(Path::new(raw)).ok_or_else(|| {
+                    format!("读取 wav 失败: {raw}（请提供 16k 或常见采样率的单声道 wav）")
+                })?;
+            samples.push((samples_f32, rate as u32));
+        }
+        let summary = recognizer.enroll(&speaker_id, &samples)?;
+        // 清理本次录音产生的临时文件（只删 TTS 输出目录下 rec-<数字>.wav 形态的
+        // 精确路径；删除失败不阻断注册结果）
+        for raw in &wav_paths {
+            let path = Path::new(raw);
+            if is_deletable_recorded_sample(path) {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+        Ok(SpeakerEnrollResult {
+            speaker_id: summary.speaker_id,
+            sample_count: summary.sample_count,
+            dim: summary.dim,
+            embedding_ms: summary.embedding_ms,
+        })
+    })
+    .await
+    .map_err(|e| format!("注册任务异常: {e}"))?
+}
+
+/// 已注册说话人（GUI 列表；纯磁盘读取，不依赖模型/启用状态）。
+#[derive(Serialize)]
+struct SpeakerInfoDto {
+    speaker_id: String,
+    sample_count: usize,
+    model: String,
+    dim: usize,
+    updated_at: String,
+}
+
+/// 列出全部已注册说话人。
+#[tauri::command]
+fn list_speakers() -> Result<Vec<SpeakerInfoDto>, String> {
+    Ok(zapmomo::speaker::profiles::list()?
+        .into_iter()
+        .map(|p| SpeakerInfoDto {
+            speaker_id: p.speaker_id,
+            sample_count: p.samples.len(),
+            model: p.model,
+            dim: p.dim,
+            updated_at: p.updated_at,
+        })
+        .collect())
+}
+
+/// 删除说话人档案（磁盘 JSON + 共享槽内实例的内存索引，运行中会话即时生效）。
+#[tauri::command]
+fn remove_speaker(state: State<'_, SpeakerState>, speaker_id: String) -> Result<bool, String> {
+    zapmomo::speaker::profiles::validate_speaker_id(&speaker_id)?;
+    let deleted = zapmomo::speaker::profiles::delete(&speaker_id)?;
+    if deleted
+        && let Ok(guard) = state.recognizer.lock()
+        && let Some(rec) = guard.as_ref()
+    {
+        let _ = rec.remove_speaker(&speaker_id);
+    }
+    Ok(deleted)
+}
+
+/// `speaker_identify_wav` 的一行得分。
+#[derive(Serialize)]
+struct SpeakerScoreDto {
+    speaker_id: String,
+    score: f32,
+}
+
+/// 延迟统计（毫秒）。
+#[derive(Serialize)]
+struct SpeakerLatencyDto {
+    audio_duration_ms: f64,
+    embedding_ms: f64,
+    matching_ms: f64,
+    total_ms: f64,
+}
+
+/// `speaker_identify_wav` 结果（测试弹窗）。
+#[derive(Serialize)]
+struct SpeakerIdentifyResult {
+    matched: bool,
+    speaker_id: Option<String>,
+    score: Option<f32>,
+    threshold: f32,
+    /// 跳过原因（人类可读文案；未跳过为 `None`）
+    skipped: Option<String>,
+    scores: Vec<SpeakerScoreDto>,
+    latency: SpeakerLatencyDto,
+}
+
+/// 跳过原因的人类可读文案。
+fn skip_reason_text(reason: &zapmomo::speaker::SkipReason) -> String {
+    match reason {
+        zapmomo::speaker::SkipReason::TooShort {
+            duration_ms,
+            min_ms,
+        } => {
+            format!("语音太短（{duration_ms:.0}ms < 最少 {min_ms:.0}ms）")
+        }
+        zapmomo::speaker::SkipReason::NoRegisteredSpeakers => "尚未注册任何说话人".to_string(),
+    }
+}
+
+/// 对一段 wav 做声纹识别（1:N，测试弹窗用），返回分数表与延迟。
+#[tauri::command]
+async fn speaker_identify_wav(
+    state: State<'_, SpeakerState>,
+    wav_path: String,
+) -> Result<SpeakerIdentifyResult, String> {
+    if wav_path.contains('\0') {
+        return Err("音频路径包含非法字符".to_string());
+    }
+    let cfg = speaker_resolved_cfg()?;
+    if !speaker_model_present(&cfg) {
+        return Err(format!(
+            "声纹模型不存在（{}）：请在「模型与能力 → 声纹识别」页下载模型",
+            cfg.model_dir.display()
+        ));
+    }
+    let slot = state.recognizer.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let recognizer = get_or_init_recognizer(&slot, &cfg)?;
+        let (samples, rate) =
+            zapmomo::audio::read_wav_samples(Path::new(&wav_path)).ok_or_else(|| {
+                format!("读取 wav 失败: {wav_path}（请提供 16k 或常见采样率的单声道 wav）")
+            })?;
+        let id = recognizer.identify(&samples, rate as u32)?;
+        Ok(SpeakerIdentifyResult {
+            matched: id.matched,
+            speaker_id: id.speaker_id,
+            score: id.score,
+            threshold: id.threshold,
+            skipped: id.skipped.as_ref().map(skip_reason_text),
+            scores: id
+                .scores
+                .into_iter()
+                .map(|s| SpeakerScoreDto {
+                    speaker_id: s.speaker_id,
+                    score: s.score,
+                })
+                .collect(),
+            latency: SpeakerLatencyDto {
+                audio_duration_ms: id.latency.audio_duration_ms,
+                embedding_ms: id.latency.embedding_ms,
+                matching_ms: id.latency.matching_ms,
+                total_ms: id.latency.total_ms,
+            },
+        })
+    })
+    .await
+    .map_err(|e| format!("识别任务异常: {e}"))?
+}
+
 /// 开始实时监听唤醒词（command 与启动自动监听共用）。
 ///
 /// 校验模型文件后启动独立线程跑 `run_realtime_with`，检测结果经
@@ -1826,6 +2327,8 @@ fn start_voice_session_impl(app: AppHandle, state: &VoiceSessionState) -> Result
     running.store(true, Ordering::Relaxed);
     let emit = make_voice_emit(app.clone());
     let shared_llm_slot = llm_state.engine.clone();
+    // 声纹共享引擎槽：GUI 注册/识别与会话打标共用同一实例（注册即时生效）
+    let speaker_slot = app.state::<SpeakerState>().recognizer.clone();
     // TTS 热切换邮箱：宿主（set_current_model 写方）与会话各持一份 Arc
     let tts_swap_slot: zapmomo::voice::TtsSwapSlot = Arc::new(Mutex::new(None));
     *app.state::<VoiceSessionState>()
@@ -1846,6 +2349,7 @@ fn start_voice_session_impl(app: AppHandle, state: &VoiceSessionState) -> Result
             Some(shared_llm_slot),
             Some(tts_swap_slot),
             Some(text_rx),
+            Some(speaker_slot),
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -5962,6 +6466,7 @@ pub fn run() {
         .manage(VoiceSessionState::new())
         .manage(DshBridgeState::new())
         .manage(ModelLibraryState::default())
+        .manage(SpeakerState::new())
         .manage(StorageMigrateState::default())
         .invoke_handler(tauri::generate_handler![
             get_app_info,
@@ -6032,6 +6537,15 @@ pub fn run() {
             set_data_dir,
             migrate_storage,
             cancel_storage_migration,
+            get_speaker_config,
+            set_speaker_enabled,
+            set_speaker_params,
+            download_speaker_model,
+            record_speaker_sample,
+            speaker_enroll,
+            list_speakers,
+            remove_speaker,
+            speaker_identify_wav,
             open_storage_dir,
             clear_conversation_records,
             get_live2d_config,
@@ -6608,6 +7122,87 @@ mod companion_click_through_tests {
         };
         assert!(resolve_click_through(Some(&on)));
         assert!(!resolve_click_through(Some(&off)));
+    }
+}
+
+#[cfg(test)]
+mod speaker_params_tests {
+    use super::{SpeakerParamsPatch, is_deletable_recorded_sample};
+    use std::path::Path;
+    use zapmomo::config::settings::SpeakerSettings;
+
+    #[test]
+    fn test_apply_to_empty_patch_keeps_defaults() {
+        let mut settings = SpeakerSettings::default();
+        SpeakerParamsPatch::default()
+            .apply_to(&mut settings)
+            .unwrap();
+        assert_eq!(settings, SpeakerSettings::default());
+    }
+
+    #[test]
+    fn test_apply_to_writes_fields() {
+        let mut settings = SpeakerSettings::default();
+        SpeakerParamsPatch {
+            threshold: Some(0.75),
+            min_audio_duration_secs: Some(0.5),
+            num_threads: Some(4),
+            provider: Some("coreml".to_string()),
+            debug: Some(true),
+        }
+        .apply_to(&mut settings)
+        .unwrap();
+        assert_eq!(settings.threshold, Some(0.75));
+        assert_eq!(settings.min_audio_duration_secs, Some(0.5));
+        assert_eq!(settings.num_threads, Some(4));
+        assert_eq!(settings.provider.as_deref(), Some("coreml"));
+        assert_eq!(settings.debug, Some(true));
+    }
+
+    #[test]
+    fn test_apply_to_rejects_out_of_range() {
+        let cases = [
+            SpeakerParamsPatch {
+                threshold: Some(1.2),
+                ..Default::default()
+            },
+            SpeakerParamsPatch {
+                threshold: Some(-0.1),
+                ..Default::default()
+            },
+            SpeakerParamsPatch {
+                min_audio_duration_secs: Some(0.05),
+                ..Default::default()
+            },
+            SpeakerParamsPatch {
+                min_audio_duration_secs: Some(6.0),
+                ..Default::default()
+            },
+            SpeakerParamsPatch {
+                num_threads: Some(0),
+                ..Default::default()
+            },
+            SpeakerParamsPatch {
+                provider: Some("tensorrt".to_string()),
+                ..Default::default()
+            },
+        ];
+        for patch in cases {
+            let mut settings = SpeakerSettings::default();
+            assert!(patch.apply_to(&mut settings).is_err(), "应拒绝 {patch:?}");
+            // 整体校验：出错时不部分修改
+            assert_eq!(settings, SpeakerSettings::default());
+        }
+    }
+
+    #[test]
+    fn test_deletable_recorded_sample_rejects_missing_and_foreign_paths() {
+        // 不存在的路径：canonicalize 失败 → 不可删
+        assert!(!is_deletable_recorded_sample(Path::new(
+            "/nonexistent/zapmomo/rec-123.wav"
+        )));
+        // 非 TTS 输出目录：即使名字匹配也不可删（用户自选文件绝不能删）
+        assert!(!is_deletable_recorded_sample(Path::new("/tmp/rec-123.wav")));
     }
 }
 
