@@ -13,6 +13,9 @@ import { useListening } from "@/hooks/useListening";
 import { useLlm } from "@/hooks/useLlm";
 import { useModelDownload } from "@/hooks/useModelDownload";
 import { useResults } from "@/hooks/useResults";
+import { useSpeakerConfig } from "@/hooks/useSpeakerConfig";
+import { useSpeakerModelDownload } from "@/hooks/useSpeakerModelDownload";
+import { useSpeakers } from "@/hooks/useSpeakers";
 import { useTts } from "@/hooks/useTts";
 import { useVoiceSession } from "@/hooks/useVoiceSession";
 import { api } from "@/lib/tauri";
@@ -40,6 +43,9 @@ export function AppRuntimeProvider({ children }: { children: ReactNode }) {
   const llm = useLlm();
   const tts = useTts();
   const voice = useVoiceSession();
+  const speakerConfig = useSpeakerConfig();
+  const speakerDownload = useSpeakerModelDownload(speakerConfig.refresh);
+  const speakers = useSpeakers();
   // 麦克风选择：跨页面全局共享（KWS/ASR/概览均消费），持久化到 backend settings.toml（顶层 microphone）。
   // 启动时回读后端；旧版本遗留的 localStorage 记忆做一次性迁移（读后即清，仅在读成功后才清理）。
   const [device, setDeviceState] = useState("");
@@ -110,7 +116,11 @@ export function AppRuntimeProvider({ children }: { children: ReactNode }) {
   }, [kwsConfig.config?.custom_keywords]);
 
   const anyListening =
-    listening.isListening || asrListening.isListening || asrDictate.isDictating || voice.running;
+    listening.isListening ||
+    asrListening.isListening ||
+    asrDictate.isDictating ||
+    voice.running ||
+    speakers.recording;
 
   const value: RuntimeState = {
     appInfo,
@@ -127,6 +137,7 @@ export function AppRuntimeProvider({ children }: { children: ReactNode }) {
     llm,
     tts,
     voice,
+    speaker: { config: speakerConfig, download: speakerDownload, speakers },
     device,
     setDevice,
     sessionKeywords,

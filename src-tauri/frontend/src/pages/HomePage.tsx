@@ -15,7 +15,7 @@ import { useRuntime } from "@/providers/RuntimeContext";
  */
 export function HomePage() {
   const { library, loading, error } = useCompanionLibrary();
-  const { kws, asr, llm, tts, voice } = useRuntime();
+  const { kws, asr, llm, tts, speaker, voice } = useRuntime();
 
   const companion = useMemo(
     () => library?.models.find((m) => m.id === library.active_model_id) ?? null,
@@ -23,8 +23,8 @@ export function HomePage() {
   );
 
   const statuses = useMemo(
-    () => deriveOverview({ kws, asr, llm, tts, voice }),
-    [kws, asr, llm, tts, voice],
+    () => deriveOverview({ kws, asr, llm, tts, speaker, voice }),
+    [kws, asr, llm, tts, speaker, voice],
   );
 
   return (

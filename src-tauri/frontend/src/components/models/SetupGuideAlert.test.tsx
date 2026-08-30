@@ -87,12 +87,26 @@ function makeTts(o?: {
   };
 }
 
+function makeSpeaker(o?: { error?: string | null; modelPresent?: boolean; enabled?: boolean }) {
+  return {
+    config: {
+      config: {
+        enabled: o?.enabled ?? false,
+        model_present: o?.modelPresent ?? true,
+      },
+      error: o?.error ?? null,
+      refresh: vi.fn(),
+    },
+  };
+}
+
 function makeRuntime(
   overrides?: Partial<{
     kws: ReturnType<typeof makeKws>;
     asr: ReturnType<typeof makeAsr>;
     llm: ReturnType<typeof makeLlm>;
     tts: ReturnType<typeof makeTts>;
+    speaker: ReturnType<typeof makeSpeaker>;
   }>,
 ): RuntimeState {
   return {
@@ -100,6 +114,7 @@ function makeRuntime(
     asr: overrides?.asr ?? makeAsr(),
     llm: overrides?.llm ?? makeLlm(),
     tts: overrides?.tts ?? makeTts(),
+    speaker: overrides?.speaker ?? makeSpeaker(),
   } as unknown as RuntimeState;
 }
 

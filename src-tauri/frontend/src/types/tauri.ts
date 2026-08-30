@@ -492,6 +492,75 @@ export interface DshParamsPatch {
   port?: number;
 }
 
+// ---- 声纹识别（Speaker Recognition）----
+
+/** `get_speaker_config` 返回 */
+export interface SpeakerConfigInfo {
+  /** 是否在语音会话中启用声纹打标（[speaker].enabled，默认关） */
+  enabled: boolean;
+  /** 说话人相似度判定阈值（余弦，0~1，越大越严格） */
+  threshold: number;
+  /** 参与识别的最短语音时长（秒），低于则跳过识别 */
+  min_audio_duration_secs: number;
+  provider: string;
+  num_threads: number;
+  debug: boolean;
+  model_dir: string;
+  model_present: boolean;
+  model_downloading: boolean;
+  speaker_profiles_dir: string;
+  settings_path: string;
+}
+
+/** `set_speaker_params` 载荷（snake_case 直传，缺省项不修改） */
+export interface SpeakerParamsPatch {
+  threshold?: number;
+  min_audio_duration_secs?: number;
+  num_threads?: number;
+  provider?: string;
+  debug?: boolean;
+}
+
+/** 已注册说话人（`list_speakers` 返回项） */
+export interface SpeakerInfo {
+  speaker_id: string;
+  sample_count: number;
+  model: string;
+  dim: number;
+  updated_at: string;
+}
+
+/** `speaker_enroll` 成功响应 */
+export interface SpeakerEnrollResult {
+  speaker_id: string;
+  sample_count: number;
+  dim: number;
+  embedding_ms: number;
+}
+
+/** `speaker_identify_wav` 的一行得分 */
+export interface SpeakerScore {
+  speaker_id: string;
+  score: number;
+}
+
+/** `speaker_identify_wav` 结果（测试弹窗） */
+export interface SpeakerIdentifyResult {
+  matched: boolean;
+  speaker_id: string | null;
+  score: number | null;
+  threshold: number;
+  /** 跳过原因（人类可读文案；未跳过为 null） */
+  skipped: string | null;
+  scores: SpeakerScore[];
+  latency: {
+    audio_duration_ms: number;
+    embedding_ms: number;
+    matching_ms: number;
+    total_ms: number;
+  };
+}
+
 // ---- dsh 集成（插件检测 / 一键安装；「插件集成」页）----
 
 /** `detect_dsh_integration` 返回的文件级检测状态（Rust `DshIntegrationStatus` 直出） */
