@@ -86,6 +86,9 @@ export function useVoiceSession(): VoiceSessionState {
         if (p.state === "armed" || p.state === "idle") {
           setPendingReply("");
           setCurrentSentence(null);
+          // partial 仅聆听态有意义：离开聆听（打断/停止）不留残句，
+          // 气泡的「我（识别中）：」随之消失
+          setPartial("");
         }
       }),
       onVoiceSessionWake(() => {}),

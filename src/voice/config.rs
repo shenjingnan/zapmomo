@@ -63,6 +63,8 @@ pub struct ResolvedSessionConfig {
     pub asr: crate::asr::config::ResolvedAsrConfig,
     pub tts: crate::tts::config::ResolvedTtsConfig,
     pub llm: crate::llm::config::ResolvedLlmConfig,
+    /// 声纹识别配置（`[speaker].enabled` 默认关；开启时 ASR 前打说话人标签）
+    pub speaker: crate::speaker::config::ResolvedSpeakerConfig,
     /// TTS 音色 id（None = 用 `tts` 配置默认参考音频）
     pub voice_id: Option<String>,
     /// TTS 语速
@@ -118,6 +120,7 @@ pub fn resolve(
         cli.tts_model_dir.as_deref(),
     )?;
     let llm = crate::llm::config::resolve(settings.and_then(|s| s.llm.as_ref()))?;
+    let speaker = crate::speaker::config::resolve(settings.and_then(|s| s.speaker.as_ref()))?;
 
     Ok(ResolvedSessionConfig {
         // CLI --device > settings.microphone（全局）> 系统默认
@@ -129,6 +132,7 @@ pub fn resolve(
         asr,
         tts,
         llm,
+        speaker,
         voice_id: cli
             .voice
             .clone()
@@ -253,6 +257,9 @@ mod tests {
             assert_eq!(cfg.voice_id, None);
             assert_eq!(cfg.keywords, None);
             assert_eq!(cfg.max_turns, None);
+            // 声纹识别默认关闭（零行为改变的契约）
+            assert!(!cfg.speaker.enabled);
+            assert_eq!(cfg.speaker.threshold, 0.6);
         });
     }
 

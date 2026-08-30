@@ -15,10 +15,10 @@ import type {
   AsrResult,
   CompanionDragMode,
   CompanionLibraryView,
+  CompanionPlayMotionPayload,
   CompanionSpriteEvent,
   CompanionWindowLayer,
   ConversationRecord,
-  DeviceEventPayload,
   DownloadProgress,
   DshBridgeStatus,
   DshConfigInfo,
@@ -39,11 +39,13 @@ import type {
   LlmParamsPatch,
   LlmStatus,
   LlmToken,
-  PerformanceScene,
-  PerformanceStartedPayload,
-  PerformanceStoppedPayload,
   SaveTtsVoiceRequest,
   ShortcutActionId,
+  SpeakerConfigInfo,
+  SpeakerEnrollResult,
+  SpeakerIdentifyResult,
+  SpeakerInfo,
+  SpeakerParamsPatch,
   TranscribeResult,
   TtsConfigInfo,
   TtsParamsPatch,
@@ -90,6 +92,25 @@ export const api = {
   downloadAsrModel: () => invoke<void>("download_asr_model"),
   transcribeAudio: (args: { wavPath: string | null }) =>
     invoke<TranscribeResult>("transcribe_audio", args),
+  // ---- 声纹识别（Speaker Recognition）----
+  getSpeakerConfig: () => invoke<SpeakerConfigInfo>("get_speaker_config"),
+  setSpeakerEnabled: (args: { enabled: boolean }) => invoke<void>("set_speaker_enabled", args),
+  setSpeakerParams: (args: { params: SpeakerParamsPatch }) =>
+    invoke<void>("set_speaker_params", args),
+  downloadSpeakerModel: () => invoke<void>("download_speaker_model"),
+  /** 录制声纹样本（固定时长，后端 clamp 1~30 秒），返回 wav 路径 */
+  recordSpeakerSample: (args: { seconds: number; device: string | null }) =>
+    invoke<string>("record_speaker_sample", args),
+  /** 恢复录音期间被自动挂起的语音会话/监听（弹窗关闭时调用；幂等） */
+  speakerResumeMic: () => invoke<void>("speaker_resume_mic"),
+  /** 注册说话人（wavPaths 为录音临时文件或自选 wav；注意 camelCase，snake_case 会被后端静默丢参） */
+  speakerEnroll: (args: { speakerId: string; wavPaths: string[] }) =>
+    invoke<SpeakerEnrollResult>("speaker_enroll", args),
+  listSpeakers: () => invoke<SpeakerInfo[]>("list_speakers"),
+  removeSpeaker: (args: { speakerId: string }) => invoke<boolean>("remove_speaker", args),
+  /** 对一段 wav 做声纹识别（1:N 测试） */
+  speakerIdentifyWav: (args: { wavPath: string }) =>
+    invoke<SpeakerIdentifyResult>("speaker_identify_wav", args),
   getLive2dConfig: () => invoke<Live2dConfigInfo>("get_live2d_config"),
   listCompanions: () => invoke<CompanionLibraryView>("list_companions"),
   // Tauri v2 命令参数默认 camelCase（`source` 单字段名两端一致，无映射）。
@@ -200,9 +221,6 @@ export const api = {
   setCompanionDragMode: (args: { mode: CompanionDragMode }) =>
     invoke<void>("set_companion_drag_mode", args),
   showCompanionMenu: (args: { x: number; y: number }) => invoke<void>("show_companion_menu", args),
-  startPerformance: (args: { scene: PerformanceScene }) => invoke<void>("start_performance", args),
-  stopPerformance: () => invoke<void>("stop_performance"),
-  isPerforming: () => invoke<PerformanceScene | null>("is_performing"),
   getHideDockIcon: () => invoke<boolean>("get_hide_dock_icon"),
   setHideDockIcon: (args: { hide: boolean }) => invoke<void>("set_hide_dock_icon", args),
   getAutostart: () => invoke<boolean>("get_autostart"),
@@ -234,6 +252,12 @@ export function onDownloadProgress(
   handler: (payload: DownloadProgress) => void,
 ): Promise<UnlistenFn> {
   return listen<DownloadProgress>("kws-model-download-progress", (e) => handler(e.payload));
+}
+
+export function onSpeakerModelDownloadProgress(
+  handler: (payload: DownloadProgress) => void,
+): Promise<UnlistenFn> {
+  return listen<DownloadProgress>("speaker-model-download-progress", (e) => handler(e.payload));
 }
 
 export function onAsrResult(handler: (result: AsrResult) => void): Promise<UnlistenFn> {
@@ -301,6 +325,13 @@ export function onCompanionSpriteChanged(
   return listen<CompanionSpriteEvent>("companion-sprite-changed", (e) => handler(e.payload));
 }
 
+/** `companion-play-motion`：右键菜单「状态切换」要求桌宠窗口播放 Live2D 动作（播一次） */
+export function onCompanionPlayMotion(
+  handler: (payload: CompanionPlayMotionPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<CompanionPlayMotionPayload>("companion-play-motion", (e) => handler(e.payload));
+}
+
 export function onCompanionScaleChanged(handler: (scale: number) => void): Promise<UnlistenFn> {
   return listen<number>("companion-scale-changed", (e) => handler(e.payload));
 }
@@ -330,27 +361,6 @@ export function onCompanionDragModeChanged(
   handler: (mode: CompanionDragMode) => void,
 ): Promise<UnlistenFn> {
   return listen<CompanionDragMode>("companion-drag-mode-changed", (e) => handler(e.payload));
-}
-
-/** 表演开始（桌宠窗口为唯一订阅者）。 */
-export function onPerformanceStarted(
-  handler: (payload: PerformanceStartedPayload) => void,
-): Promise<UnlistenFn> {
-  return listen<PerformanceStartedPayload>("performance-started", (e) => handler(e.payload));
-}
-
-/** 表演停止（桌宠窗口为唯一订阅者）。 */
-export function onPerformanceStopped(
-  handler: (payload: PerformanceStoppedPayload) => void,
-): Promise<UnlistenFn> {
-  return listen<PerformanceStoppedPayload>("performance-stopped", (e) => handler(e.payload));
-}
-
-/** 模拟键鼠事件流（与 BongoCat device-changed 逐字节同构；桌宠窗口为唯一订阅者）。 */
-export function onDeviceChanged(
-  handler: (payload: DeviceEventPayload) => void,
-): Promise<UnlistenFn> {
-  return listen<DeviceEventPayload>("device-changed", (e) => handler(e.payload));
 }
 
 /** 开机自启动状态变化（设置页为唯一订阅者：托盘菜单改动后同步开关）。 */

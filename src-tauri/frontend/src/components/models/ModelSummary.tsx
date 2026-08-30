@@ -2,6 +2,7 @@ import {
   AudioWaveform,
   Brain,
   ChevronRight,
+  Fingerprint,
   type LucideIcon,
   Mic,
   RefreshCw,
@@ -131,7 +132,7 @@ function SummaryRow({ row }: { row: SummaryRowData }) {
 
 /** 模型摘要：分组 List（macOS Settings 风格），非 DataTable。 */
 export function ModelSummary() {
-  const { kws, asr, llm, tts, device, sessionKeywords } = useRuntime();
+  const { kws, asr, llm, tts, speaker, device, sessionKeywords } = useRuntime();
   const [refreshing, setRefreshing] = useState(false);
 
   const refreshAll = async () => {
@@ -142,6 +143,7 @@ export function ModelSummary() {
         asr.config.refresh(),
         llm.refreshConfig(),
         tts.refreshConfig(),
+        speaker.config.refresh(),
       ]);
     } finally {
       setRefreshing(false);
@@ -201,6 +203,19 @@ export function ModelSummary() {
     "识别中",
   );
 
+  // 声纹行：无监听运行态（isListening 恒 false），只看模型就绪与 enabled。
+  const speakerConfigured = speaker.config?.config?.model_present ?? false;
+  const speakerOn = speaker.config?.config?.enabled ?? false;
+  const speakerSummary = listenerRow(
+    deriveListenerStatus({
+      error: speaker.config.error,
+      isListening: false,
+      enabled: speakerOn,
+      modelsPresent: speakerConfigured,
+    }),
+    "监听中",
+  );
+
   const rows: SummaryRowData[] = [
     {
       accent: "bg-violet-100 text-violet-600",
@@ -223,6 +238,17 @@ export function ModelSummary() {
       gearHref: "/models/asr",
       toggled: asrOn,
       onToggle: handleAsrToggle,
+    },
+    {
+      accent: "bg-teal-100 text-teal-600",
+      icon: Fingerprint,
+      name: "声纹识别",
+      model: speakerConfigured ? "CAM++（本地）" : "未配置模型",
+      statusText: speakerSummary.text,
+      statusTone: speakerSummary.tone,
+      gearHref: "/models/speaker",
+      toggled: speakerOn,
+      onToggle: () => void speaker.config.setEnabled(!speakerOn),
     },
     {
       accent: "bg-emerald-100 text-emerald-600",

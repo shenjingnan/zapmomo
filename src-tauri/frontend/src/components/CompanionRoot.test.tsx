@@ -3,25 +3,34 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { CompanionDragMode } from "@/types/tauri";
 import { CompanionRoot } from "./CompanionRoot";
 
-const { invokeMock, startDraggingMock, setSizeMock, setPositionMock, configState, listenHandlers } =
-  vi.hoisted(() => ({
-    invokeMock: vi.fn(),
-    startDraggingMock: vi.fn(),
-    /** resizeTo 的 setSize 是 config 完全应用（含 setLocked）后的最后一步，作等待信号。 */
-    setSizeMock: vi.fn(async () => undefined),
-    /** 布局恢复/中心锚定的 setPosition（代码链式 .catch，必须返回 Promise）。 */
-    setPositionMock: vi.fn(() => Promise.resolve()),
-    /** get_live2d_config 的 locked / drag_mode / 模型字段覆盖值（null = 后端未返回该字段）。 */
-    configState: {
-      locked: null as boolean | null,
-      dragMode: null as CompanionDragMode | null,
-      modelFile: null as string | null,
-      modelDir: null as string | null,
-      format: null as string | null,
-    },
-    /** 按事件名捕获 listen 回调，供测试主动推送后端事件。 */
-    listenHandlers: {} as Record<string, (payload: unknown) => void>,
-  }));
+const {
+  invokeMock,
+  startDraggingMock,
+  setSizeMock,
+  setPositionMock,
+  configState,
+  listenHandlers,
+  startMotionMock,
+} = vi.hoisted(() => ({
+  invokeMock: vi.fn(),
+  startDraggingMock: vi.fn(),
+  /** resizeTo 的 setSize 是 config 完全应用（含 setLocked）后的最后一步，作等待信号。 */
+  setSizeMock: vi.fn(async () => undefined),
+  /** 布局恢复/中心锚定的 setPosition（代码链式 .catch，必须返回 Promise）。 */
+  setPositionMock: vi.fn(() => Promise.resolve()),
+  /** get_live2d_config 的 locked / drag_mode / 模型字段覆盖值（null = 后端未返回该字段）。 */
+  configState: {
+    locked: null as boolean | null,
+    dragMode: null as CompanionDragMode | null,
+    modelFile: null as string | null,
+    modelDir: null as string | null,
+    format: null as string | null,
+  },
+  /** 按事件名捕获 listen 回调，供测试主动推送后端事件。 */
+  listenHandlers: {} as Record<string, (payload: unknown) => void>,
+  /** fake 模型的 startMotion（菜单动作播放链路的断言点）。 */
+  startMotionMock: vi.fn(async () => true),
+}));
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: invokeMock,
@@ -89,6 +98,10 @@ vi.mock("@/components/live2d/Live2dStage", async () => {
               getDrawableIDs: () => ["a"],
               getDrawableIndex: () => 0,
               getDrawableBounds: () => ({ x: 0, y: 0, width: 10, height: 10 }),
+              motionManager: {
+                definitions: { Idle: [{ File: "motions/idle_01.motion3.json" }] },
+                startMotion: startMotionMock,
+              },
             },
           });
         }
@@ -114,6 +127,7 @@ beforeEach(() => {
   configState.modelFile = null;
   configState.modelDir = null;
   configState.format = null;
+  startMotionMock.mockClear();
   for (const key of Object.keys(listenHandlers)) delete listenHandlers[key];
 
   invokeMock.mockImplementation((cmd: string) => {
@@ -133,7 +147,7 @@ beforeEach(() => {
           settings_path: "/zap/.zapmomo/settings.toml",
         });
       default:
-        // useVoiceSession 等其余命令（is_voice_session_running 等）默认放行。
+        // 其余命令默认放行。
         return Promise.resolve(undefined);
     }
   });
@@ -645,5 +659,60 @@ describe("CompanionRoot（角色形象切换）", () => {
       path: "/zap/companions/b/sprites/angry.png",
     });
     expect(currentImgSrc()).toContain("companions/b/sprites/angry.png");
+  });
+});
+
+describe("CompanionRoot（菜单动作播放）", () => {
+  function pushModelChanged(payload: Record<string, unknown>) {
+    act(() => listenHandlers["live2d-model-changed"](payload));
+  }
+
+  function pushPlayMotion(payload: Record<string, unknown>) {
+    act(() => listenHandlers["companion-play-motion"](payload));
+  }
+
+  it("模型就绪后收到 companion-play-motion → 以 (group, index, FORCE) 播放一次", async () => {
+    configState.modelFile = "/zap/companions/a/a.model3.json";
+    configState.format = "cubism3";
+    render(<CompanionRoot />);
+    await waitForConfigApplied();
+
+    // 切换模型让 Live2dStage 桩回调 onModelLoaded，modelRef 就位。
+    pushModelChanged({
+      model_dir: "/zap/companions/b",
+      model_file: "/zap/companions/b/b.model3.json",
+      format: "cubism3",
+      props: null,
+    });
+
+    pushPlayMotion({ group: "TapBody", index: 1 });
+    expect(startMotionMock).toHaveBeenCalledWith("TapBody", 1, 3);
+  });
+
+  it("模型未就绪（Live2D 尚未加载）→ 收到事件静默跳过", async () => {
+    configState.modelFile = "/zap/companions/a/a.model3.json";
+    configState.format = "cubism3";
+    render(<CompanionRoot />);
+    await waitForConfigApplied();
+
+    // 未 pushModelChanged：桩未回调 onModelLoaded，modelRef 仍为 null。
+    pushPlayMotion({ group: "Idle", index: 0 });
+    expect(startMotionMock).not.toHaveBeenCalled();
+  });
+
+  it("GIF 伙伴无 Live2D 句柄 → 收到事件不触发 startMotion", async () => {
+    configState.modelFile = "/zap/companions/g/g.gif";
+    configState.format = "gif";
+    render(<CompanionRoot />);
+    await waitForConfigApplied();
+
+    pushModelChanged({
+      model_dir: "/zap/companions/g",
+      model_file: "/zap/companions/g/g.gif",
+      format: "gif",
+      props: null,
+    });
+    pushPlayMotion({ group: "Idle", index: 0 });
+    expect(startMotionMock).not.toHaveBeenCalled();
   });
 });

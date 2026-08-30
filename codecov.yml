@@ -1,2 +1,9 @@
+coverage:
+  status:
+    project:
+      default:
+        # 容差 1%：整模块级增删（如删除覆盖良好的 performance 模块）会让
+        # 总百分比结构性波动，微小下降不代表质量退化。
+        threshold: 1%
 ignore:
   - "tests/**/*"
