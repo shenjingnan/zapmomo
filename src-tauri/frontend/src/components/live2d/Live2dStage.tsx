@@ -1,22 +1,11 @@
 import * as PIXI from "pixi.js";
 import { Live2DModel } from "pixi-live2d-display/cubism4";
-import type { Ref } from "react";
-import { useEffect, useImperativeHandle, useRef } from "react";
+import { useEffect, useRef } from "react";
 import { computeModelBounds, layoutModel } from "./modelLayout";
 
 // pixi-live2d-display 依赖全局 window.PIXI.Ticker 驱动渲染循环。
 if (typeof window !== "undefined") {
   (window as unknown as { PIXI: typeof PIXI }).PIXI = PIXI;
-}
-
-/** 参数直写通道：对不存在参数做安全封装（Cubism 幻影索引防线）。 */
-export interface Live2dParamWriter {
-  /** 写参数；参数不存在（幻影索引）时 no-op 并返回 false。 */
-  set(id: string, value: number): boolean;
-  /** 参数范围；参数不存在返回 null。 */
-  range(id: string): { min: number; max: number } | null;
-  /** 重置为模型默认值；参数不存在返回 false。 */
-  reset(id: string): boolean;
 }
 
 /** 模型在画布内的布局（画布→屏幕映射，供道具层对齐）。 */
@@ -27,14 +16,6 @@ export interface ModelLayout {
   canvasWidth: number;
   canvasHeight: number;
 }
-
-/** Live2dStage 命令式句柄（表演引擎用）。 */
-export type Live2dStageHandle = {
-  /** 注册每帧参数写入回调（afterMotionUpdate 时序调用）；返回取消函数。 */
-  onParamFrame: (cb: (writer: Live2dParamWriter) => void) => () => void;
-  /** 当前模型布局（模型未加载为 null）。 */
-  getLayout: () => ModelLayout | null;
-};
 
 interface Live2dStageProps {
   /** 模型清单文件的 asset:// URL，null 时不加载。 */
@@ -52,8 +33,6 @@ interface Live2dStageProps {
   onModelReady?: (canvas: HTMLCanvasElement) => void;
   /** 模型布局变化时回调（加载完成与每次 resize 重布局后；清屏/换模型为 null）。 */
   onLayout?: (layout: ModelLayout | null) => void;
-  /** 命令式句柄（React 19 ref as prop）：参数直写与布局读取。 */
-  ref?: Ref<Live2dStageHandle>;
   /** 模型加载成功（或清屏置 null）时回调，供上层持有模型句柄触发动作。 */
   onModelLoaded?: (model: Live2DModel | null) => void;
 }
@@ -78,31 +57,6 @@ function runtimeOf(model: Live2DModel): Cubism4Runtime {
   return model.internalModel as unknown as Cubism4Runtime;
 }
 
-/** 构造参数写入器：统一「幻影索引防线」——Cubism 对未知参数 id 分配 `>= count`
- * 的假索引（`getParameterIndex` 永不返回 -1），必须以 `index < count` 判存在。 */
-function createWriter(model: Live2DModel): Live2dParamWriter {
-  const cm = runtimeOf(model).coreModel;
-  const exists = (id: string) => cm.getParameterIndex(id) < cm.getParameterCount();
-  return {
-    set(id, value) {
-      if (!exists(id)) return false;
-      cm.setParameterValueById(id, value);
-      return true;
-    },
-    range(id) {
-      if (!exists(id)) return null;
-      const i = cm.getParameterIndex(id);
-      return { min: cm.getParameterMinimumValue(i), max: cm.getParameterMaximumValue(i) };
-    },
-    reset(id) {
-      if (!exists(id)) return false;
-      const i = cm.getParameterIndex(id);
-      cm.setParameterValueById(id, cm.getParameterDefaultValue(i));
-      return true;
-    },
-  };
-}
-
 /** 当前画布→屏幕映射（模型 scale/x/y + 画布原始尺寸）。 */
 function modelLayoutOf(model: Live2DModel): ModelLayout {
   const im = runtimeOf(model);
@@ -121,8 +75,7 @@ function modelLayoutOf(model: Live2DModel): ModelLayout {
  *
  * 尺寸变化只 resize 渲染器并重新布局，不销毁重建、不重载模型。
  *
- * 表演扩展：暴露 `onParamFrame`（在 `afterMotionUpdate` 时序每帧写参数，与呼吸/
- * 眨眼共存）与 `onLayout`（画布→屏幕映射，供键盘/鼠标道具层对齐）。
+ * `onLayout`（画布→屏幕映射）供 BongoCat 键盘道具层对齐。
  */
 export function Live2dStage({
   modelUrl,
@@ -134,7 +87,6 @@ export function Live2dStage({
   onModelMetrics,
   onModelReady,
   onLayout,
-  ref,
   onModelLoaded,
 }: Live2dStageProps) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -158,8 +110,6 @@ export function Live2dStage({
   const modelScaleRef = useRef(modelScale);
   modelScaleRef.current = modelScale;
 
-  // 表演引擎的每帧参数回调集合（多消费者单监听器 fanout）。
-  const paramFrameCbsRef = useRef(new Set<(w: Live2dParamWriter) => void>());
   // 当前模型布局（模型未加载为 null）。
   const layoutRef = useRef<ModelLayout | null>(null);
 
@@ -225,8 +175,6 @@ export function Live2dStage({
     const app = appRef.current;
     if (!app) return;
     let cancelled = false;
-    // 当前模型的 afterMotionUpdate 监听器（effect cleanup 时解除，换模型/卸载不泄漏）。
-    let frameHandler: (() => void) | null = null;
 
     void (async () => {
       modelRef.current?.destroy();
@@ -255,17 +203,6 @@ export function Live2dStage({
         if (valid) {
           onModelMetricsRef.current?.({ aspectRatio: bounds.width / bounds.height });
         }
-        // afterMotionUpdate：motion 更新后、saveParameters 快照前触发；此处每帧重写
-        // 表演参数可安全存活到渲染，与呼吸/眨眼/物理共存（详见设计文档 §4.1 决策五）。
-        frameHandler = () => {
-          const current = modelRef.current;
-          if (!current) return;
-          const writer = createWriter(current);
-          for (const cb of paramFrameCbsRef.current) {
-            cb(writer);
-          }
-        };
-        runtimeOf(model).on("afterMotionUpdate", frameHandler);
         layoutRef.current = modelLayoutOf(model);
         onLayoutRef.current?.(layoutRef.current);
         // 模型已加载、画布可用：通知上层（注意画布可能尚未渲染本帧，上层截图前需等一帧）。
@@ -278,31 +215,13 @@ export function Live2dStage({
 
     return () => {
       cancelled = true;
-      // 模型离开舞台：解除监听、清空布局（新模型由下次加载流程重新 onLayout）。
-      if (frameHandler && modelRef.current) {
-        runtimeOf(modelRef.current).off("afterMotionUpdate", frameHandler);
-      }
+      // 模型离开舞台：清空布局（新模型由下次加载流程重新 onLayout）。
       if (layoutRef.current) {
         layoutRef.current = null;
         onLayoutRef.current?.(null);
       }
     };
   }, [modelUrl]);
-
-  // 命令式句柄：参数直写注册 + 布局读取。
-  useImperativeHandle(
-    ref,
-    () => ({
-      onParamFrame: (cb) => {
-        paramFrameCbsRef.current.add(cb);
-        return () => {
-          paramFrameCbsRef.current.delete(cb);
-        };
-      },
-      getLayout: () => layoutRef.current,
-    }),
-    [],
-  );
 
   return <div ref={containerRef} className={className} />;
 }

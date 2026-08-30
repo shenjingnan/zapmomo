@@ -136,23 +136,19 @@ fn list_sprites_in(model_dir: &Path) -> Vec<SpriteInfo> {
         .collect()
 }
 
-/// `set_character_sprite` 工具执行入口：解析参数 → 校验 → 通知 → 返回结果文本。
+/// 名字解析 → 校验 → 通知的共享核心（LLM 工具与右键菜单两个入口共用）。
 ///
-/// 模型可见的失败一律返回提示文本（失败即结果），绝不 `Err` 中断 Agent Loop。
-pub fn apply_tool_call(arguments: &str) -> String {
-    let name = serde_json::from_str::<serde_json::Value>(arguments)
-        .ok()
-        .and_then(|v| v.get("name")?.as_str().map(str::to_string));
-    let Some(name) = name else {
-        return "参数错误：缺少字符串字段 name".to_string();
-    };
+/// `default` 恢复默认立绘（character.png）；名字与枚举 stem 大小写不敏感精确
+/// 匹配，**从不拼接路径**。失败返回提示文案（`Err` 即结果），成功发 `SpriteEvent`
+/// 并返回 (最终名字, 图片路径)。
+fn resolve_and_notify(name: &str) -> Result<(String, PathBuf), String> {
     let name = name.trim();
     if name.is_empty() {
-        return "参数错误：name 不能为空".to_string();
+        return Err("参数错误：name 不能为空".to_string());
     }
 
     let Some(model) = active_character() else {
-        return "当前没有使用角色包伙伴，无法切换形象".to_string();
+        return Err("当前没有使用角色包伙伴，无法切换形象".to_string());
     };
 
     let sprites = list_sprites_in(Path::new(&model.model_dir));
@@ -168,7 +164,7 @@ pub fn apply_tool_call(arguments: &str) -> String {
             .find(|s| s.name.eq_ignore_ascii_case(name))
             .cloned()
         else {
-            return match sprites.is_empty() {
+            return Err(match sprites.is_empty() {
                 true => format!("未找到形象「{name}」，当前角色没有可用形象"),
                 false => {
                     let names: Vec<&str> = sprites.iter().map(|s| s.name.as_str()).collect();
@@ -177,7 +173,7 @@ pub fn apply_tool_call(arguments: &str) -> String {
                         names.join(", ")
                     )
                 }
-            };
+            });
         };
         (hit.name, hit.path)
     };
@@ -187,7 +183,30 @@ pub fn apply_tool_call(arguments: &str) -> String {
         name: final_name.clone(),
         path: path.display().to_string(),
     });
-    format!("已切换形象：{final_name}")
+    Ok((final_name, path))
+}
+
+/// `set_character_sprite` 工具执行入口：解析参数 → 校验 → 通知 → 返回结果文本。
+///
+/// 模型可见的失败一律返回提示文本（失败即结果），绝不 `Err` 中断 Agent Loop。
+pub fn apply_tool_call(arguments: &str) -> String {
+    let name = serde_json::from_str::<serde_json::Value>(arguments)
+        .ok()
+        .and_then(|v| v.get("name")?.as_str().map(str::to_string));
+    let Some(name) = name else {
+        return "参数错误：缺少字符串字段 name".to_string();
+    };
+    match resolve_and_notify(&name) {
+        Ok((final_name, _)) => format!("已切换形象：{final_name}"),
+        Err(msg) => msg,
+    }
+}
+
+/// 右键菜单「状态切换」入口：成功发 `SpriteEvent`，失败返回提示文案（调用方记日志）。
+///
+/// 与 [`apply_tool_call`] 共享校验与通知链（单一写点），事件载荷与 LLM 工具完全一致。
+pub fn apply_menu_switch(name: &str) -> Result<(), String> {
+    resolve_and_notify(name).map(|_| ())
 }
 
 #[cfg(test)]
@@ -394,6 +413,61 @@ mod tests {
         run_with_temp_home(|_home| {
             let out = apply_tool_call(r#"{"name":"happy"}"#);
             assert!(out.contains("没有"), "{out}");
+        });
+    }
+
+    #[test]
+    fn test_menu_switch_success_notifies_same_as_tool_call() {
+        run_with_temp_home(|home| {
+            import_active_pack_with_sprites(home);
+            let (tx, rx) = mpsc::channel();
+            register_notifier(tx);
+
+            apply_menu_switch("happy").unwrap();
+            let ev = rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            assert_eq!(ev.name, "happy");
+            assert!(ev.companion_id.starts_with("companion-"));
+
+            reset_notifier_for_test();
+        });
+    }
+
+    #[test]
+    fn test_menu_switch_unknown_name_errs_without_event() {
+        run_with_temp_home(|home| {
+            import_active_pack_with_sprites(home);
+            let (tx, rx) = mpsc::channel();
+            register_notifier(tx);
+
+            let err = apply_menu_switch("shy").unwrap_err();
+            assert!(err.contains("未找到"), "{err}");
+            // 名字前后空白与大小写不敏感，与工具入口同一套匹配规则
+            apply_menu_switch("  HAPPY  ").unwrap();
+            assert_eq!(
+                rx.recv_timeout(Duration::from_secs(1)).unwrap().name,
+                "happy"
+            );
+            assert!(rx.try_recv().is_err(), "失败调用不应发事件");
+
+            reset_notifier_for_test();
+        });
+    }
+
+    #[test]
+    fn test_menu_switch_default_and_empty_name() {
+        run_with_temp_home(|home| {
+            import_active_pack_with_sprites(home);
+            let (tx, rx) = mpsc::channel();
+            register_notifier(tx);
+
+            apply_menu_switch("default").unwrap();
+            let ev = rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            assert_eq!(ev.name, "default");
+            assert!(ev.path.ends_with("character.png"));
+
+            assert!(apply_menu_switch("   ").is_err(), "空白名拒绝");
+
+            reset_notifier_for_test();
         });
     }
 }

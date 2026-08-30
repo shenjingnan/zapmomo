@@ -162,9 +162,23 @@ mod tests {
     #[test]
     fn test_resolve_overrides_from_settings() {
         run_with_temp_home(|_home| {
+            // 绝对路径断言按平台取形：`/tmp/...` 在 Windows 无盘符、`is_absolute`
+            // 为 false，会被 join 锚定到当前盘根（`C:/tmp/...`），不能作为
+            // 「显式绝对路径原样使用」的样本。
+            let (dir_raw, dir_path) = if cfg!(windows) {
+                (
+                    r"C:\tmp\my-models".to_string(),
+                    PathBuf::from(r"C:\tmp\my-models"),
+                )
+            } else {
+                (
+                    "/tmp/my-models".to_string(),
+                    PathBuf::from("/tmp/my-models"),
+                )
+            };
             let settings = SpeakerSettings {
                 enabled: Some(true),
-                model_dir: Some("/tmp/my-models".to_string()),
+                model_dir: Some(dir_raw),
                 model: Some("my.onnx".to_string()),
                 threshold: Some(0.75),
                 min_audio_duration_secs: Some(0.5),
@@ -176,12 +190,9 @@ mod tests {
             };
             let cfg = resolve(Some(&settings)).unwrap();
             assert!(cfg.enabled);
-            assert_eq!(cfg.model_dir, PathBuf::from("/tmp/my-models"));
+            assert_eq!(cfg.model_dir, dir_path);
             assert_eq!(cfg.model.as_deref(), Some("my.onnx"));
-            assert_eq!(
-                cfg.model_path(),
-                Some(PathBuf::from("/tmp/my-models/my.onnx"))
-            );
+            assert_eq!(cfg.model_path(), Some(dir_path.join("my.onnx")));
             assert!((cfg.threshold - 0.75).abs() < f32::EPSILON);
             assert!((cfg.min_audio_duration_secs - 0.5).abs() < f32::EPSILON);
             assert_eq!(cfg.provider, "coreml");

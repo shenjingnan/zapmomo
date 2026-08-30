@@ -205,26 +205,13 @@ export interface CompanionSpriteEvent {
   path: string;
 }
 
-// ---- 表演（BongoCat 兼容模拟键鼠）----
-
-/** 表演场景（"both" = 键鼠同动，同时驱动键盘 + 鼠标两个通道） */
-export type PerformanceScene = "typing" | "mouse" | "both";
-
-/** `performance-started` 事件载荷（含鼠标通道时带 play_area） */
-export type PerformanceStartedPayload =
-  | { scene: "typing" }
-  | { scene: "mouse" | "both"; play_area: { x: number; y: number; width: number; height: number } };
-
-/** `performance-stopped` 事件载荷 */
-export interface PerformanceStoppedPayload {
-  scene: PerformanceScene;
+/** `companion-play-motion` 事件载荷（右键菜单「状态切换」播放 Live2D 动作） */
+export interface CompanionPlayMotionPayload {
+  /** 动作组名（model3.json FileReferences.Motions 的键） */
+  group: string;
+  /** 组内下标（播放一次，播完自动回待机） */
+  index: number;
 }
-
-/** `device-changed` 事件载荷（与 BongoCat device.rs 逐字节同构） */
-export type DeviceEventPayload =
-  | { kind: "KeyboardPress" | "KeyboardRelease"; value: string }
-  | { kind: "MousePress" | "MouseRelease"; value: string }
-  | { kind: "MouseMove"; value: { x: number; y: number } };
 
 /** `list_companions` / `set_active_companion` 里的单个伙伴 */
 export interface CompanionModelInfo {
