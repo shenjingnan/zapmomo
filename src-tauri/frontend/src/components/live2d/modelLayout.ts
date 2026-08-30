@@ -83,7 +83,8 @@ export function layoutModel(model: Live2DModel, width: number, height: number, m
 
 /**
  * 逐 drawable 输出可见包围盒（模型局部坐标，已乘 layout 缩放因子 sx/sy），
- * 供智能穿透把角色画面映射为窗口内的命中矩形集（见 SMART_CLICK_THROUGH_DESIGN.md）。
+ * 供智能穿透把角色画面映射为窗口内的命中矩形集
+ * （见 docs/plans/2026-08-28-companion-smart-click-through-design.md）。
  *
  * 复用 [`computeModelBounds`] 的 NaN 防线（moc3 v5 惰性填充 mesh）；另按
  * `coreModel.getDrawableOpacity` 过滤隐藏部件——不用 `DrawableFlags.IsVisible`，

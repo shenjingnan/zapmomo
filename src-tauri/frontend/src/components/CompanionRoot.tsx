@@ -418,7 +418,8 @@ export function CompanionRoot() {
   }, []);
 
   // 智能穿透：把「角色画面」换算成窗口内逻辑像素矩形集上报后端（150ms 去抖），
-  // Rust 轮询全局光标点查后动态切换穿透（SMART_CLICK_THROUGH_DESIGN.md）。
+  // Rust 轮询全局光标点查后动态切换穿透
+  // （docs/plans/2026-08-28-companion-smart-click-through-design.md）。
   // - 曾加载后清屏（url null）→ 上报空数组（明确穿透）；
   // - GIF/立绘 → object-contain 实际显示区（letterbox 空白不挡点击）；
   // - Live2D → 逐 drawable 可见包围盒；模型或布局未就绪时不上报，
