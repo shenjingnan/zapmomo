@@ -7,7 +7,7 @@ import type { HitRect } from "@/types/tauri";
  *
  * 前端把「角色画面」换算成窗口内逻辑像素矩形集上报给 Rust
  * （`set_companion_hit_region`），Rust 轮询全局光标做点查动态切换穿透，
- * 坐标契约见 SMART_CLICK_THROUGH_DESIGN.md §3/§6。
+ * 坐标契约见 docs/plans/2026-08-28-companion-smart-click-through-design.md §3/§6。
  */
 
 /** 上报去抖：窗口尺寸/布局连续变化时合并，避免 resize 期间高频 invoke。 */

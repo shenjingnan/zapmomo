@@ -2,7 +2,7 @@
 //!
 //! 智能穿透 = 光标落在角色不透明区域上时窗口接收鼠标，其余区域整窗穿透
 //! （WebView 架构下无 OS 级逐像素命中，区域近似是业界通行做法，见
-//! `SMART_CLICK_THROUGH_DESIGN.md`）。本模块只放**可纯计算**的决策函数，
+//! docs/plans/2026-08-28-companion-smart-click-through-design.md）。本模块只放**可纯计算**的决策函数，
 //! 供 `src-tauri` 的轮询线程与单一写点消费；放根 crate 是因为 CI 的
 //! `cargo test` 只编译 workspace default-members（根 crate），
 //! src-tauri 内嵌测试不进 CI。

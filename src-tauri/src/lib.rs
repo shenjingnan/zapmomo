@@ -7170,7 +7170,8 @@ pub fn run() {
             // 不销毁窗口对象，穿透状态跨显隐由轮询与 push 路径维护）。
             refresh_companion_pointer_policy(app.handle());
             sync_companion_ignore_cursor_events(app.handle());
-            // 智能穿透轮询线程：按光标位置动态切换穿透（SMART_CLICK_THROUGH_DESIGN.md）。
+            // 智能穿透轮询线程：按光标位置动态切换穿透
+            // （docs/plans/2026-08-28-companion-smart-click-through-design.md）。
             init_companion_pointer_geometry(app.handle());
             start_companion_pointer_watcher(app.handle().clone());
             // 位置锁定无需建窗时后端应用：拦截点在前端 CompanionRoot 的 mousedown，
