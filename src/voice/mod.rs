@@ -19,6 +19,7 @@ pub mod splitter;
 pub mod state;
 pub mod synthesizer;
 pub(crate) mod thinking;
+pub mod vad_gate;
 
 pub use config::{CliOverrides, ResolvedSessionConfig};
 pub use events::{ErrorKind, VoiceEvent, cli_sink};

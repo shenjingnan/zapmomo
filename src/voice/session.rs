@@ -46,6 +46,7 @@ use crate::voice::splitter::SentenceSplitter;
 use crate::voice::state::{SessionEvent, SessionState};
 use crate::voice::synthesizer::{SynthHandle, SynthResult};
 use crate::voice::thinking::ThinkingFilter;
+use crate::voice::vad_gate::{SpeechGate, chunk_rms};
 use sherpa_onnx::OnlineStream;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -144,6 +145,11 @@ pub struct VoiceSession {
     barge_in: Arc<AtomicBool>,
 
     history: Vec<InputItem>,
+    /// 本轮已执行的工具调用+结果（`LlmEvent::ToolRound` 暂存）。轮次完整结束
+    /// （有最终可见回复）才随 assistant 文本一起入史；`start_reply` / `do_barge_in`
+    /// 清空；无最终回复的轮（打断 / 空回复 / 错误）整组丢弃，保证历史永远是
+    /// user → tools → assistant 的完整形状。
+    pending_tools: Vec<InputItem>,
     reply: ReplyAccumulator,
     reply_done: bool,
     current_gen: u64,
@@ -157,6 +163,12 @@ pub struct VoiceSession {
     emit: Box<dyn Fn(VoiceEvent) + Send>,
     /// Listening 阶段连续静音累计（秒），达到 `asr_max_trailing_silence` 判定说完
     silence_accum: f32,
+    /// Listening 阶段本句连续语音累计（秒），达到 `asr_max_utterance_duration` 强制
+    /// 断句（防持续噪声/媒体人声让说完判定永不达成的「无限聆听」）。
+    speech_accum: f32,
+    /// 说话门控（Silero VAD 优先、RMS 降级）：Listening 说完判定与 WaitingSpeech
+    /// 进聆听门控共用（见 [`vad_gate::SpeechGate`]）。
+    speech_gate: SpeechGate,
     /// WaitingSpeech 阶段连续说话块计数（防瞬时噪音误触发）
     speech_hits: u32,
     /// WaitingSpeech 阶段等待时长累计（秒），超时回待唤醒
@@ -213,8 +225,10 @@ impl VoiceSession {
     /// - `speaker_slot`：`Some` 接宿主（Tauri `SpeakerState`）的声纹共享引擎槽，GUI
     ///   注册/识别与会话打标共用同一实例（注册即时生效）；槽空且 `[speaker].enabled`
     ///   时构造并回填。**enabled=false 时槽有实例也忽略**（不打标）；`None` = CLI 自建。
-    /// - **说完判定由 session 内 RMS 静音统一控制**，因此这里强制禁用 sherpa endpoint
-    ///   （避免其 rule1/rule2 的 1.2s/2.4s 尾静音在期望的 3s 前提前断句并 reset 流）。
+    /// - **说完判定由 session 内说话门控的静音累计统一控制**（Silero VAD 优先判人声、
+    ///   模型缺失降级 RMS，见 [`vad_gate::SpeechGate`]），因此这里强制禁用 sherpa
+    ///   endpoint（避免其 rule1/rule2 的 1.2s/2.4s 尾静音在期望的 3s 前提前断句并
+    ///   reset 流）。
     pub fn new_with_parts(
         mut cfg: ResolvedSessionConfig,
         emit: Box<dyn Fn(VoiceEvent) + Send>,
@@ -261,6 +275,8 @@ impl VoiceSession {
         let kws_stream = Self::make_kws_stream(&kws, &cfg)?;
         // 打断判定器在 cfg 被 move 进结构体前构造（阈值来自会话配置快照）
         let barge_detector = VoiceBargeInDetector::new(cfg.barge_in_similarity_threshold);
+        // 说话门控同样在 move 前构造（VAD 在位即启用，模式日志在内部打）
+        let speech_gate = SpeechGate::new(&cfg.asr, cfg.vad_silence_threshold);
         // 声纹识别（[speaker].enabled，默认关）：优先复用宿主共享槽（GUI 注册/识别与
         // 会话打标共用同一实例，注册即时生效）；槽空则构造并回填。enabled=false 时槽有
         // 实例也忽略（不打标）。构造失败（模型缺失/下载失败）只降级为无声纹，不阻断会话。
@@ -325,6 +341,7 @@ impl VoiceSession {
             running,
             barge_in: Arc::new(AtomicBool::new(false)),
             history: Vec::new(),
+            pending_tools: Vec::new(),
             reply: ReplyAccumulator::new(),
             reply_done: false,
             current_gen: 0,
@@ -335,6 +352,8 @@ impl VoiceSession {
             pending_speech: VecDeque::new(),
             emit,
             silence_accum: 0.0,
+            speech_accum: 0.0,
+            speech_gate,
             speech_hits: 0,
             speech_wait_accum: 0.0,
             welcome_played: false,
@@ -500,6 +519,9 @@ impl VoiceSession {
                 // 语义，保留流会把打断前喂入的播报回声与用户语音叠加进最终转写。
                 self.asr.reset(&self.cfg.asr);
                 self.silence_accum = 0.0;
+                self.speech_accum = 0.0;
+                // VAD 流内状态同样复位（防跨句残留「在说话」判定）
+                self.speech_gate.reset();
                 self.speaker_buf.clear();
             }
             SessionState::Armed => {
@@ -605,7 +627,8 @@ impl VoiceSession {
             MicEvent::Disconnected => return Err("麦克风已断开".to_string()),
         };
         if let Some(chunk) = chunk {
-            if chunk_rms(&chunk) > self.cfg.vad_silence_threshold {
+            // 说话门控判「真说话」（VAD 优先，键盘/媒体噪声不再误进聆听）
+            if self.speech_gate.is_speech(&chunk) {
                 self.speech_hits += 1;
                 if self.speech_hits >= 2 {
                     self.speech_hits = 0;
@@ -633,9 +656,10 @@ impl VoiceSession {
             MicEvent::Timeout => return Ok(()),
             MicEvent::Disconnected => return Err("麦克风已断开".to_string()),
         };
-        // RMS 门控：该块是否超过音量门限（离线用此标记缓冲内是否真有语音，防静音空转写）
+        // 说话门控：该块是否「人声在说话」（VAD 优先，降级 RMS；离线用此标记缓冲内
+        // 是否真有语音，防静音空转写）
         let chunk_secs = self.cfg.asr.chunk_size as f32 / self.cfg.asr.sample_rate as f32;
-        let speech_active = chunk_rms(&chunk) > self.cfg.vad_silence_threshold;
+        let speech_active = self.speech_gate.is_speech(&chunk);
         self.asr.feed_chunk(&chunk, speech_active);
         // 声纹缓冲：speech 块攒入（识别推迟到 finalize 整段做，避免逐 chunk 误识别）
         if speech_active && self.speaker_rec.is_some() {
@@ -656,13 +680,17 @@ impl VoiceSession {
                 is_final: false,
             });
         }
-        // RMS 静音累计：有语音则重置，否则累加当前块时长
+        // 静音/语音累计：说完判定（连续静音）与超长兜底（连续语音）分别计
         if speech_active {
             self.silence_accum = 0.0;
+            self.speech_accum += chunk_secs;
         } else {
             self.silence_accum += chunk_secs;
+            self.speech_accum = 0.0;
         }
-        // 结束判定：sherpa is_final（流式兜底）或连续静音达到 asr_max_trailing_silence
+        // 结束判定：sherpa is_final（流式兜底）、连续静音达 asr_max_trailing_silence、
+        // 或连续语音达 asr_max_utterance_duration（强制断句，防媒体人声等让说完判定
+        // 永不达成）
         if let Some(text) = collector.final_text {
             self.emit_speaker_tag();
             self.handle_user_final(text)?;
@@ -678,6 +706,15 @@ impl VoiceSession {
                 self.pending_texts.push_back(text);
                 return Ok(());
             }
+            self.handle_user_final(text)?;
+        } else if self.speech_accum >= self.cfg.asr_max_utterance_duration {
+            // 超长兜底：持续「说话」却始终等不到静音（媒体人声/回声漏网）→ 强制断句
+            // 进入回复轮；识别为空则 handle_user_final 保持聆听（累计已在其中清零）。
+            tracing::info!(
+                "[voice] 连续语音达 {:.0}s 上限，强制断句",
+                self.cfg.asr_max_utterance_duration
+            );
+            let text = self.force_finalize_asr();
             self.handle_user_final(text)?;
         }
         Ok(())
@@ -773,6 +810,7 @@ impl VoiceSession {
     fn handle_user_final(&mut self, text: String) -> Result<(), String> {
         let text = text.trim().to_string();
         self.silence_accum = 0.0;
+        self.speech_accum = 0.0;
         // 后置回声兜底（仅语音打断后的首轮识别：快照存在才比对，take 即消费）。
         // 单字 query（「停」）bigram 为空 Dice 为 0 天然放行，话头不受影响。
         if let Some(echo_ref) = self.barge_echo_ref.take()
@@ -799,8 +837,9 @@ impl VoiceSession {
             .push(InputItem::Message(ChatMessage::new(ChatRole::User, text)));
         truncate_history(&mut self.history, self.cfg.history_max);
         self.start_reply();
-        // 排空上一轮被打断后残留的 LLM 事件：迟到 Finished 会把已取消轮的回复再入
-        // 历史 + 提前置位 reply_done 形成空轮（与 poll_text_input 的排空同源）
+        // 排空残留的 LLM 事件再发起新一轮：迟到 Finished 会把已取消轮的回复再入
+        // 历史 + 提前置位 reply_done 形成空轮；dsh 播报经同一广播 channel，Armed 态
+        // 插播产生的滞留 ToolRound/Token 也会被当作本轮回复消费（与 poll_text_input 同源）
         self.drain_stale_llm_events();
         let input = build_llm_input(&self.cfg.llm.system_prompt, &self.history);
         match self.llm.generate(input, self.cfg.llm.params.clone()) {
@@ -829,6 +868,7 @@ impl VoiceSession {
         self.current_gen += 1;
         self.reply = ReplyAccumulator::new();
         self.reply_done = false;
+        self.pending_tools.clear();
         self.first_sentence = false;
         self.synth_enqueued = 0;
         self.synth_consumed = 0;
@@ -893,20 +933,27 @@ impl VoiceSession {
                         }
                     }
                 }
+                LlmEvent::ToolRound { items } => {
+                    // 门控：dsh 播报与 voice 共用引擎/广播 channel，滞留在 channel 里的
+                    // 播报工具轮不得混入 voice 上下文（仅本轮生成未结束时才接收）
+                    if !self.reply_done {
+                        self.pending_tools = items;
+                    }
+                }
                 LlmEvent::Finished(reason) => {
                     self.reply_done = true;
                     if let Some(tail) = self.reply.finish() {
                         self.enqueue_sentence(tail);
                     }
                     // 完整可见回复：入历史（LLM 上下文）+ 随 ReplyFinished 下发（宿主持久化记录）
+                    // 工具轮一并入史（user → tools → assistant），下一轮回传给 LLM
                     let reply_text = self.reply.take_text();
-                    if let Some(reply) = reply_text.clone() {
-                        self.history.push(InputItem::Message(ChatMessage::new(
-                            ChatRole::Assistant,
-                            reply,
-                        )));
-                        truncate_history(&mut self.history, self.cfg.history_max);
-                    }
+                    commit_round_to_history(
+                        &mut self.history,
+                        &mut self.pending_tools,
+                        reply_text.as_deref(),
+                        self.cfg.history_max,
+                    );
                     (self.emit)(VoiceEvent::ReplyFinished {
                         reason: format!("{reason:?}"),
                         text: reply_text,
@@ -914,6 +961,7 @@ impl VoiceSession {
                 }
                 LlmEvent::Error(e) => {
                     self.reply_done = true;
+                    self.pending_tools.clear();
                     (self.emit)(VoiceEvent::Error {
                         kind: ErrorKind::Llm,
                         message: e,
@@ -1095,6 +1143,7 @@ impl VoiceSession {
         self.speaker.stop();
         self.reply = ReplyAccumulator::new();
         self.reply_done = false;
+        self.pending_tools.clear();
         self.first_sentence = false;
         self.pending_speech.clear();
         self.stream_gate = SentencePlayGate::default();
@@ -1284,11 +1333,78 @@ fn build_llm_input(system_prompt: &str, history: &[InputItem]) -> Vec<InputItem>
     input
 }
 
+/// 工具结果入史截断阈值（字符数）。`run_command` 的结果上限 8K 字符
+/// （`llm::tools::CMD_OUTPUT_MAX_CHARS`），全量入史会随历史条数线性放大每次
+/// 请求的 token；只截「历史副本」——当轮 Agent Loop 内回灌给模型的完整结果
+/// 不受影响（agent 内部上下文与 history 是两份数据）。
+const TOOL_RESULT_HISTORY_MAX_CHARS: usize = 1024;
+
+/// 工具条目入史前的收敛：超长 `ToolResult.content` 截断并附标记。
+///
+/// `ToolCall.arguments` 不截——模型需要回忆自己当时请求了什么。
+fn clamp_tool_items_for_history(items: Vec<InputItem>) -> Vec<InputItem> {
+    items
+        .into_iter()
+        .map(|item| match item {
+            InputItem::ToolResult(mut t) => {
+                if t.content.chars().count() > TOOL_RESULT_HISTORY_MAX_CHARS {
+                    let kept: String = t
+                        .content
+                        .chars()
+                        .take(TOOL_RESULT_HISTORY_MAX_CHARS)
+                        .collect();
+                    t.content = format!("{kept}\n...（历史已截断）");
+                }
+                InputItem::ToolResult(t)
+            }
+            other => other,
+        })
+        .collect()
+}
+
+/// 轮次完整结束时入史：user 已在 `handle_user_final` 入史，此处补
+/// 「工具轮 → assistant 文本」，使下一轮 `build_llm_input` 的顺序为
+/// user → tools → assistant。
+///
+/// `reply` 为 `None`（打断 / 空回复 / 清洗后为空）时不入史并**整组丢弃**工具轮：
+/// 半截工具轮没有 assistant 收尾，入史会让历史以 tool_result 结尾，形成
+/// 非规范的对话上下文。返回是否入史（供测试断言）。
+fn commit_round_to_history(
+    history: &mut Vec<InputItem>,
+    pending_tools: &mut Vec<InputItem>,
+    reply: Option<&str>,
+    max: usize,
+) -> bool {
+    let Some(text) = reply else {
+        pending_tools.clear();
+        return false;
+    };
+    history.extend(clamp_tool_items_for_history(std::mem::take(pending_tools)));
+    history.push(InputItem::Message(ChatMessage::new(
+        ChatRole::Assistant,
+        text,
+    )));
+    truncate_history(history, max);
+    true
+}
+
 /// 裁剪历史到最近 `max` 条（丢弃最早的多余消息）。
+///
+/// 裁剪后做配对修复：从头部 drain 可能把工具对切成「ToolResult 露头」（工具对
+/// 中 ToolCall 在前，不可能反过来产生「头部 ToolCall 无 result」）；一并匹配
+/// `ToolCall` 是零成本防御，且能顺带处理「首个 Message 被裁掉后整组工具条目
+/// 露头」——循环删到头部为 Message 为止，保证发给 provider 的历史永远以消息
+/// 开头（Anthropic 要求首条为 user）。
 fn truncate_history(history: &mut Vec<InputItem>, max: usize) {
     if history.len() > max {
         let drop = history.len() - max;
         history.drain(..drop);
+    }
+    while matches!(
+        history.first(),
+        Some(InputItem::ToolCall(_)) | Some(InputItem::ToolResult(_))
+    ) {
+        history.remove(0);
     }
 }
 
@@ -1314,15 +1430,6 @@ fn decide_finish(follow_up: bool, max_turns: Option<u32>, turns: u32) -> FinishA
     } else {
         FinishAction::ToArmed
     }
-}
-
-/// 计算一段 f32 mono 音频的 RMS（均方根）音量，用于「真正说话」门控与静音累计。
-fn chunk_rms(chunk: &[f32]) -> f32 {
-    if chunk.is_empty() {
-        return 0.0;
-    }
-    let sum: f32 = chunk.iter().map(|s| s * s).sum();
-    (sum / chunk.len() as f32).sqrt()
 }
 
 /// ASR 反应：收集部分（流式字幕）与最终识别文本；一句说完（`is_final`）返回 `Stop`。
@@ -1607,6 +1714,191 @@ mod tests {
         assert_eq!(history.len(), 2);
     }
 
+    // ---------- 工具轮入史（commit_round_to_history / clamp_tool_items） ----------
+
+    use crate::llm::types::{ToolCall, ToolResult};
+
+    /// 构造一个 set_character_sprite 工具调用条目（id 同时当形象名）。
+    fn sprite_call(id: &str) -> InputItem {
+        InputItem::ToolCall(ToolCall {
+            name: "set_character_sprite".to_string(),
+            arguments: format!(r#"{{"name":"{id}"}}"#),
+            id: Some(id.to_string()),
+        })
+    }
+
+    /// 构造对应的工具结果条目。
+    fn sprite_result(id: &str, content: &str) -> InputItem {
+        InputItem::ToolResult(ToolResult {
+            id: id.to_string(),
+            name: "set_character_sprite".to_string(),
+            content: content.to_string(),
+        })
+    }
+
+    #[test]
+    fn test_commit_round_orders_user_tools_assistant() {
+        let mut history = vec![InputItem::Message(ChatMessage::new(
+            ChatRole::User,
+            "开心一点",
+        ))];
+        let mut pending = vec![
+            sprite_call("happy"),
+            sprite_result("happy", "已切换形象：happy"),
+        ];
+        assert!(commit_round_to_history(
+            &mut history,
+            &mut pending,
+            Some("好耶！"),
+            24
+        ));
+        assert_eq!(history.len(), 4, "user → call → result → assistant");
+        assert!(matches!(&history[0], InputItem::Message(m) if m.role == ChatRole::User));
+        assert!(matches!(&history[1], InputItem::ToolCall(_)));
+        assert!(matches!(&history[2], InputItem::ToolResult(_)));
+        assert!(
+            matches!(&history[3], InputItem::Message(m) if m.role == ChatRole::Assistant && m.content == "好耶！")
+        );
+        assert!(pending.is_empty(), "入史后暂存应清空");
+    }
+
+    #[test]
+    fn test_commit_round_without_tools() {
+        let mut history = vec![InputItem::Message(ChatMessage::new(ChatRole::User, "你好"))];
+        let mut pending = Vec::new();
+        assert!(commit_round_to_history(
+            &mut history,
+            &mut pending,
+            Some("你好！"),
+            24
+        ));
+        assert_eq!(history.len(), 2, "无工具轮 = user + assistant");
+        assert!(matches!(&history[1], InputItem::Message(m) if m.role == ChatRole::Assistant));
+    }
+
+    #[test]
+    fn test_commit_round_drops_tools_when_no_reply() {
+        let mut history = vec![InputItem::Message(ChatMessage::new(ChatRole::User, "你好"))];
+        let mut pending = vec![sprite_call("happy"), sprite_result("happy", "已切换")];
+        // 打断 / 空回复：工具轮整组丢弃，历史保持半截轮不入史
+        assert!(!commit_round_to_history(
+            &mut history,
+            &mut pending,
+            None,
+            24
+        ));
+        assert_eq!(history.len(), 1, "只有 user，工具轮不入史");
+        assert!(pending.is_empty(), "暂存应整组丢弃");
+    }
+
+    #[test]
+    fn test_commit_round_clamps_long_tool_result() {
+        let long = "x".repeat(5000);
+        let mut history = vec![InputItem::Message(ChatMessage::new(
+            ChatRole::User,
+            "跑个命令",
+        ))];
+        let mut pending = vec![
+            InputItem::ToolCall(ToolCall {
+                name: "run_command".to_string(),
+                arguments: r#"{"command":"ls"}"#.to_string(),
+                id: Some("call_1".to_string()),
+            }),
+            InputItem::ToolResult(ToolResult {
+                id: "call_1".to_string(),
+                name: "run_command".to_string(),
+                content: long.clone(),
+            }),
+        ];
+        assert!(commit_round_to_history(
+            &mut history,
+            &mut pending,
+            Some("跑完了"),
+            24
+        ));
+        match &history[2] {
+            InputItem::ToolResult(t) => {
+                let expected = format!(
+                    "{}\n...（历史已截断）",
+                    "x".repeat(TOOL_RESULT_HISTORY_MAX_CHARS)
+                );
+                assert_eq!(t.content, expected, "超长结果应截断到阈值并附标记");
+            }
+            other => panic!("应为 ToolResult，实际：{other:?}"),
+        }
+        // ToolCall.arguments 不截
+        match &history[1] {
+            InputItem::ToolCall(c) => {
+                assert_eq!(c.arguments, r#"{"command":"ls"}"#, "调用参数应原样保留");
+            }
+            other => panic!("应为 ToolCall，实际：{other:?}"),
+        }
+        let _ = long; // 已通过上面断言覆盖
+    }
+
+    // ---------- truncate_history 工具对配对修复 ----------
+
+    #[test]
+    fn test_truncate_history_splits_tool_pair_leaves_no_orphan() {
+        // u1, tc1, tr1, a1, u2, tc2, tr2, a2 → max=6，drain 2 条恰好切在 tc1/tr1
+        // 之间，孤儿 tr1 露头，修复循环应把它也删掉，头部回到 Message
+        let mut history = vec![
+            InputItem::Message(ChatMessage::new(ChatRole::User, "1")),
+            sprite_call("happy"),
+            sprite_result("happy", "已切换"),
+            InputItem::Message(ChatMessage::new(ChatRole::Assistant, "好耶")),
+            InputItem::Message(ChatMessage::new(ChatRole::User, "2")),
+            sprite_call("sad"),
+            sprite_result("sad", "已切换"),
+            InputItem::Message(ChatMessage::new(ChatRole::Assistant, "抱抱")),
+        ];
+        truncate_history(&mut history, 6);
+        assert_eq!(history.len(), 5, "孤儿 ToolResult 应被顺带删除");
+        assert!(
+            matches!(&history[0], InputItem::Message(m) if m.role == ChatRole::Assistant),
+            "头部应回到 Message，实际：{:?}",
+            history[0]
+        );
+    }
+
+    #[test]
+    fn test_truncate_history_drops_leading_tool_pair_together() {
+        // 直接构造头部为工具对的历史：修复循环应把整对一起删到 Message
+        let mut history = vec![
+            sprite_call("happy"),
+            sprite_result("happy", "已切换"),
+            InputItem::Message(ChatMessage::new(ChatRole::Assistant, "好耶")),
+        ];
+        truncate_history(&mut history, 99);
+        assert_eq!(history.len(), 1);
+        assert!(matches!(&history[0], InputItem::Message(_)));
+    }
+
+    #[test]
+    fn test_truncate_history_all_tool_items_at_head() {
+        // 全是工具条目：删空不 panic
+        let mut history = vec![sprite_call("happy"), sprite_result("happy", "已切换")];
+        truncate_history(&mut history, 1);
+        assert!(history.is_empty(), "无 Message 可落脚时应删空");
+    }
+
+    #[test]
+    fn test_build_llm_input_includes_tool_items_in_order() {
+        let history = vec![
+            InputItem::Message(ChatMessage::new(ChatRole::User, "开心一点")),
+            sprite_call("happy"),
+            sprite_result("happy", "已切换形象：happy"),
+            InputItem::Message(ChatMessage::new(ChatRole::Assistant, "好耶！")),
+        ];
+        let input = build_llm_input("你是助手", &history);
+        assert_eq!(input.len(), 5, "system + 4 条历史原样透传");
+        assert!(matches!(&input[0], InputItem::Message(m) if m.role == ChatRole::System));
+        assert!(matches!(&input[1], InputItem::Message(m) if m.role == ChatRole::User));
+        assert!(matches!(&input[2], InputItem::ToolCall(_)));
+        assert!(matches!(&input[3], InputItem::ToolResult(_)));
+        assert!(matches!(&input[4], InputItem::Message(m) if m.role == ChatRole::Assistant));
+    }
+
     #[test]
     fn test_decide_finish_max_turns_wins_over_follow_up() {
         // 达轮上限直接停，不开跟听窗口
@@ -1644,21 +1936,6 @@ mod tests {
             decide_finish(false, Some(5), 3),
             FinishAction::ToArmed
         ));
-    }
-
-    #[test]
-    fn test_chunk_rms_values() {
-        assert_eq!(chunk_rms(&[]), 0.0);
-        assert_eq!(chunk_rms(&[0.0, 0.0, 0.0]), 0.0);
-        // 恒定振幅 → RMS = 该振幅
-        assert!((chunk_rms(&[0.5, 0.5]) - 0.5).abs() < 1e-6);
-        // 峰值 1.0 正弦 → RMS ≈ 0.707
-        let sine: Vec<f32> = (0..3200)
-            .map(|i| ((i as f32 / 3200.0) * std::f32::consts::TAU).sin())
-            .collect();
-        assert!((chunk_rms(&sine) - std::f32::consts::FRAC_1_SQRT_2).abs() < 0.01);
-        // 幅度更大 → RMS 更大（用于阈值门控判断）
-        assert!(chunk_rms(&[0.9, 0.9]) > chunk_rms(&[0.1, 0.1]));
     }
 
     // ---------- classify_post_barge_text：后置回声兜底判定 ----------

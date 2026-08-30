@@ -9,6 +9,9 @@ use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
+// 气泡按角色位移平移只在非 macOS 走（macOS 改用子窗口原生联动，见 setup 气泡面板块）
+#[cfg(not(target_os = "macos"))]
+use tauri::Position;
 #[cfg(target_os = "macos")]
 use tauri::TitleBarStyle;
 #[cfg(target_os = "macos")]
@@ -23,6 +26,9 @@ use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
 use zapmomo::asr::config::AsrParamsPatch;
 use zapmomo::asr::{AsrReaction, AsrResult};
+// 同上：仅非 macOS 的事件联动路径使用（macOS 为子窗口原生联动）
+#[cfg(not(target_os = "macos"))]
+use zapmomo::companion_bubble_link::bubble_follow_position;
 use zapmomo::companion_click_through::{
     CompanionPointerPolicy, EXIT_MARGIN_PX, HitRect, cursor_hit, desired_ignore_cursor_events,
     next_hold, resolve_smart_click_through,
@@ -2050,6 +2056,8 @@ fn forward_llm_events(
                 let _ = app.emit("llm-error", e);
                 break;
             }
+            // 工具轮只在根 crate 侧回传跨轮上下文，前端/持久化只承载文本，忽略
+            Ok(LlmEvent::ToolRound { .. }) => {}
             Ok(LlmEvent::Status { ready }) => {
                 let _ = app.emit("llm-status", LlmStatusPayload { ready });
                 if stop_on_status {
@@ -4527,9 +4535,11 @@ fn apply_active_companion(app: &AppHandle, id: &str) {
 #[cfg(target_os = "macos")]
 const MACOS_COMPANION_BACK_LEVEL: i64 = -1;
 
-/// 气泡/输入条面板的 macOS 层级：Floating(4) 之上 1 级，建窗时常置、不随角色层级切换。
+/// 气泡/输入条面板的 macOS 层级：Floating(4) 之上 1 级，建窗时常置。
 /// 角色前置 = Floating(4)、置底 = -1（见 `apply_companion_layer_platform`），层级 5
 /// 保证聊天气泡与文字输入条恒高于角色，角色任何层级下都不会遮挡它们。
+/// 气泡挂为角色子窗口及角色层级切换都会把气泡层级连带对齐到角色，须在两处
+/// 重断本层级（见 setup 气泡面板块与本函数尾部）。
 /// （Tauri `always_on_top` 只设 NSFloatingWindowLevel=3，低于角色前置的 4，
 /// 曾导致角色前置时角色反而盖住气泡/输入条、无法操作。）
 #[cfg(target_os = "macos")]
@@ -4556,6 +4566,12 @@ fn apply_companion_layer_platform(app: &AppHandle, layer: CompanionWindowLayer) 
         // 图标之上：-1 在普通窗口之下、桌面图标与壁纸之上。不切换 NSPanel floating 属性——
         // z-order 完全由 set_level 控制（浮层属性不参与层级），运行时切换 floating 会破坏存活 WebView 渲染。
         CompanionWindowLayer::Back => panel.set_level(MACOS_COMPANION_BACK_LEVEL),
+    }
+    // 角色层级切换会把已挂的气泡子窗口层级连带对齐：重断气泡常置层级，
+    // 保证角色置底(-1)时气泡仍浮在普通窗口之上。启动期 bubble 面板尚未
+    // 注册（本函数在 bubble to_panel 之前调用），报错静默跳过。
+    if let Ok(bubble) = app.get_webview_panel("bubble") {
+        bubble.set_level(MACOS_OVERLAY_PANEL_LEVEL);
     }
 }
 
@@ -6942,7 +6958,8 @@ pub fn run() {
             // macOS：转成非激活面板——拖动/悬停不激活应用、不抢键盘焦点。
             #[cfg(target_os = "macos")]
             {
-                use tauri_nspanel::{CollectionBehavior, StyleMask, WebviewWindowExt};
+                use objc2_app_kit::NSWindowOrderingMode;
+                use tauri_nspanel::{CollectionBehavior, ManagerExt, StyleMask, WebviewWindowExt};
 
                 if let Some(window) = app.get_webview_window("bubble")
                     && let Ok(panel) = window.to_panel::<BubblePanel>()
@@ -6958,6 +6975,25 @@ pub fn run() {
                     // 层级常置 Floating 之上 1 级：恒高于角色（前置 4 / 置底 -1），
                     // 角色永不遮挡气泡。
                     panel.set_level(MACOS_OVERLAY_PANEL_LEVEL);
+
+                    // 挂为角色子窗口：AppKit 在窗口服务器同一事务内随父移动（零延迟、
+                    // 不经事件循环），替代 Moved 事件联动——tao macOS 的 windowDidMove
+                    // 入队后下一拍才派发，事件联动永远比角色慢一帧（拖动掉帧根因）。
+                    // Above 同时保证子窗口恒在父之上。get_webview_panel 报错静默跳过，
+                    // 与 apply_companion_layer_platform 同款（面板未注册理论不可达）。
+                    if let Ok(companion) = app.get_webview_panel("companion") {
+                        unsafe {
+                            // SAFETY: setup 闭包在主线程执行；AppKit 持有子窗口强引用，
+                            // 生命周期随父窗口，无需 removeChildWindow。
+                            companion.as_panel().addChildWindow_ordered(
+                                panel.as_panel(),
+                                NSWindowOrderingMode::Above,
+                            );
+                        }
+                        // addChildWindow 会把子窗口层级对齐到父级（Chromium/Qt 同款补丁），
+                        // 重断回常置层级，避免气泡被拉进角色层级。
+                        panel.set_level(MACOS_OVERLAY_PANEL_LEVEL);
+                    }
                 }
             }
             // 显隐跟随角色（companion 默认可见 → 气泡随之显示；内容为空时仍点穿）
@@ -7068,6 +7104,35 @@ pub fn run() {
                 let state = window.app_handle().state::<CompanionPointerState>();
                 match event {
                     WindowEvent::Moved(p) => {
+                        // macOS 不在此联动：气泡已挂为角色子窗口（见 setup 气泡面板块），
+                        // AppKit 原生随动后再按位移平移会把位移叠加两次（气泡甩飞）。
+                        #[cfg(not(target_os = "macos"))]
+                        {
+                            // 气泡联动：拖动角色时气泡按相同位移平移，保持相对距离
+                            //（单向联动，单独拖气泡不影响角色；气泡被联动移动后经其
+                            // 自身 onMoved 写回 [bubble.window_position]，无需额外持久化）。
+                            // 须在下方 origin 缓存更新**之前**取旧值求位移；决策纯函数
+                            // 在根 crate companion_bubble_link（CI 只测根 crate）。
+                            if let Some(bubble) = window.app_handle().get_webview_window("bubble") {
+                                let old = state
+                                    .origin
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .map(|o| (o.x, o.y));
+                                let bubble_now = bubble
+                                    .outer_position()
+                                    .ok()
+                                    .map(|b| (f64::from(b.x), f64::from(b.y)));
+                                let companion = (f64::from(p.x), f64::from(p.y));
+                                let next = bubble_now
+                                    .and_then(|b| bubble_follow_position(old, companion, b));
+                                if let Some((x, y)) = next {
+                                    let _ = bubble.set_position(Position::Physical(
+                                        PhysicalPosition::new(x.round() as i32, y.round() as i32),
+                                    ));
+                                }
+                            }
+                        }
                         *state.origin.lock().unwrap_or_else(|e| e.into_inner()) =
                             Some(PhysicalPosition::new(f64::from(p.x), f64::from(p.y)));
                         *state.last_move_at.lock().unwrap_or_else(|e| e.into_inner()) =
