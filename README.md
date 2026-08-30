@@ -126,6 +126,7 @@ xattr -cr "/Applications/ZapMomo.app"
 | [Google AI Studio（Gemini）](https://aistudio.google.com/) | `gemini-3.7-flash` 等 Flash 系列、`gemini-2.5-pro` | 免费额度有限速；免费档对话数据会被用于改进产品，注册后获取 API Key |
 | [OpenRouter](https://openrouter.ai/models?max_price=0) | 大量 `:free` 模型：Nemotron 3 Ultra、MiniMax M3、GLM 5.2 等 | 模型聚合平台，免费档有限速（[限速说明](https://openrouter.ai/docs/api-reference/limits)），注册后获取 API Key |
 | [硅基流动 SiliconFlow](https://cloud.siliconflow.cn/) | `Qwen3-8B`、`DeepSeek-R1-0528-Qwen3-8B`、`GLM-Z1-9B-0414` 等十余个免费模型 | 免费档限速，注册后获取 API Key |
+| [魔搭 ModelScope](https://modelscope.cn/) | `Qwen`、`DeepSeek` 等大量模型免费推理 | 每账号 2000 次/天（单模型约 100~200 次/天），不按 Token 收费、无 SLA 保证，注册后获取 API Key |
 
 ## deepseek-harness 集成（dsh 桥）
 
