@@ -147,7 +147,7 @@ beforeEach(() => {
           settings_path: "/zap/.zapmomo/settings.toml",
         });
       default:
-        // useVoiceSession 等其余命令（is_voice_session_running 等）默认放行。
+        // 其余命令默认放行。
         return Promise.resolve(undefined);
     }
   });
