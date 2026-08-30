@@ -14,6 +14,9 @@ const AWAITING_REPLY_PATIENCE_MS = 5000;
  * 聊天气泡（独立 bubble 窗口的唯一内容视图，有且只有一个聊天气泡）。
  *
  * 内容三路共用同一气泡，构成「一轮对话视图」（先用户句、后回复）：
+ * - `listeningText`：ASR 流式部分识别结果（聆听中逐字刷新，斜体「我（识别中）：」）。
+ *   首字到达即视为新一轮发言开始，顶掉旧轮全部内容；is_final 到达后由正式用户句
+ *   替换；无 final 的清空（空识别/回声丢弃 flush）则整句作废清屏。
  * - `userText`：当前轮用户句。到达即上屏（消除首 token 前的空窗）；新一轮
  *   （turnSeq 变化，未传时按 userText 值判新）顶掉旧轮全部内容（含静置旧回复
  *   与展示中插播）。
@@ -24,7 +27,7 @@ const AWAITING_REPLY_PATIENCE_MS = 5000;
  * - `announcement`：dsh（DeepSeek Harness）事件播报台词。被流式回复或「用户句
  *   等回复耐心窗口」（AWAITING_REPLY_PATIENCE_MS，到期自动解除压制）压制时暂存，
  *   压制解除后新鲜期内补展示，超期丢弃；插播是独立发言，补展示时清掉用户句；
- *   展示中新插播替换旧插播（最新发言胜出）。
+ *   展示中新插播替换旧插播（最新发言胜出）。聆听中插播同样暂存压制。
  *
  * 内容一旦出现即静置常驻，唯一消失途径是用户点击气泡（新一轮内容到达时
  * 自然顶替除外）——「想看的内容不被程序收走」。点击与拖动共用气泡面：按住后
@@ -37,6 +40,7 @@ const AWAITING_REPLY_PATIENCE_MS = 5000;
 export function VoiceReplyBubble({
   userText,
   turnSeq,
+  listeningText = "",
   text,
   announcement = "",
   onVisibleChange,
@@ -45,6 +49,8 @@ export function VoiceReplyBubble({
   userText?: string;
   /** 当前轮序号，变化即新轮；未传时退化为按 userText 值判新 */
   turnSeq?: number;
+  /** ASR 流式部分识别结果（聆听中逐字刷新；空串表示无） */
+  listeningText?: string;
   text: string;
   /** dsh 事件播报台词（空串表示无插播） */
   announcement?: string;
@@ -52,6 +58,11 @@ export function VoiceReplyBubble({
 }) {
   const [visibleUser, setVisibleUser] = useState("");
   const [visibleText, setVisibleText] = useState("");
+  // 展示中的用户句是否处于「识别中」（斜体 + 标签），is_final/dismiss/flush 复位
+  const [userListening, setUserListening] = useState(false);
+  // 聆听进行中标记（ref，不触发渲染）：listeningText 清空且无 final（flush 退出）
+  // 时据此清掉识别中句
+  const listeningRef = useRef(false);
   // 插播暂存与新鲜期判定
   const pendingAnnouncementRef = useRef<{ text: string; at: number } | null>(null);
   const lastAnnouncementRef = useRef("");
@@ -91,6 +102,9 @@ export function VoiceReplyBubble({
         : seq !== lastTurnRef.current.seq;
     if (isNewTurn) {
       lastTurnRef.current = { seq, userText: userText ?? "" };
+      // 正式用户句接管展示：聆听态复位（识别中标签/斜体随之解除）
+      listeningRef.current = false;
+      setUserListening(false);
       if (userText) {
         awaitingReplyRef.current = true;
         awaitingSinceRef.current = Date.now();
@@ -104,6 +118,25 @@ export function VoiceReplyBubble({
         // 同批已有首 token 则不清场（直接被下方 text 分支覆盖为新回复）
         if (!text) setVisibleText("");
       }
+    }
+
+    // 聆听中逐字上屏：partial 到达即视为新一轮发言开始，顶掉旧轮全部内容。
+    // 置于回复文本分支之前：语音打断回到聆听时，上一轮残留的流式文本由首个
+    // partial 清场且不再回写；插播保持暂存（早退跳过下方展示分支）。
+    // is_final 到达后 listeningText 清空，由上方新轮登记分支接管为正式用户句。
+    if (listeningText) {
+      listeningRef.current = true;
+      setUserListening(true);
+      setVisibleUser(listeningText);
+      setVisibleText("");
+      return;
+    }
+    // 聆听中途结束（空识别/回声丢弃的空 partial flush，无 final）：识别中句
+    // 作废清屏；暂存中的插播落到下方分支按新鲜期照常补展示
+    if (listeningRef.current) {
+      listeningRef.current = false;
+      setUserListening(false);
+      setVisibleUser("");
     }
 
     if (text) {
@@ -136,7 +169,7 @@ export function VoiceReplyBubble({
 
     // text 清空（正常完结 / 打断 / 停止）：内容静置保留，等用户点击关闭。
     // 同 props 重渲染不复活——展示仅由新内容或点击关闭驱动。
-  }, [text, announcement, userText, turnSeq, patienceTick]);
+  }, [text, announcement, userText, turnSeq, listeningText, patienceTick]);
 
   // 卸载时清理定时器
   useEffect(
@@ -161,6 +194,8 @@ export function VoiceReplyBubble({
     clearTimeout(freshTimerRef.current);
     clearTimeout(patienceTimerRef.current);
     pendingAnnouncementRef.current = null;
+    listeningRef.current = false;
+    setUserListening(false);
     setVisibleUser("");
     setVisibleText("");
   };
@@ -192,7 +227,8 @@ export function VoiceReplyBubble({
         const press = pressRef.current;
         pressRef.current = null;
         if (!press || press.moved) return;
-        if (text) return; // 流式进行中内容未定稿，点击不响应（点了也会被下一 token 顶回）
+        // 流式/聆听进行中内容未定稿，点击不响应（点了也会被下一 token 顶回）
+        if (text || listeningText) return;
         void api.bubbleDebugLog({ message: "气泡点击 → 关闭" });
         dismiss();
       }}
@@ -204,8 +240,13 @@ export function VoiceReplyBubble({
           两段轮次视图沿用「不截断」语义：用户句/回复均不做行数钳制 */}
       <div className="max-h-[400px] w-full space-y-1 overflow-y-auto rounded-xl border border-border bg-popover px-4 py-2.5 text-sm text-text-primary shadow-lg">
         {visibleUser && (
-          <p className="whitespace-pre-wrap break-words text-xs text-muted-foreground">
-            我：{visibleUser}
+          <p
+            className={`whitespace-pre-wrap break-words text-xs text-muted-foreground${
+              userListening ? " italic" : ""
+            }`}
+          >
+            {userListening ? "我（识别中）：" : "我："}
+            {visibleUser}
           </p>
         )}
         {visibleText && <p className="whitespace-pre-wrap break-words">{visibleText}</p>}

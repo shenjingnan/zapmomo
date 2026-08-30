@@ -713,12 +713,14 @@ impl VoiceSession {
         {
             tracing::info!("[voice] 打断后识别文本与回声参考高相似，判回声漏网，保持聆听");
             self.asr.reset(&self.cfg.asr);
+            self.flush_stale_partial();
             return Ok(());
         }
         if text.is_empty() {
             // force_finalize 已终结旧句，复位后端后继续聆听（不回待唤醒）
             tracing::debug!("[voice] ASR 空识别，保持聆听");
             self.asr.reset(&self.cfg.asr);
+            self.flush_stale_partial();
             return Ok(());
         }
         (self.emit)(VoiceEvent::Transcript {
@@ -754,6 +756,18 @@ impl VoiceSession {
     /// （按模型族分派到 `AsrBackend::finalize`）。
     fn force_finalize_asr(&mut self) -> String {
         self.asr.finalize(&self.cfg.asr)
+    }
+
+    /// 该句作废（空识别 / 回声丢弃）时清掉聆听中的流式字幕（空 partial flush）。
+    ///
+    /// 两处提前返回不发 final 事件，前端气泡的「我（识别中）：」会残留半截识别
+    /// 文本；空非 final 文本对 CLI sink 与日志镜像零输出（`events.rs` 按非空守卫），
+    /// 仅驱动前端清屏。
+    fn flush_stale_partial(&mut self) {
+        (self.emit)(VoiceEvent::Transcript {
+            text: String::new(),
+            is_final: false,
+        });
     }
 
     /// 进入一轮新生成前的重置（gen 递增、清空上一轮回复状态、复位合成取消）。

@@ -109,6 +109,18 @@ describe("useVoiceSession", () => {
     expect(screen.getByTestId("turnSeq").textContent).toBe("2");
   });
 
+  it("打断回 armed/idle 清空 partial：聆听中断不留残句（partial 仅聆听态有意义）", () => {
+    render(<Probe />);
+    emit("voice-session-transcript", { text: "说到一半", is_final: false });
+    expect(screen.getByTestId("partial").textContent).toBe("说到一半");
+    emit("voice-session-state", { running: true, state: "armed" });
+    expect(screen.getByTestId("partial").textContent).toBe("");
+    // idle 同样清
+    emit("voice-session-transcript", { text: "又说一半", is_final: false });
+    emit("voice-session-state", { running: false, state: "idle" });
+    expect(screen.getByTestId("partial").textContent).toBe("");
+  });
+
   it("LLM token 累积为 pendingReply，reply-finished 提交桌宠记录并清空", () => {
     render(<Probe />);
     emit("voice-session-token", { delta: "今天" });
