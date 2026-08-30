@@ -1,5 +1,5 @@
 import { open } from "@tauri-apps/plugin-dialog";
-import { CircleCheck, Copy, Download, Puzzle, RotateCw } from "lucide-react";
+import { CircleCheck, Copy, Download, Puzzle, RotateCw, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -27,7 +27,8 @@ const NOW_TICK_MS = 5_000;
  *
  * 状态机（lib/dshIntegration 纯函数合成）：no-dsh / no-profile / not-installed /
  * half-activated / awaiting-restart / online。检测全走文件级（~/.dsh 布局），
- * 在线判定走插件心跳（45s 窗口）；原设置页 dsh 区块的开关与测试播报原样迁入。
+ * 在线判定走插件心跳（45s 窗口）。桥无独立开关：启停跟随插件安装状态——安装
+ * 完成后端自动拉起、卸载完成后自动停止；「启用 dsh 桥」开关已随该语义移除。
  */
 export function DshIntegrationCard() {
   const toast = useToast();
@@ -36,6 +37,7 @@ export function DshIntegrationCard() {
   const [heartbeatAt, setHeartbeatAt] = useState<number | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const [install, setInstall] = useState<DshInstallProgress | null>(null);
+  const [installOp, setInstallOp] = useState<"install" | "uninstall">("install");
   const [installing, setInstalling] = useState(false);
 
   const reload = useCallback(() => {
@@ -93,17 +95,6 @@ export function DshIntegrationCard() {
     return () => clearInterval(t);
   }, []);
 
-  const toggleEnabled = async (enabled: boolean) => {
-    try {
-      await api.setDshEnabled({ enabled });
-      setInfo((prev) => (prev ? { ...prev, enabled } : prev));
-      toast.success(enabled ? "dsh 桥已开启" : "dsh 桥已关闭");
-      reload();
-    } catch (e) {
-      toast.error(String(e));
-    }
-  };
-
   const patchParams = async (params: {
     voice_enabled?: boolean;
     llm_enabled?: boolean;
@@ -118,10 +109,24 @@ export function DshIntegrationCard() {
   };
 
   const handleInstall = async (path?: string) => {
+    setInstallOp("install");
     setInstalling(true);
     setInstall({ state: "discovering", message: "准备安装…" });
     try {
       await api.installDshPlugin({ path: path ?? null });
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setInstalling(false);
+    }
+  };
+
+  const handleUninstall = async () => {
+    setInstallOp("uninstall");
+    setInstalling(true);
+    setInstall({ state: "discovering", message: "准备卸载…" });
+    try {
+      await api.uninstallDshPlugin();
     } catch (e) {
       toast.error(String(e));
     } finally {
@@ -151,6 +156,9 @@ export function DshIntegrationCard() {
   const state = composeIntegrationState(integration, info.running, heartbeatAt, now);
   const meta = STATE_META[state];
   const busy = installing;
+  // 插件已激活（进入 dsh bundles）：桥随此后台常驻，行为开关可用
+  const activated = state === "awaiting-restart" || state === "online";
+  const pluginInstalled = state === "half-activated" || activated;
 
   return (
     <section className="overflow-hidden rounded-[16px] border border-panel-border bg-panel-background">
@@ -158,9 +166,7 @@ export function DshIntegrationCard() {
         <div className="flex items-center gap-2.5">
           <Puzzle className="h-4 w-4 shrink-0 text-text-secondary" />
           <div>
-            <h2 className="text-base font-semibold text-text-primary">
-              deepseek-harness
-            </h2>
+            <h2 className="text-base font-semibold text-text-primary">deepseek-harness</h2>
             <p className="mt-0.5 text-xs text-text-muted">
               dsh 任务事件实时联动桌宠：气泡 + 语音播报
             </p>
@@ -222,9 +228,7 @@ export function DshIntegrationCard() {
           )}
           {state === "awaiting-restart" && (
             <p className="text-sm text-text-muted">
-              {info.running
-                ? "插件已就绪。启动 dsh web 后将自动上线（首次安装需重启 dsh web 生效）。"
-                : "插件已就绪，但 dsh 桥未运行——开启下方「启用 dsh 桥」后，启动 dsh web 即自动上线。"}
+              插件已就绪，启动 dsh web 即自动上线（首次安装需重启 dsh web 生效）。
             </p>
           )}
           {state === "online" && (
@@ -252,11 +256,12 @@ export function DshIntegrationCard() {
                     : "text-sm text-text-muted"
                 }
               >
-                {install.state === "failed"
+                {/* 失败兜底文案与重试按钮仅安装态需要；卸载失败直接展示后端消息 */}
+                {install.state === "failed" && installOp === "install"
                   ? "安装失败。可手动选择 dsh 可执行文件重试，或复制命令在终端执行。"
                   : install.message}
               </p>
-              {install.state === "failed" && (
+              {install.state === "failed" && installOp === "install" && (
                 <div className="flex flex-wrap items-center gap-1.5">
                   <Button size="sm" variant="outline" onClick={() => void pickExecutable()}>
                     <RotateCw className="h-3.5 w-3.5" />
@@ -272,23 +277,14 @@ export function DshIntegrationCard() {
           )}
         </div>
 
-        {/* 桥开关组（原设置页 dsh 区块逻辑原样迁入） */}
+        {/* 行为开关组：仅在插件已激活后有意义（桥启停本身跟随安装状态，无独立开关） */}
         <div className="px-3.5 py-2.5">
-          <div className="flex items-center justify-between gap-4 py-1.5 text-sm">
-            <span>启用 dsh 桥</span>
-            <Switch
-              aria-label="启用 dsh 桥"
-              checked={info.enabled}
-              disabled={busy}
-              onCheckedChange={(v) => void toggleEnabled(v)}
-            />
-          </div>
           <div className="flex items-center justify-between gap-4 py-1.5 text-sm">
             <span>事件语音播报（语音会话进行中自动静音）</span>
             <Switch
               aria-label="事件语音播报"
               checked={info.voice_enabled}
-              disabled={busy || !info.enabled}
+              disabled={busy || !activated}
               onCheckedChange={(v) => void patchParams({ voice_enabled: v })}
             />
           </div>
@@ -297,7 +293,7 @@ export function DshIntegrationCard() {
             <Switch
               aria-label="LLM 播报文案"
               checked={info.llm_enabled}
-              disabled={busy || !info.enabled}
+              disabled={busy || !activated}
               onCheckedChange={(v) => void patchParams({ llm_enabled: v })}
             />
           </div>
@@ -306,7 +302,7 @@ export function DshIntegrationCard() {
             <Switch
               aria-label="写入对话记录"
               checked={info.record_to_history}
-              disabled={busy || !info.enabled}
+              disabled={busy || !activated}
               onCheckedChange={(v) => void patchParams({ record_to_history: v })}
             />
           </div>
@@ -314,7 +310,7 @@ export function DshIntegrationCard() {
             <Button
               size="sm"
               variant="outline"
-              disabled={!info.enabled}
+              disabled={!activated}
               onClick={() =>
                 void api
                   .testDshAnnounce()
@@ -324,6 +320,17 @@ export function DshIntegrationCard() {
             >
               测试播报
             </Button>
+            {pluginInstalled && (
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={busy}
+                onClick={() => void handleUninstall()}
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                卸载插件
+              </Button>
+            )}
           </div>
         </div>
       </dl>

@@ -472,7 +472,6 @@ export interface DshBridgeStatus {
 
 /** `get_dsh_config` 返回 */
 export interface DshConfigInfo {
-  enabled: boolean;
   port: number;
   voice_enabled: boolean;
   llm_enabled: boolean;

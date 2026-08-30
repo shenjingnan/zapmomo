@@ -3063,15 +3063,15 @@ fn dsh_announcer(
 }
 
 /// 启动 dsh 桥：解析配置 → spawn 服务线程（绑 loopback、写发现文件、事件走管线）。
+///
+/// 调用方负责启停时机（桥无独立开关，跟随插件安装状态）：app 启动时判定
+/// `plugin_activated`、卡片内安装完成后拉起。
 fn start_dsh_bridge_impl(app: AppHandle, state: &DshBridgeState) -> Result<(), String> {
     if state.is_running() {
         return Err("dsh 桥已在运行".to_string());
     }
     let settings = zapmomo::config::settings::load_settings()?;
     let cfg = zapmomo::dsh::config::resolve(settings.as_ref().and_then(|s| s.dsh.as_ref()));
-    if !cfg.enabled {
-        return Err("dsh 桥未启用".to_string());
-    }
     // 清陈旧发现文件（上次退出未清理的残留）
     zapmomo::dsh::remove_discovery();
 
@@ -3203,7 +3203,6 @@ fn stop_dsh_bridge_inner(state: &DshBridgeState) -> Result<(), String> {
 /// GUI 展示用的 dsh 桥配置信息。
 #[derive(Serialize)]
 struct DshConfigInfo {
-    enabled: bool,
     port: u16,
     voice_enabled: bool,
     llm_enabled: bool,
@@ -3222,7 +3221,6 @@ fn get_dsh_config(state: State<'_, DshBridgeState>) -> Result<DshConfigInfo, Str
     let cfg = zapmomo::dsh::config::resolve(settings.as_ref().and_then(|s| s.dsh.as_ref()));
     let actual = state.current_port();
     Ok(DshConfigInfo {
-        enabled: cfg.enabled,
         port: cfg.port,
         voice_enabled: cfg.voice_enabled,
         llm_enabled: cfg.llm_enabled,
@@ -3236,29 +3234,6 @@ fn get_dsh_config(state: State<'_, DshBridgeState>) -> Result<DshConfigInfo, Str
             .clone(),
         discovery_path: zapmomo::dsh::discovery_file().display().to_string(),
     })
-}
-
-#[tauri::command]
-fn set_dsh_enabled(
-    app: AppHandle,
-    state: State<'_, DshBridgeState>,
-    enabled: bool,
-) -> Result<(), String> {
-    let mut settings = zapmomo::config::settings::load_settings()?.unwrap_or_default();
-    settings.dsh.get_or_insert_with(Default::default).enabled = Some(enabled);
-    zapmomo::config::settings::save_settings(&settings)?;
-    if enabled {
-        if state.is_running() {
-            // 幂等：目标态已达成直接成功（避免重复开关弹错误提示）
-            Ok(())
-        } else {
-            start_dsh_bridge_impl(app, state.inner())
-        }
-    } else if state.is_running() {
-        stop_dsh_bridge_inner(state.inner())
-    } else {
-        Ok(())
-    }
 }
 
 /// `set_dsh_params` 载荷：可调整项（缺省不修改）。
@@ -3380,36 +3355,87 @@ impl Drop for DshInstallGuard {
     }
 }
 
-/// 安装全程超时：`dsh plugin add` 底层 pnpm 需要网络，宽限到 120s。
+/// 安装/卸载全程超时：`dsh plugin add/remove` 底层 pnpm 需要网络，宽限到 120s。
 const DSH_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// 插件管理动作：安装 / 卸载共用同一套 dsh 代跑机器，只差子命令与文案。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DshPluginOp {
+    Install,
+    Uninstall,
+}
+
+impl DshPluginOp {
+    /// 传给 `dsh plugin --profile web` 的子命令（dsh 侧是薄 pnpm 转发器，
+    /// 执行后自动 reconcile `dsh.profile.bundles`）。
+    fn verb(self) -> &'static str {
+        match self {
+            DshPluginOp::Install => "add",
+            DshPluginOp::Uninstall => "remove",
+        }
+    }
+
+    /// 文案用动词（安装 / 卸载）。
+    fn label(self) -> &'static str {
+        match self {
+            DshPluginOp::Install => "安装",
+            DshPluginOp::Uninstall => "卸载",
+        }
+    }
+}
 
 /// 一键安装 dsh 桥插件：定位 dsh 可执行文件并代跑安装命令。
 ///
 /// - `path` 为手动指认（自动发现失败后经文件选择器兜底）；两者皆无 → Err 带 searched
 /// - 命令参数写死（`plugin --profile web add <包名>`），无注入面
 /// - 进度逐行经 `dsh-install-progress` 推送；[`DSH_INSTALL_TIMEOUT`] 未退出则 kill
+/// - 成功后自动拉起 dsh 桥（启停跟随插件安装状态）
 #[tauri::command]
 async fn install_dsh_plugin(
     app: AppHandle,
     install: State<'_, DshInstallState>,
     path: Option<String>,
 ) -> Result<(), String> {
+    run_dsh_plugin_cmd(app, install, path, DshPluginOp::Install).await
+}
+
+/// 一键卸载 dsh 桥插件：与安装共用代跑机器（`plugin --profile web remove <包名>`）。
+/// 卸载成功后桥自动停止（桥启停跟随插件安装状态）。
+#[tauri::command]
+async fn uninstall_dsh_plugin(
+    app: AppHandle,
+    install: State<'_, DshInstallState>,
+) -> Result<(), String> {
+    run_dsh_plugin_cmd(app, install, None, DshPluginOp::Uninstall).await
+}
+
+/// 安装/卸载共用壳：防重入 + spawn_blocking 代跑。
+async fn run_dsh_plugin_cmd(
+    app: AppHandle,
+    install: State<'_, DshInstallState>,
+    path: Option<String>,
+    op: DshPluginOp,
+) -> Result<(), String> {
     if install.is_running() {
-        return Err("插件安装已在进行中".to_string());
+        return Err("dsh 插件操作已在进行中".to_string());
     }
     install.running.store(true, Ordering::SeqCst);
     let running = install.running.clone();
     let emit_app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = DshInstallGuard { running };
-        run_dsh_plugin_install(&emit_app, path.as_deref())
+        run_dsh_plugin_manage(&emit_app, path.as_deref(), op)
     })
     .await
-    .map_err(|e| format!("安装任务异常: {e}"))?
+    .map_err(|e| format!("{}任务异常: {e}", op.label()))?
 }
 
-/// 安装的阻塞实现（spawn_blocking 内执行）。
-fn run_dsh_plugin_install(app: &AppHandle, manual_path: Option<&str>) -> Result<(), String> {
+/// 安装/卸载的阻塞实现（spawn_blocking 内执行）。
+fn run_dsh_plugin_manage(
+    app: &AppHandle,
+    manual_path: Option<&str>,
+    op: DshPluginOp,
+) -> Result<(), String> {
     use std::io::{BufRead, BufReader};
     use std::sync::mpsc::RecvTimeoutError;
 
@@ -3446,7 +3472,11 @@ fn run_dsh_plugin_install(app: &AppHandle, manual_path: Option<&str>) -> Result<
                 dsh
             }
             Err(e) => {
-                let msg = format!("自动定位 dsh 失败（{e}），请手动指定。");
+                let hint = match op {
+                    DshPluginOp::Install => "请手动指定。",
+                    DshPluginOp::Uninstall => "可在终端执行手动卸载命令。",
+                };
+                let msg = format!("自动定位 dsh 失败（{e}），{hint}");
                 emit("failed", msg.clone());
                 return Err(msg);
             }
@@ -3456,8 +3486,11 @@ fn run_dsh_plugin_install(app: &AppHandle, manual_path: Option<&str>) -> Result<
     // 2) 代跑安装命令。PATH 增补全部 node bin 目录 + dsh 所在目录：pnpm 可能住在
     //    另一个 node 版本目录（实测如此），只补 dsh 目录会 pnpm not found。
     let pkg = zapmomo::dsh::integration::PLUGIN_PACKAGE;
-    let installing = format!("正在安装 {pkg}（可能需要下载依赖，请耐心等待）…");
-    emit("installing", installing);
+    let working = match op {
+        DshPluginOp::Install => format!("正在安装 {pkg}（可能需要下载依赖，请耐心等待）…"),
+        DshPluginOp::Uninstall => format!("正在卸载 {pkg}…"),
+    };
+    emit("installing", working);
     let mut cmd = if cfg!(windows) {
         // .cmd 垫片必须经 cmd 解释器启动
         let mut c = std::process::Command::new("cmd");
@@ -3466,7 +3499,7 @@ fn run_dsh_plugin_install(app: &AppHandle, manual_path: Option<&str>) -> Result<
     } else {
         std::process::Command::new(&dsh)
     };
-    cmd.args(["plugin", "--profile", "web", "add", pkg]);
+    cmd.args(["plugin", "--profile", "web", op.verb(), pkg]);
     {
         let mut dirs = zapmomo::dsh::discover::node_bin_dirs(&home);
         if let Some(parent) = dsh.parent() {
@@ -3491,7 +3524,10 @@ fn run_dsh_plugin_install(app: &AppHandle, manual_path: Option<&str>) -> Result<
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            let msg = format!("启动 dsh 安装命令失败：{e}。请改用手动命令在终端执行。");
+            let msg = format!(
+                "启动 dsh {}命令失败：{e}。请改用手动命令在终端执行。",
+                op.label()
+            );
             emit("failed", msg.clone());
             return Err(msg);
         }
@@ -3518,7 +3554,7 @@ fn run_dsh_plugin_install(app: &AppHandle, manual_path: Option<&str>) -> Result<
 
     let deadline = std::time::Instant::now() + DSH_INSTALL_TIMEOUT;
     // 提示语提取成短行（同上：避免两端 rustfmt 对中文长串折行口径分歧）
-    let timeout_msg = "安装超时已终止。请检查网络后重试，或改用手动命令。".to_string();
+    let timeout_msg = format!("{}超时已终止，请重试或改用手动命令。", op.label());
     let mut tail: std::collections::VecDeque<String> = std::collections::VecDeque::new();
     let outcome: Result<std::process::ExitStatus, String> = loop {
         match rx.recv_timeout(std::time::Duration::from_millis(100)) {
@@ -3552,11 +3588,38 @@ fn run_dsh_plugin_install(app: &AppHandle, manual_path: Option<&str>) -> Result<
 
     match outcome {
         Ok(status) if status.success() => {
-            emit(
-                "done",
-                "安装完成。重启 dsh web 后插件生效，桌宠即可联动。".to_string(),
-            );
-            tracing::info!("dsh 插件安装成功：{}", dsh.display());
+            // 桥启停跟随插件安装状态：装好即拉起，卸掉即停。失败仅降级告警，
+            // 不回滚插件操作结果（桥状态由下次启动/卡片刷新兜住）。
+            let bridge = app.state::<DshBridgeState>();
+            let bridge_result = match op {
+                DshPluginOp::Install => {
+                    if bridge.is_running() {
+                        Ok(())
+                    } else {
+                        start_dsh_bridge_impl(app.clone(), bridge.inner())
+                    }
+                }
+                DshPluginOp::Uninstall => {
+                    if bridge.is_running() {
+                        stop_dsh_bridge_inner(bridge.inner())
+                    } else {
+                        Ok(())
+                    }
+                }
+            };
+            if let Err(e) = bridge_result {
+                tracing::warn!("dsh 插件{}后同步桥状态失败: {e}", op.label());
+            }
+            let done_msg = match op {
+                DshPluginOp::Install => {
+                    "安装完成。重启 dsh web 后插件生效，桌宠即可联动。".to_string()
+                }
+                DshPluginOp::Uninstall => {
+                    "卸载完成。桌宠不再联动 dsh 任务事件，重启 dsh web 后插件彻底移除。".to_string()
+                }
+            };
+            emit("done", done_msg);
+            tracing::info!("dsh 插件{}成功：{}", op.label(), dsh.display());
             Ok(())
         }
         Ok(status) => {
@@ -3564,7 +3627,7 @@ fn run_dsh_plugin_install(app: &AppHandle, manual_path: Option<&str>) -> Result<
             let parts: Vec<&str> = tail.iter().map(String::as_str).collect();
             let tail_text = parts.join(" | ");
             let msg = format!(
-                "安装命令退出码异常（{status}）。{}",
+                "{}命令退出码异常（{status}）。",
                 if tail_text.is_empty() {
                     "请改用手动命令在终端执行。".to_string()
                 } else {
@@ -6901,12 +6964,12 @@ pub fn run() {
             is_voice_session_running,
             send_voice_text,
             get_dsh_config,
-            set_dsh_enabled,
             set_dsh_params,
             get_dsh_bridge_status,
             test_dsh_announce,
             detect_dsh_integration,
             install_dsh_plugin,
+            uninstall_dsh_plugin,
             get_conversation_records,
             list_model_library,
             get_system_resources,
@@ -7051,9 +7114,11 @@ pub fn run() {
                 }
             }
 
-            // 启动 dsh 桥（若启用）：loopback HTTP 接收 deepseek-harness 插件推送的
-            // 任务事件，桌宠以气泡+语音播报。失败静默降级（不影响主流程）。
-            if zapmomo::dsh::config::resolve(loaded.as_ref().and_then(|s| s.dsh.as_ref())).enabled {
+            // 启动 dsh 桥（若插件已激活）：loopback HTTP 接收 deepseek-harness 插件
+            // 推送的任务事件，桌宠以气泡+语音播报。桥无独立开关，启停跟随插件安装
+            // 状态（已激活 ⇒ ~/.dsh 环境必然存在）。失败静默降级（不影响主流程）。
+            let dsh_home = settings::get_home_dir().join(".dsh");
+            if zapmomo::dsh::integration::detect(&dsh_home).plugin_activated {
                 let handle = app.handle().clone();
                 let state = app.state::<DshBridgeState>();
                 if let Err(e) = start_dsh_bridge_impl(handle, state.inner()) {

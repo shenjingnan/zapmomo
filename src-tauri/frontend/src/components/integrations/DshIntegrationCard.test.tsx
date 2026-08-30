@@ -32,9 +32,8 @@ function emit(event: string, payload: unknown) {
   });
 }
 
-/** get_dsh_config 返回（enabled 全开、桥运行中）。 */
+/** get_dsh_config 返回（行为开关全开、桥运行中）。 */
 const baseInfo = {
-  enabled: true,
   port: 0,
   voice_enabled: true,
   llm_enabled: true,
@@ -205,7 +204,7 @@ describe("DshIntegrationCard", () => {
     expect(screen.getByTestId("dsh-integration-state").textContent).toContain("未检测到 dsh");
   });
 
-  it("总开关调用 set_dsh_enabled", async () => {
+  it("已安装 → 显示卸载按钮，点击调用 uninstall_dsh_plugin", async () => {
     setupInvoke({
       get_dsh_config: baseInfo,
       detect_dsh_integration: fullIntegration,
@@ -213,11 +212,49 @@ describe("DshIntegrationCard", () => {
     });
     render(<DshIntegrationCard />);
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("get_dsh_config"));
-    const toggle = screen.getByRole("switch", { name: "启用 dsh 桥" });
-    await userEvent.click(toggle);
-    await waitFor(() =>
-      expect(invokeMock).toHaveBeenCalledWith("set_dsh_enabled", { enabled: false }),
+    await userEvent.click(screen.getByRole("button", { name: /卸载插件/ }));
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("uninstall_dsh_plugin"));
+  });
+
+  it("未安装 → 无卸载按钮，行为开关与测试播报禁用（桥跟随安装状态）", async () => {
+    setupInvoke({
+      get_dsh_config: baseInfo,
+      detect_dsh_integration: {
+        status: {
+          dsh_home_detected: true,
+          profile_ready: true,
+          plugin_installed: false,
+          plugin_activated: false,
+        },
+        manual_command: "dsh plugin --profile web add @zapmomo-ai/dsh-plugin",
+      },
+      get_dsh_bridge_status: freshStatus(),
+    });
+    render(<DshIntegrationCard />);
+    await screen.findByTestId("dsh-integration-state");
+    expect(screen.queryByRole("button", { name: /卸载插件/ })).toBeNull();
+    expect(screen.getByRole("switch", { name: "LLM 播报文案" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /测试播报/ })).toBeDisabled();
+  });
+
+  it("卸载失败事件 → 展示后端消息，不出安装重试按钮", async () => {
+    setupInvoke({
+      get_dsh_config: baseInfo,
+      detect_dsh_integration: fullIntegration,
+      get_dsh_bridge_status: freshStatus(),
+    });
+    render(<DshIntegrationCard />);
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("get_dsh_config"));
+    await userEvent.click(screen.getByRole("button", { name: /卸载插件/ }));
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("uninstall_dsh_plugin"));
+    emit("dsh-install-progress", {
+      state: "failed",
+      message: "自动定位 dsh 失败，可在终端执行手动卸载命令。",
+    });
+    expect(screen.getByTestId("dsh-install-progress").textContent).toContain(
+      "可在终端执行手动卸载命令",
     );
+    expect(screen.queryByRole("button", { name: /选择 dsh 可执行文件/ })).toBeNull();
   });
 
   it("测试播报按钮调用 test_dsh_announce", async () => {
