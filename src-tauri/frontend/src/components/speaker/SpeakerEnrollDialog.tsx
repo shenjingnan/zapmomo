@@ -12,6 +12,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useToast } from "@/components/ui/toast";
+import { api } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 import { useRuntime } from "@/providers/RuntimeContext";
 
@@ -32,7 +33,7 @@ interface SpeakerEnrollDialogProps {
  * 成功后后端清理本次录音的临时 wav；注册结果对运行中的语音会话即时生效。
  */
 export function SpeakerEnrollDialog({ open, onClose }: SpeakerEnrollDialogProps) {
-  const { speaker, anyListening, device } = useRuntime();
+  const { speaker, device } = useRuntime();
   const toast = useToast();
   const [mounted, setMounted] = useState(open);
   const [closing, setClosing] = useState(false);
@@ -63,7 +64,9 @@ export function SpeakerEnrollDialog({ open, onClose }: SpeakerEnrollDialogProps)
     setMounted(false);
     setClosing(false);
     onClose();
-  }, [onClose]);
+    // 录音期间可能自动挂起了语音会话/监听：关闭弹窗时恢复（后端幂等）
+    api.speakerResumeMic().catch((e) => toast.error(String(e)));
+  }, [onClose, toast]);
 
   const close = useCallback(() => {
     if (closing || recording || speaker.speakers.busy) return;
@@ -218,7 +221,7 @@ export function SpeakerEnrollDialog({ open, onClose }: SpeakerEnrollDialogProps)
                 variant="outline"
                 size="sm"
                 onClick={() => void record()}
-                disabled={recording || anyListening}
+                disabled={recording}
               >
                 <Mic className="h-4 w-4" />
                 {recording ? "录音中…" : "录制一段"}
@@ -233,9 +236,10 @@ export function SpeakerEnrollDialog({ open, onClose }: SpeakerEnrollDialogProps)
                 选择 wav 文件
               </Button>
             </div>
-            {anyListening && !recording && (
-              <p className="text-xs text-text-muted">语音会话/监听进行中，录音暂不可用。</p>
-            )}
+            <p className="text-xs text-text-muted">
+              录音会自动暂停正在进行的语音会话/监听（会话恢复后对话上下文重置），
+              关闭弹窗后自动恢复。
+            </p>
           </div>
 
           {/* 已添加样本列表 */}

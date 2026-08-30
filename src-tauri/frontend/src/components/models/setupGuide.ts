@@ -17,9 +17,9 @@ const CAPABILITY_ORDER: ReadonlyArray<{ capability: GuideCapability; name: strin
   [
     { capability: "kws", name: "唤醒词（KWS）", href: "/models/kws" },
     { capability: "asr", name: "语音识别（ASR）", href: "/models/asr" },
+    { capability: "speaker", name: "声纹识别", href: "/models/speaker" },
     { capability: "llm", name: "AI 大脑（LLM）", href: "/models/llm" },
     { capability: "tts", name: "语音合成（TTS）", href: "/models/tts" },
-    { capability: "speaker", name: "声纹识别", href: "/models/speaker" },
   ];
 
 export type SetupGuideInput = Pick<RuntimeState, "kws" | "asr" | "llm" | "tts" | "speaker">;

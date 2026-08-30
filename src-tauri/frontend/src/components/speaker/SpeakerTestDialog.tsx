@@ -11,6 +11,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { api } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 import { useRuntime } from "@/providers/RuntimeContext";
 import type { SpeakerIdentifyResult } from "@/types/tauri";
@@ -26,7 +27,7 @@ interface SpeakerTestDialogProps {
 
 /** 识别测试对话框：录一段（或选 wav）→ 1:N 识别 → 展示命中/分数表/延迟。 */
 export function SpeakerTestDialog({ open, onClose }: SpeakerTestDialogProps) {
-  const { speaker, anyListening, device } = useRuntime();
+  const { speaker, device } = useRuntime();
   const [mounted, setMounted] = useState(open);
   const [closing, setClosing] = useState(false);
   const [wavPath, setWavPath] = useState<string | null>(null);
@@ -52,6 +53,8 @@ export function SpeakerTestDialog({ open, onClose }: SpeakerTestDialogProps) {
     setMounted(false);
     setClosing(false);
     onClose();
+    // 录音期间可能自动挂起了语音会话/监听：关闭弹窗时恢复（后端幂等）
+    api.speakerResumeMic().catch((e) => setError(String(e)));
   }, [onClose]);
 
   const close = useCallback(() => {
@@ -163,12 +166,7 @@ export function SpeakerTestDialog({ open, onClose }: SpeakerTestDialogProps) {
                 ))}
               </SelectContent>
             </Select>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => void record()}
-              disabled={recording || anyListening}
-            >
+            <Button variant="outline" size="sm" onClick={() => void record()} disabled={recording}>
               <Mic className="h-4 w-4" />
               {recording ? "录音中…" : "录一段"}
             </Button>
@@ -181,9 +179,9 @@ export function SpeakerTestDialog({ open, onClose }: SpeakerTestDialogProps) {
               {busy ? "识别中…" : "开始识别"}
             </Button>
           </div>
-          {anyListening && !recording && (
-            <p className="text-xs text-text-muted">语音会话/监听进行中，录音暂不可用。</p>
-          )}
+          <p className="text-xs text-text-muted">
+            录音会自动暂停正在进行的语音会话/监听，关闭弹窗后自动恢复。
+          </p>
           {wavPath && (
             <p className="truncate font-mono text-xs text-text-muted" title={wavPath}>
               {wavPath}

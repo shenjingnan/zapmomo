@@ -143,7 +143,7 @@ function voiceStatus(voice: VoiceSessionState): { label: string; tone: OverviewT
 
 /**
  * 概览页 AI 能力状态推导（纯函数）：基于真实 runtime 字段推导，
- * 不维护第二套状态源。顺序固定为 KWS / ASR / LLM / TTS / 声纹（与模型摘要一致）。
+ * 不维护第二套状态源。顺序固定为 KWS / ASR / 声纹 / LLM / TTS（与模型摘要一致）。
  */
 export function deriveOverview(input: OverviewInput): CapabilityStatus[] {
   const { kws, asr, llm, tts, speaker, voice } = input;
@@ -172,6 +172,14 @@ export function deriveOverview(input: OverviewInput): CapabilityStatus[] {
       ...asrState,
     },
     {
+      key: "speaker",
+      name: "声纹识别",
+      code: "SPK",
+      icon: Fingerprint,
+      accent: "bg-teal-100 text-teal-600",
+      ...speakerState,
+    },
+    {
       key: "llm",
       name: "AI 大脑",
       code: "LLM",
@@ -186,14 +194,6 @@ export function deriveOverview(input: OverviewInput): CapabilityStatus[] {
       icon: Volume2,
       accent: "bg-amber-100 text-amber-600",
       ...ttsState,
-    },
-    {
-      key: "speaker",
-      name: "声纹识别",
-      code: "SPK",
-      icon: Fingerprint,
-      accent: "bg-teal-100 text-teal-600",
-      ...speakerState,
     },
     {
       key: "voice",

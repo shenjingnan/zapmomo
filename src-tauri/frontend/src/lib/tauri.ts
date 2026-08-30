@@ -102,6 +102,8 @@ export const api = {
   /** 录制声纹样本（固定时长，后端 clamp 1~30 秒），返回 wav 路径 */
   recordSpeakerSample: (args: { seconds: number; device: string | null }) =>
     invoke<string>("record_speaker_sample", args),
+  /** 恢复录音期间被自动挂起的语音会话/监听（弹窗关闭时调用；幂等） */
+  speakerResumeMic: () => invoke<void>("speaker_resume_mic"),
   /** 注册说话人（wavPaths 为录音临时文件或自选 wav；注意 camelCase，snake_case 会被后端静默丢参） */
   speakerEnroll: (args: { speakerId: string; wavPaths: string[] }) =>
     invoke<SpeakerEnrollResult>("speaker_enroll", args),

@@ -450,7 +450,7 @@ fn get_kws_config(state: State<'_, DownloadState>) -> Result<KwsConfigInfo, Stri
 
 // ---- 声纹识别（Speaker Recognition）----
 
-/// 声纹识别共享状态：模型下载防重入 + 共享引擎槽。
+/// 声纹识别共享状态：模型下载防重入 + 共享引擎槽 + 录音挂起快照。
 ///
 /// GUI 注册/识别与语音会话打标共用同一 `SpeakerRecognizer` 实例（槽内 Arc），
 /// 注册/删除即时生效；参数或模型变更时清槽（下次按新配置重建）。
@@ -458,6 +458,8 @@ fn get_kws_config(state: State<'_, DownloadState>) -> Result<KwsConfigInfo, Stri
 struct SpeakerState {
     download: Arc<AtomicBool>,
     recognizer: Arc<Mutex<Option<Arc<zapmomo::speaker::SpeakerRecognizer>>>>,
+    /// 录音挂起快照（`Some` = 麦克风消费者已被挂起，resume 时按此恢复）
+    suspended: Arc<Mutex<Option<SuspendedMic>>>,
 }
 
 impl SpeakerState {
@@ -465,8 +467,18 @@ impl SpeakerState {
         Self {
             download: Arc::new(AtomicBool::new(false)),
             recognizer: Arc::new(Mutex::new(None)),
+            suspended: Arc::new(Mutex::new(None)),
         }
     }
+}
+
+/// 录音挂起快照：挂起瞬间哪些麦克风消费者在跑（resume 时按此逐个恢复）。
+#[derive(Debug, Clone, Copy)]
+struct SuspendedMic {
+    voice: bool,
+    kws: bool,
+    asr_listen: bool,
+    dictate: bool,
 }
 
 /// 解析声纹配置（settings.toml `[speaker]` + 默认值）。
@@ -678,30 +690,139 @@ async fn download_speaker_model(
 
 /// 录制一段声纹样本（固定 N 秒，16k 单声道 wav），返回 wav 路径。
 ///
-/// 麦克风被语音会话 / KWS 监听 / ASR 监听 / 听写占用时直接报错
-/// （cpal 同设备双路采集不报错但会采到空/降级数据，项目以约定互斥）；
+/// **录音优先**：麦克风雨被语音会话 / KWS 监听 / ASR 监听 / 听写占用时**自动挂起**
+/// （照 `set_microphone` 的 stop 全家桶顺序，快照存 `SpeakerState.suspended`），
+/// 恢复由前端在注册/测试弹窗关闭时调 [`speaker_resume_mic`]（多段录音只挂一次）。
+/// 注意：语音会话恢复后会重置对话上下文（history 在会话实例内，无法迁移）。
 /// 时长 clamp 到 1~30 秒（`record_voice` 本身无上限）。
 #[tauri::command]
 async fn record_speaker_sample(
     app: AppHandle,
+    state: State<'_, SpeakerState>,
     seconds: u32,
     device: Option<String>,
 ) -> Result<String, String> {
-    if app.state::<VoiceSessionState>().is_running() {
-        return Err("语音会话正在使用麦克风，请先停止会话再录制声纹样本。".to_string());
-    }
-    if app.state::<ListenState>().is_listening()
-        || app.state::<AsrListenState>().is_listening()
-        || app.state::<AsrDictateState>().is_dictating()
-    {
-        return Err("有监听/识别任务正在使用麦克风，请先停止后再录制声纹样本。".to_string());
-    }
     let seconds = seconds.clamp(1, 30);
+    let suspended = state.suspended.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        // 录音优先：自动挂起占着麦克风的消费者（幂等；已在挂起态时跳过）
+        speaker_suspend_mic_impl(&app, &suspended)?;
         zapmomo::audio::record_voice(seconds, device.as_deref()).map(|p| p.display().to_string())
     })
     .await
     .map_err(|e| format!("录音任务异常: {e}"))?
+}
+
+/// 挂起与录音冲突的麦克风消费者（照 `set_microphone` 的 stop 顺序）。
+///
+/// 快照写入 `suspended`；已在挂起态时跳过（幂等，多段录音只挂一次）。
+/// 无任何消费者在跑时不产生快照（resume 空操作）。
+fn speaker_suspend_mic_impl(
+    app: &AppHandle,
+    suspended: &Mutex<Option<SuspendedMic>>,
+) -> Result<(), String> {
+    {
+        let guard = suspended
+            .lock()
+            .map_err(|_| "speaker lock poisoned".to_string())?;
+        if guard.is_some() {
+            return Ok(());
+        }
+    }
+    let listen = app.state::<ListenState>();
+    let asr_listen = app.state::<AsrListenState>();
+    let asr_dictate = app.state::<AsrDictateState>();
+    let voice = app.state::<VoiceSessionState>();
+    let snapshot = SuspendedMic {
+        voice: voice.is_running(),
+        kws: listen.is_listening(),
+        asr_listen: asr_listen.is_listening(),
+        dictate: asr_dictate.is_dictating(),
+    };
+    if !(snapshot.voice || snapshot.kws || snapshot.asr_listen || snapshot.dictate) {
+        return Ok(());
+    }
+    if snapshot.voice {
+        stop_voice_session_inner(voice.inner())?;
+    }
+    if snapshot.kws {
+        stop_listen_inner(listen.inner())?;
+    }
+    if snapshot.asr_listen {
+        stop_asr_listen_inner(asr_listen.inner())?;
+    }
+    if snapshot.dictate {
+        stop_asr_dictate_inner(asr_dictate.inner())?;
+    }
+    *suspended
+        .lock()
+        .map_err(|_| "speaker lock poisoned".to_string())? = Some(snapshot);
+    tracing::info!(
+        "[speaker] 录音挂起麦克风消费者: voice={} kws={} asr_listen={} dictate={}",
+        snapshot.voice,
+        snapshot.kws,
+        snapshot.asr_listen,
+        snapshot.dictate
+    );
+    Ok(())
+}
+
+/// 恢复挂起的麦克风消费者（按 suspend 快照逐个重启；无快照为幂等空操作）。
+///
+/// 重启顺序照 `set_microphone`：轻量监听先、语音会话最后（引擎加载最重）。
+/// **语音会话恢复会重置对话上下文**（history 在会话实例内，随 stop 丢弃）。
+fn speaker_resume_mic_impl(
+    app: &AppHandle,
+    suspended: &Mutex<Option<SuspendedMic>>,
+) -> Result<(), String> {
+    let Some(snapshot) = suspended
+        .lock()
+        .map_err(|_| "speaker lock poisoned".to_string())?
+        .take()
+    else {
+        return Ok(());
+    };
+    let settings = settings::load_settings()?.unwrap_or_default();
+    let mic = settings.microphone.clone();
+    if snapshot.kws {
+        let listen = app.state::<ListenState>();
+        let kw = settings
+            .kws
+            .as_ref()
+            .and_then(|k| k.custom_keywords.clone());
+        start_listen_impl(app.clone(), listen.inner(), mic.clone(), kw)?;
+    }
+    if snapshot.asr_listen {
+        let asr_listen = app.state::<AsrListenState>();
+        start_asr_listen_impl(app.clone(), asr_listen.inner(), mic.clone())?;
+    }
+    if snapshot.dictate {
+        let asr_dictate = app.state::<AsrDictateState>();
+        start_asr_dictate_impl(app.clone(), asr_dictate.inner(), mic.clone())?;
+    }
+    if snapshot.voice {
+        let voice = app.state::<VoiceSessionState>();
+        start_voice_session_impl(app.clone(), voice.inner())?;
+    }
+    tracing::info!(
+        "[speaker] 录音结束，恢复麦克风消费者: voice={} kws={} asr_listen={} dictate={}",
+        snapshot.voice,
+        snapshot.kws,
+        snapshot.asr_listen,
+        snapshot.dictate
+    );
+    Ok(())
+}
+
+/// 恢复录音期间挂起的麦克风消费者（注册/测试弹窗关闭时由前端调用；幂等空操作安全）。
+///
+/// 重启涉及引擎加载（数秒），放阻塞线程池执行避免卡 UI。
+#[tauri::command]
+async fn speaker_resume_mic(app: AppHandle, state: State<'_, SpeakerState>) -> Result<(), String> {
+    let suspended = state.suspended.clone();
+    tauri::async_runtime::spawn_blocking(move || speaker_resume_mic_impl(&app, &suspended))
+        .await
+        .map_err(|e| format!("恢复任务异常: {e}"))?
 }
 
 /// `speaker_enroll` 的成功响应。
@@ -6562,6 +6683,7 @@ pub fn run() {
             list_speakers,
             remove_speaker,
             speaker_identify_wav,
+            speaker_resume_mic,
             open_storage_dir,
             clear_conversation_records,
             get_live2d_config,

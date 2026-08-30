@@ -240,6 +240,17 @@ export function ModelSummary() {
       onToggle: handleAsrToggle,
     },
     {
+      accent: "bg-teal-100 text-teal-600",
+      icon: Fingerprint,
+      name: "声纹识别",
+      model: speakerConfigured ? "CAM++（本地）" : "未配置模型",
+      statusText: speakerSummary.text,
+      statusTone: speakerSummary.tone,
+      gearHref: "/models/speaker",
+      toggled: speakerOn,
+      onToggle: () => void speaker.config.setEnabled(!speakerOn),
+    },
+    {
       accent: "bg-emerald-100 text-emerald-600",
       icon: Brain,
       name: "AI 大脑（LLM）",
@@ -281,17 +292,6 @@ export function ModelSummary() {
       gearHref: "/models/tts",
       toggled: ttsEnabled,
       onToggle: () => tts.setEnabled(!ttsEnabled),
-    },
-    {
-      accent: "bg-teal-100 text-teal-600",
-      icon: Fingerprint,
-      name: "声纹识别",
-      model: speakerConfigured ? "CAM++（本地）" : "未配置模型",
-      statusText: speakerSummary.text,
-      statusTone: speakerSummary.tone,
-      gearHref: "/models/speaker",
-      toggled: speakerOn,
-      onToggle: () => void speaker.config.setEnabled(!speakerOn),
     },
   ];
 
