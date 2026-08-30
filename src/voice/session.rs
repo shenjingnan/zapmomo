@@ -198,9 +198,14 @@ pub struct VoiceSession {
     /// 形象切换 subagent 句柄（`[llm] sprite_agent` 开启时在回复结束后派发决策；
     /// 主循环每轮 `poll_sprite_decision` 消费，失败一律静默保持现状）
     sprite_agent: SpriteAgentHandle,
+    /// 形象决策代数：只在 `handle_user_final`（新一轮问答开始）时递增。
+    /// 刻意**不**绑定 `current_gen`（播放代数）——barge-in 会误触发（TTS 回声 /
+    /// 环境音），回复播报期又是决策在途的高发窗口，绑播放代数会错杀有效决策；
+    /// 绑对话轮后，误触发不作废决策，真打断后用户说出新内容时旧决策自然过期。
+    sprite_gen: u64,
     /// 当前形象（canonical stem；会话态，会话开始为 default，不持久化）
     current_sprite: String,
-    /// 本轮用户说的话（供形象决策配对；打断 / 新一轮开始时清空）
+    /// 本轮用户说的话（供形象决策配对；新一轮开始时覆盖）
     last_user_text: Option<String>,
     synth_enqueued: u64,
     synth_consumed: u64,
@@ -397,6 +402,7 @@ impl VoiceSession {
             reply_done: false,
             current_gen: 0,
             sprite_agent: SpriteAgentHandle::new(),
+            sprite_gen: 0,
             current_sprite: crate::companion_sprites::DEFAULT_SPRITE_NAME.to_string(),
             last_user_text: None,
             synth_enqueued: 0,
@@ -960,6 +966,8 @@ impl VoiceSession {
             is_final: true,
         });
         self.turns += 1;
+        // 新一轮问答开始：形象决策代数递增（上一轮在途决策自此过期），暂存本轮用户话
+        self.sprite_gen += 1;
         self.last_user_text = Some(text.clone());
         self.history
             .push(InputItem::Message(ChatMessage::new(ChatRole::User, text)));
@@ -1016,7 +1024,7 @@ impl VoiceSession {
         }
         let catalog = sprite_agent::build_catalog(&sprites);
         self.sprite_agent.dispatch(
-            self.current_gen,
+            self.sprite_gen,
             &self.cfg.llm,
             sprite_agent::DecisionInput {
                 user_text,
@@ -1031,7 +1039,7 @@ impl VoiceSession {
     /// （成功回填 `current_sprite`，失败只记日志）；`Keep` / 过期 / 无结果无动作。
     /// 切换事件经既有 notifier 转发前端，本方法不发新 VoiceEvent。
     fn poll_sprite_decision(&mut self) {
-        let Some(decision) = self.sprite_agent.poll(self.current_gen) else {
+        let Some(decision) = self.sprite_agent.poll(self.sprite_gen) else {
             return;
         };
         let decision = sprite_agent::fold_noop(decision, &self.current_sprite);
@@ -1342,9 +1350,8 @@ impl VoiceSession {
     fn abort_current_generation(&mut self) {
         self.llm.cancel();
         self.current_gen += 1;
-        // 打断即作废在途形象决策（cancel 置位 + 暂存问答对清空，迟到结果由 gen 丢弃）
-        self.sprite_agent.invalidate();
-        self.last_user_text = None;
+        // 打断不作废形象决策：barge-in 多为 TTS 回声误触发，且决策绑定的是
+        // 对话轮（sprite_gen）而非播放态；用户真说出新内容时 sprite_gen 自增过期
         self.speaker.stop();
         self.reply = ReplyAccumulator::new();
         self.reply_done = false;
