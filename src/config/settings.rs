@@ -672,6 +672,9 @@ pub struct VoiceSettings {
     /// ASR 阶段连续静音多久判定说完（秒），缺省 3.0
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub asr_max_trailing_silence: Option<f32>,
+    /// 单句连续语音时长上限（秒），达到即强制断句进入回复（防无限聆听），缺省 30.0
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asr_max_utterance_duration: Option<f32>,
     /// 欢迎语后等用户真正说话的超时（秒），超时回待唤醒，缺省 8.0
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub welcome_wait_timeout: Option<f32>,

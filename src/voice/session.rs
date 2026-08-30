@@ -46,6 +46,7 @@ use crate::voice::splitter::SentenceSplitter;
 use crate::voice::state::{SessionEvent, SessionState};
 use crate::voice::synthesizer::{SynthHandle, SynthResult};
 use crate::voice::thinking::ThinkingFilter;
+use crate::voice::vad_gate::{SpeechGate, chunk_rms};
 use sherpa_onnx::OnlineStream;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -148,6 +149,12 @@ pub struct VoiceSession {
     emit: Box<dyn Fn(VoiceEvent) + Send>,
     /// Listening 阶段连续静音累计（秒），达到 `asr_max_trailing_silence` 判定说完
     silence_accum: f32,
+    /// Listening 阶段本句连续语音累计（秒），达到 `asr_max_utterance_duration` 强制
+    /// 断句（防持续噪声/媒体人声让说完判定永不达成的「无限聆听」）。
+    speech_accum: f32,
+    /// 说话门控（Silero VAD 优先、RMS 降级）：Listening 说完判定与 WaitingSpeech
+    /// 进聆听门控共用（见 [`vad_gate::SpeechGate`]）。
+    speech_gate: SpeechGate,
     /// WaitingSpeech 阶段连续说话块计数（防瞬时噪音误触发）
     speech_hits: u32,
     /// WaitingSpeech 阶段等待时长累计（秒），超时回待唤醒
@@ -200,8 +207,10 @@ impl VoiceSession {
     ///   运行中切 TTS 模型时句间换引擎（见 [`TtsSwap`]）；`None` 不感知（CLI）。
     /// - `text_rx`：`Some` 接宿主的文字输入收件箱（输入条窗口），文字与 ASR 最终文本
     ///   等价进入对话链路；`None` 仅语音（CLI）。
-    /// - **说完判定由 session 内 RMS 静音统一控制**，因此这里强制禁用 sherpa endpoint
-    ///   （避免其 rule1/rule2 的 1.2s/2.4s 尾静音在期望的 3s 前提前断句并 reset 流）。
+    /// - **说完判定由 session 内说话门控的静音累计统一控制**（Silero VAD 优先判人声、
+    ///   模型缺失降级 RMS，见 [`vad_gate::SpeechGate`]），因此这里强制禁用 sherpa
+    ///   endpoint（避免其 rule1/rule2 的 1.2s/2.4s 尾静音在期望的 3s 前提前断句并
+    ///   reset 流）。
     pub fn new_with_parts(
         mut cfg: ResolvedSessionConfig,
         emit: Box<dyn Fn(VoiceEvent) + Send>,
@@ -247,6 +256,8 @@ impl VoiceSession {
         let kws_stream = Self::make_kws_stream(&kws, &cfg)?;
         // 打断判定器在 cfg 被 move 进结构体前构造（阈值来自会话配置快照）
         let barge_detector = VoiceBargeInDetector::new(cfg.barge_in_similarity_threshold);
+        // 说话门控同样在 move 前构造（VAD 在位即启用，模式日志在内部打）
+        let speech_gate = SpeechGate::new(&cfg.asr, cfg.vad_silence_threshold);
 
         Ok(Self {
             cfg,
@@ -276,6 +287,8 @@ impl VoiceSession {
             pending_speech: VecDeque::new(),
             emit,
             silence_accum: 0.0,
+            speech_accum: 0.0,
+            speech_gate,
             speech_hits: 0,
             speech_wait_accum: 0.0,
             welcome_played: false,
@@ -441,6 +454,9 @@ impl VoiceSession {
                 // 语义，保留流会把打断前喂入的播报回声与用户语音叠加进最终转写。
                 self.asr.reset(&self.cfg.asr);
                 self.silence_accum = 0.0;
+                self.speech_accum = 0.0;
+                // VAD 流内状态同样复位（防跨句残留「在说话」判定）
+                self.speech_gate.reset();
             }
             SessionState::WaitingSpeech => {
                 self.speech_wait_accum = 0.0;
@@ -541,7 +557,8 @@ impl VoiceSession {
             MicEvent::Disconnected => return Err("麦克风已断开".to_string()),
         };
         if let Some(chunk) = chunk {
-            if chunk_rms(&chunk) > self.cfg.vad_silence_threshold {
+            // 说话门控判「真说话」（VAD 优先，键盘/媒体噪声不再误进聆听）
+            if self.speech_gate.is_speech(&chunk) {
                 self.speech_hits += 1;
                 if self.speech_hits >= 2 {
                     self.speech_hits = 0;
@@ -569,9 +586,10 @@ impl VoiceSession {
             MicEvent::Timeout => return Ok(()),
             MicEvent::Disconnected => return Err("麦克风已断开".to_string()),
         };
-        // RMS 门控：该块是否超过音量门限（离线用此标记缓冲内是否真有语音，防静音空转写）
+        // 说话门控：该块是否「人声在说话」（VAD 优先，降级 RMS；离线用此标记缓冲内
+        // 是否真有语音，防静音空转写）
         let chunk_secs = self.cfg.asr.chunk_size as f32 / self.cfg.asr.sample_rate as f32;
-        let speech_active = chunk_rms(&chunk) > self.cfg.vad_silence_threshold;
+        let speech_active = self.speech_gate.is_speech(&chunk);
         self.asr.feed_chunk(&chunk, speech_active);
         let mut collector = AsrCollector::default();
         self.asr.decode_into(&mut collector);
@@ -582,13 +600,17 @@ impl VoiceSession {
                 is_final: false,
             });
         }
-        // RMS 静音累计：有语音则重置，否则累加当前块时长
+        // 静音/语音累计：说完判定（连续静音）与超长兜底（连续语音）分别计
         if speech_active {
             self.silence_accum = 0.0;
+            self.speech_accum += chunk_secs;
         } else {
             self.silence_accum += chunk_secs;
+            self.speech_accum = 0.0;
         }
-        // 结束判定：sherpa is_final（流式兜底）或连续静音达到 asr_max_trailing_silence
+        // 结束判定：sherpa is_final（流式兜底）、连续静音达 asr_max_trailing_silence、
+        // 或连续语音达 asr_max_utterance_duration（强制断句，防媒体人声等让说完判定
+        // 永不达成）
         if let Some(text) = collector.final_text {
             self.handle_user_final(text)?;
         } else if self.silence_accum >= self.cfg.asr_max_trailing_silence {
@@ -602,6 +624,15 @@ impl VoiceSession {
                 self.pending_texts.push_back(text);
                 return Ok(());
             }
+            self.handle_user_final(text)?;
+        } else if self.speech_accum >= self.cfg.asr_max_utterance_duration {
+            // 超长兜底：持续「说话」却始终等不到静音（媒体人声/回声漏网）→ 强制断句
+            // 进入回复轮；识别为空则 handle_user_final 保持聆听（累计已在其中清零）。
+            tracing::info!(
+                "[voice] 连续语音达 {:.0}s 上限，强制断句",
+                self.cfg.asr_max_utterance_duration
+            );
+            let text = self.force_finalize_asr();
             self.handle_user_final(text)?;
         }
         Ok(())
@@ -667,6 +698,7 @@ impl VoiceSession {
     fn handle_user_final(&mut self, text: String) -> Result<(), String> {
         let text = text.trim().to_string();
         self.silence_accum = 0.0;
+        self.speech_accum = 0.0;
         // 后置回声兜底（仅语音打断后的首轮识别：快照存在才比对，take 即消费）。
         // 单字 query（「停」）bigram 为空 Dice 为 0 天然放行，话头不受影响。
         if let Some(echo_ref) = self.barge_echo_ref.take()
@@ -1209,15 +1241,6 @@ fn decide_finish(follow_up: bool, max_turns: Option<u32>, turns: u32) -> FinishA
     }
 }
 
-/// 计算一段 f32 mono 音频的 RMS（均方根）音量，用于「真正说话」门控与静音累计。
-fn chunk_rms(chunk: &[f32]) -> f32 {
-    if chunk.is_empty() {
-        return 0.0;
-    }
-    let sum: f32 = chunk.iter().map(|s| s * s).sum();
-    (sum / chunk.len() as f32).sqrt()
-}
-
 /// ASR 反应：收集部分（流式字幕）与最终识别文本；一句说完（`is_final`）返回 `Stop`。
 #[derive(Default)]
 struct AsrCollector {
@@ -1537,21 +1560,6 @@ mod tests {
             decide_finish(false, Some(5), 3),
             FinishAction::ToArmed
         ));
-    }
-
-    #[test]
-    fn test_chunk_rms_values() {
-        assert_eq!(chunk_rms(&[]), 0.0);
-        assert_eq!(chunk_rms(&[0.0, 0.0, 0.0]), 0.0);
-        // 恒定振幅 → RMS = 该振幅
-        assert!((chunk_rms(&[0.5, 0.5]) - 0.5).abs() < 1e-6);
-        // 峰值 1.0 正弦 → RMS ≈ 0.707
-        let sine: Vec<f32> = (0..3200)
-            .map(|i| ((i as f32 / 3200.0) * std::f32::consts::TAU).sin())
-            .collect();
-        assert!((chunk_rms(&sine) - std::f32::consts::FRAC_1_SQRT_2).abs() < 0.01);
-        // 幅度更大 → RMS 更大（用于阈值门控判断）
-        assert!(chunk_rms(&[0.9, 0.9]) > chunk_rms(&[0.1, 0.1]));
     }
 
     // ---------- classify_post_barge_text：后置回声兜底判定 ----------
