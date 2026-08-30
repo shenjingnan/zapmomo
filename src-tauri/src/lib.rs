@@ -2798,11 +2798,11 @@ fn run_dsh_plugin_install(app: &AppHandle, manual_path: Option<&str>) -> Result<
     };
     let home = settings::get_home_dir();
 
-    // 1) 定位 dsh 可执行文件（手动指认优先；自动发现失败带 searched 诊断）
-    emit(
-        "discovering",
-        "正在定位 dsh 可执行文件…".to_string(),
-    );
+    // 1) 定位 dsh 可执行文件（手动指认优先；自动发现失败带 searched 诊断）。
+    //    提示语提取成短行局部量：内联中文长串会在本地/CI 两端 rustfmt 的
+    //    fn_call_width 口径（CJK 宽度）上产生折行分歧，fmt --check 互斥。
+    let locating = "正在定位 dsh 可执行文件…".to_string();
+    emit("discovering", locating);
     let dsh = match manual_path {
         Some(p) => {
             let dsh = PathBuf::from(p);
@@ -2820,7 +2820,7 @@ fn run_dsh_plugin_install(app: &AppHandle, manual_path: Option<&str>) -> Result<
                 dsh
             }
             Err(e) => {
-                let msg = format!("自动定位 dsh 失败（{}）。请在下方手动选择 dsh 可执行文件。", e);
+                let msg = format!("自动定位 dsh 失败（{e}），请手动指定。");
                 emit("failed", msg.clone());
                 return Err(msg);
             }
@@ -2829,10 +2829,9 @@ fn run_dsh_plugin_install(app: &AppHandle, manual_path: Option<&str>) -> Result<
 
     // 2) 代跑安装命令。PATH 增补全部 node bin 目录 + dsh 所在目录：pnpm 可能住在
     //    另一个 node 版本目录（实测如此），只补 dsh 目录会 pnpm not found。
-    emit(
-        "installing",
-        format!("正在安装 {}（可能需要下载依赖，请耐心等待）…", zapmomo::dsh::integration::PLUGIN_PACKAGE),
-    );
+    let pkg = zapmomo::dsh::integration::PLUGIN_PACKAGE;
+    let installing = format!("正在安装 {pkg}（可能需要下载依赖，请耐心等待）…");
+    emit("installing", installing);
     let mut cmd = if cfg!(windows) {
         // .cmd 垫片必须经 cmd 解释器启动
         let mut c = std::process::Command::new("cmd");
@@ -2841,13 +2840,7 @@ fn run_dsh_plugin_install(app: &AppHandle, manual_path: Option<&str>) -> Result<
     } else {
         std::process::Command::new(&dsh)
     };
-    cmd.args([
-        "plugin",
-        "--profile",
-        "web",
-        "add",
-        zapmomo::dsh::integration::PLUGIN_PACKAGE,
-    ]);
+    cmd.args(["plugin", "--profile", "web", "add", pkg]);
     {
         let mut dirs = zapmomo::dsh::discover::node_bin_dirs(&home);
         if let Some(parent) = dsh.parent() {
@@ -2898,6 +2891,8 @@ fn run_dsh_plugin_install(app: &AppHandle, manual_path: Option<&str>) -> Result<
     let reader_err = std::thread::spawn(move || drain_lines(stderr, tx_err));
 
     let deadline = std::time::Instant::now() + DSH_INSTALL_TIMEOUT;
+    // 提示语提取成短行（同上：避免两端 rustfmt 对中文长串折行口径分歧）
+    let timeout_msg = "安装超时已终止。请检查网络后重试，或改用手动命令。".to_string();
     let mut tail: std::collections::VecDeque<String> = std::collections::VecDeque::new();
     let outcome: Result<std::process::ExitStatus, String> = loop {
         match rx.recv_timeout(std::time::Duration::from_millis(100)) {
@@ -2918,7 +2913,7 @@ fn run_dsh_plugin_install(app: &AppHandle, manual_path: Option<&str>) -> Result<
                 if std::time::Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
-                    break Err("安装超时（120s），已终止。请检查网络后重试，或改用手动命令。".to_string());
+                    break Err(timeout_msg);
                 }
             }
             Err(e) => break Err(format!("等待安装进程失败：{e}")),
@@ -2939,7 +2934,9 @@ fn run_dsh_plugin_install(app: &AppHandle, manual_path: Option<&str>) -> Result<
             Ok(())
         }
         Ok(status) => {
-            let tail_text = tail.iter().map(String::as_str).collect::<Vec<_>>().join(" | ");
+            // 拆两步：方法链留一行内，避免两端 rustfmt chain_width 口径分歧
+            let parts: Vec<&str> = tail.iter().map(String::as_str).collect();
+            let tail_text = parts.join(" | ");
             let msg = format!(
                 "安装命令退出码异常（{status}）。{}",
                 if tail_text.is_empty() {
