@@ -9,6 +9,9 @@ use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
+// 气泡按角色位移平移只在非 macOS 走（macOS 改用子窗口原生联动，见 setup 气泡面板块）
+#[cfg(not(target_os = "macos"))]
+use tauri::Position;
 #[cfg(target_os = "macos")]
 use tauri::TitleBarStyle;
 #[cfg(target_os = "macos")]
@@ -23,6 +26,9 @@ use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
 use zapmomo::asr::config::AsrParamsPatch;
 use zapmomo::asr::{AsrReaction, AsrResult};
+// 同上：仅非 macOS 的事件联动路径使用（macOS 为子窗口原生联动）
+#[cfg(not(target_os = "macos"))]
+use zapmomo::companion_bubble_link::bubble_follow_position;
 use zapmomo::companion_click_through::{
     CompanionPointerPolicy, EXIT_MARGIN_PX, HitRect, cursor_hit, desired_ignore_cursor_events,
     next_hold, resolve_smart_click_through,
@@ -1253,9 +1259,34 @@ fn save_tts_voice(
 }
 
 /// 删除一个自定义音色（清单 + wav 文件）。
+///
+/// 联动清理：删除成功后清掉伙伴库里指向该音色的绑定（失败仅告警，孤儿绑定会
+/// fail-open 回退全局默认）；若清理命中 active 伙伴则重启运行中的语音会话。
 #[tauri::command]
-fn delete_tts_voice(id: String) -> Result<(), String> {
-    zapmomo::tts::voice_store::delete_voice(&id)
+fn delete_tts_voice(app: AppHandle, id: String) -> Result<(), String> {
+    zapmomo::tts::voice_store::delete_voice(&id)?;
+    match zapmomo::companion::clear_voice_bindings(&id) {
+        Ok(affected) => {
+            let hits_active = affected
+                .as_slice()
+                .iter()
+                .any(|cid| Some(cid.as_str()) == active_companion_id().as_deref());
+            if hits_active {
+                restart_voice_session_if_running(&app);
+            }
+        }
+        Err(e) => tracing::warn!("清理伙伴音色绑定失败（{id}）: {e}"),
+    }
+    Ok(())
+}
+
+/// 列出音色库全部自定义音色（模型无关，供伙伴页音色绑定选择器）。
+///
+/// 与 `list_tts_voices` 的区别：后者按当前 TTS 模型过滤（非克隆模型返回空、
+/// 含 builtin 条目），绑定是持久化元数据、跨模型有效，必须看到全量音色库。
+#[tauri::command]
+fn list_voice_library() -> Result<Vec<zapmomo::tts::TtsVoice>, String> {
+    Ok(zapmomo::tts::voice_store::list_custom_voices())
 }
 
 /// 录制 N 秒麦克风并保存为 16k wav，返回 wav 路径（供后续保存为音色）。
@@ -1334,10 +1365,11 @@ fn synthesize_tts(
     })?;
 
     // 合成音色参数统一解析（克隆 > sid > audiocpp 具名，见 zapmomo::tts::voice）。
-    // 用户显式参数（音色/自定义参考音频）优先；都为空时回落 active 角色包的克隆音色
-    // （设置页试听全局音色不应被角色包劫持）。在后台线程外解析，尽早报错。
+    // 用户显式参数（音色/自定义参考音频）优先；都为空时回落 active 伙伴的克隆音色
+    // （目录自带 > 音色库绑定，见 companion::active_companion_voice；设置页试听
+    // 全局音色不应被伙伴音色劫持）。在后台线程外解析，尽早报错。
     let character = (voice.is_none() && reference_wav.is_none())
-        .then(zapmomo::companion::active_character_voice)
+        .then(zapmomo::companion::active_companion_voice)
         .flatten();
     let custom_wav = reference_wav
         .map(std::path::PathBuf::from)
@@ -1679,7 +1711,7 @@ fn make_voice_emit(app: AppHandle) -> Box<dyn Fn(VoiceEvent) + Send> {
         zapmomo::voice::events::log_voice_event(&ev);
         match ev {
             VoiceEvent::Started
-            | VoiceEvent::BargeIn
+            | VoiceEvent::BargeIn { .. }
             | VoiceEvent::Stopped { .. }
             | VoiceEvent::FollowUp => {}
             VoiceEvent::State { state } => {
@@ -3038,7 +3070,12 @@ struct CompanionView {
     cover_image: Option<String>,
     /// 角色包是否带人设（character.md 非空；非角色包恒 false）。
     has_persona: bool,
-    /// 角色包是否带音色克隆参考（voice/reference.wav + reference.txt 成对）。
+    /// 绑定的音色库条目 id（None = 未绑定；绑定失效时字段保留但 `has_voice` 为 false）。
+    voice_id: Option<String>,
+    /// 生效音色的来源："pack"（托管目录 voice/ 自带）/ "library"（音色库绑定）；
+    /// 无生效音色为 null。
+    voice_source: Option<String>,
+    /// 是否有生效音色（目录自带或绑定命中；绑定失效不算）。
     has_voice: bool,
 }
 
@@ -3060,19 +3097,33 @@ fn build_view(lib: &zapmomo::companion::CompanionLibrary) -> CompanionLibraryVie
         models: lib
             .models
             .iter()
-            .map(|m| CompanionView {
-                id: m.id.clone(),
-                name: m.name.clone(),
-                source_path: m.source_path.clone(),
-                model_dir: m.model_dir.clone(),
-                model_file: m.model_file.clone(),
-                format: m.format.clone(),
-                imported_at: m.imported_at.clone(),
-                valid: zapmomo::companion::quick_valid(m),
-                cover_image: zapmomo::live2d::config::find_cover_image(Path::new(&m.model_dir))
-                    .map(|p| p.display().to_string()),
-                has_persona: zapmomo::companion::has_persona(m),
-                has_voice: zapmomo::companion::has_character_voice(m),
+            .map(|m| {
+                // 单次解析同时得出 voice_source 与 has_voice（避免重复目录/清单 IO）。
+                let voice_source = match zapmomo::companion::companion_voice_in(m) {
+                    Some((_, zapmomo::companion::CompanionVoiceSource::Pack)) => {
+                        Some("pack".to_string())
+                    }
+                    Some((_, zapmomo::companion::CompanionVoiceSource::Library)) => {
+                        Some("library".to_string())
+                    }
+                    None => None,
+                };
+                CompanionView {
+                    id: m.id.clone(),
+                    name: m.name.clone(),
+                    source_path: m.source_path.clone(),
+                    model_dir: m.model_dir.clone(),
+                    model_file: m.model_file.clone(),
+                    format: m.format.clone(),
+                    imported_at: m.imported_at.clone(),
+                    valid: zapmomo::companion::quick_valid(m),
+                    cover_image: zapmomo::live2d::config::find_cover_image(Path::new(&m.model_dir))
+                        .map(|p| p.display().to_string()),
+                    has_persona: zapmomo::companion::has_persona(m),
+                    voice_id: m.voice_id.clone(),
+                    has_voice: voice_source.is_some(),
+                    voice_source,
+                }
             })
             .collect(),
         active_model_id: lib.active_model_id.clone(),
@@ -3141,17 +3192,25 @@ fn reconcile_active(
         }
     }
 
-    // active 实际变更 → 人设/音色快照需重建：运行中的语音会话 stop+start
-    // （set_microphone 同款模式；重启同时清 history，人设语义干净）。
-    // 失败仅告警：人设/音色是增强，不应让「切换伙伴」本身失败。
+    // active 实际变更 → 人设/音色快照需重建：重启运行中的语音会话。
+    restart_voice_session_if_running(app);
+    Ok(())
+}
+
+/// 人设/音色快照变更后重启运行中的语音会话（stop+start，set_microphone 同款模式；
+/// 重启同时清 history，人设语义干净）。
+///
+/// 供「切换伙伴」（reconcile_active）、「改音色绑定」（set_companion_voice）、
+/// 「删除被绑定音色」（delete_tts_voice）三个快照失效点复用。
+/// 失败仅告警：人设/音色是增强，不应让触发方本身失败。
+fn restart_voice_session_if_running(app: &AppHandle) {
     let voice = app.state::<VoiceSessionState>();
     if voice.is_running()
         && let Err(e) = stop_voice_session_inner(voice.inner())
             .and_then(|()| start_voice_session_impl(app.clone(), voice.inner()))
     {
-        tracing::warn!("切换伙伴后重启语音会话失败（人设/音色将在下次启动会话时生效）: {e}");
+        tracing::warn!("重启语音会话失败（人设/音色将在下次启动会话时生效）: {e}");
     }
-    Ok(())
 }
 
 /// 启动阶段同步 reconcile（毫秒级，不迁移）：让 settings 与伙伴库 active 一致，
@@ -3286,6 +3345,31 @@ async fn rename_companion(
     reconcile_active(&app, active)?;
     // 重命名后托盘「切换伙伴」label 要更新。
     rebuild_tray_menu_threadsafe(&app);
+    Ok(build_view(&lib))
+}
+
+/// 绑定 / 解绑伙伴音色（写 `library.json` 的 `voice_id`，伙伴库元数据）。
+///
+/// - `voice_id = Some(id)`：绑定音色库条目（不存在报错）；
+/// - `voice_id = None`：解绑，回退托管目录自带或全局默认音色。
+///
+/// 改的是 active 伙伴且语音会话运行中 → 重启会话使人设/音色快照立即生效
+/// （`reconcile_active` 早退分支不会经过这里，需显式触发）。
+#[tauri::command]
+async fn set_companion_voice(
+    app: AppHandle,
+    id: String,
+    voice_id: Option<String>,
+) -> Result<CompanionLibraryView, String> {
+    let cid = id.clone();
+    let lib = tauri::async_runtime::spawn_blocking(move || {
+        zapmomo::companion::set_voice_binding(&cid, voice_id.as_deref())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    if lib.active_model_id.as_deref() == Some(&id) {
+        restart_voice_session_if_running(&app);
+    }
     Ok(build_view(&lib))
 }
 
@@ -3944,9 +4028,11 @@ fn apply_active_companion(app: &AppHandle, id: &str) {
 #[cfg(target_os = "macos")]
 const MACOS_COMPANION_BACK_LEVEL: i64 = -1;
 
-/// 气泡/输入条面板的 macOS 层级：Floating(4) 之上 1 级，建窗时常置、不随角色层级切换。
+/// 气泡/输入条面板的 macOS 层级：Floating(4) 之上 1 级，建窗时常置。
 /// 角色前置 = Floating(4)、置底 = -1（见 `apply_companion_layer_platform`），层级 5
 /// 保证聊天气泡与文字输入条恒高于角色，角色任何层级下都不会遮挡它们。
+/// 气泡挂为角色子窗口及角色层级切换都会把气泡层级连带对齐到角色，须在两处
+/// 重断本层级（见 setup 气泡面板块与本函数尾部）。
 /// （Tauri `always_on_top` 只设 NSFloatingWindowLevel=3，低于角色前置的 4，
 /// 曾导致角色前置时角色反而盖住气泡/输入条、无法操作。）
 #[cfg(target_os = "macos")]
@@ -3973,6 +4059,12 @@ fn apply_companion_layer_platform(app: &AppHandle, layer: CompanionWindowLayer) 
         // 图标之上：-1 在普通窗口之下、桌面图标与壁纸之上。不切换 NSPanel floating 属性——
         // z-order 完全由 set_level 控制（浮层属性不参与层级），运行时切换 floating 会破坏存活 WebView 渲染。
         CompanionWindowLayer::Back => panel.set_level(MACOS_COMPANION_BACK_LEVEL),
+    }
+    // 角色层级切换会把已挂的气泡子窗口层级连带对齐：重断气泡常置层级，
+    // 保证角色置底(-1)时气泡仍浮在普通窗口之上。启动期 bubble 面板尚未
+    // 注册（本函数在 bubble to_panel 之前调用），报错静默跳过。
+    if let Ok(bubble) = app.get_webview_panel("bubble") {
+        bubble.set_level(MACOS_OVERLAY_PANEL_LEVEL);
     }
 }
 
@@ -5911,6 +6003,7 @@ pub fn run() {
             is_asr_dictating,
             get_tts_config,
             list_tts_voices,
+            list_voice_library,
             save_tts_voice,
             delete_tts_voice,
             record_tts_voice,
@@ -5959,6 +6052,7 @@ pub fn run() {
             import_companion,
             set_active_companion,
             rename_companion,
+            set_companion_voice,
             remove_companion,
             open_companion_dir,
             save_cover_image,
@@ -6347,7 +6441,8 @@ pub fn run() {
             // macOS：转成非激活面板——拖动/悬停不激活应用、不抢键盘焦点。
             #[cfg(target_os = "macos")]
             {
-                use tauri_nspanel::{CollectionBehavior, StyleMask, WebviewWindowExt};
+                use objc2_app_kit::NSWindowOrderingMode;
+                use tauri_nspanel::{CollectionBehavior, ManagerExt, StyleMask, WebviewWindowExt};
 
                 if let Some(window) = app.get_webview_window("bubble")
                     && let Ok(panel) = window.to_panel::<BubblePanel>()
@@ -6363,6 +6458,25 @@ pub fn run() {
                     // 层级常置 Floating 之上 1 级：恒高于角色（前置 4 / 置底 -1），
                     // 角色永不遮挡气泡。
                     panel.set_level(MACOS_OVERLAY_PANEL_LEVEL);
+
+                    // 挂为角色子窗口：AppKit 在窗口服务器同一事务内随父移动（零延迟、
+                    // 不经事件循环），替代 Moved 事件联动——tao macOS 的 windowDidMove
+                    // 入队后下一拍才派发，事件联动永远比角色慢一帧（拖动掉帧根因）。
+                    // Above 同时保证子窗口恒在父之上。get_webview_panel 报错静默跳过，
+                    // 与 apply_companion_layer_platform 同款（面板未注册理论不可达）。
+                    if let Ok(companion) = app.get_webview_panel("companion") {
+                        unsafe {
+                            // SAFETY: setup 闭包在主线程执行；AppKit 持有子窗口强引用，
+                            // 生命周期随父窗口，无需 removeChildWindow。
+                            companion.as_panel().addChildWindow_ordered(
+                                panel.as_panel(),
+                                NSWindowOrderingMode::Above,
+                            );
+                        }
+                        // addChildWindow 会把子窗口层级对齐到父级（Chromium/Qt 同款补丁），
+                        // 重断回常置层级，避免气泡被拉进角色层级。
+                        panel.set_level(MACOS_OVERLAY_PANEL_LEVEL);
+                    }
                 }
             }
             // 显隐跟随角色（companion 默认可见 → 气泡随之显示；内容为空时仍点穿）
@@ -6473,6 +6587,35 @@ pub fn run() {
                 let state = window.app_handle().state::<CompanionPointerState>();
                 match event {
                     WindowEvent::Moved(p) => {
+                        // macOS 不在此联动：气泡已挂为角色子窗口（见 setup 气泡面板块），
+                        // AppKit 原生随动后再按位移平移会把位移叠加两次（气泡甩飞）。
+                        #[cfg(not(target_os = "macos"))]
+                        {
+                            // 气泡联动：拖动角色时气泡按相同位移平移，保持相对距离
+                            //（单向联动，单独拖气泡不影响角色；气泡被联动移动后经其
+                            // 自身 onMoved 写回 [bubble.window_position]，无需额外持久化）。
+                            // 须在下方 origin 缓存更新**之前**取旧值求位移；决策纯函数
+                            // 在根 crate companion_bubble_link（CI 只测根 crate）。
+                            if let Some(bubble) = window.app_handle().get_webview_window("bubble") {
+                                let old = state
+                                    .origin
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .map(|o| (o.x, o.y));
+                                let bubble_now = bubble
+                                    .outer_position()
+                                    .ok()
+                                    .map(|b| (f64::from(b.x), f64::from(b.y)));
+                                let companion = (f64::from(p.x), f64::from(p.y));
+                                let next = bubble_now
+                                    .and_then(|b| bubble_follow_position(old, companion, b));
+                                if let Some((x, y)) = next {
+                                    let _ = bubble.set_position(Position::Physical(
+                                        PhysicalPosition::new(x.round() as i32, y.round() as i32),
+                                    ));
+                                }
+                            }
+                        }
                         *state.origin.lock().unwrap_or_else(|e| e.into_inner()) =
                             Some(PhysicalPosition::new(f64::from(p.x), f64::from(p.y)));
                         *state.last_move_at.lock().unwrap_or_else(|e| e.into_inner()) =
@@ -6728,6 +6871,7 @@ mod companion_menu_tests {
             model_file: format!("{model_dir}/{name}.model3.json"),
             format: "cubism3".to_string(),
             imported_at: "2026-01-01T00:00:00Z".to_string(),
+            voice_id: None,
             layout: None,
         }
     }
@@ -6796,6 +6940,7 @@ mod companion_open_dir_tests {
             model_file: manifest.display().to_string(),
             format: "cubism3".to_string(),
             imported_at: "2026-01-01T00:00:00Z".to_string(),
+            voice_id: None,
             layout: None,
         }
     }

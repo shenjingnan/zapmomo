@@ -21,17 +21,25 @@ import type { Live2dCatalog } from "@/components/live2d/previewManager";
 import type { SharedLive2dStageHandle } from "@/components/live2d/SharedLive2dStage";
 import { SharedLive2dStage } from "@/components/live2d/SharedLive2dStage";
 import { ModelDialog } from "@/components/models/ModelDialog";
+import { isCloneTtsKind } from "@/components/tts/ttsMeta";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Slider } from "@/components/ui/slider";
 import { useCompanionLibrary } from "@/hooks/useCompanionLibrary";
 import { isStaticImageFormat } from "@/lib/companionFormat";
 import { api, toAssetUrl } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
-import type { CompanionModelInfo } from "@/types/tauri";
+import type { CompanionModelInfo, TtsVoice } from "@/types/tauri";
 
 /**
  * 把 Live2D 渲染画布截取为缩小的 PNG 字节数组（供保存为封面）。
@@ -154,19 +162,27 @@ function CompanionListItem({
             )}
           </span>
           {!model.valid && <span className="block text-xs text-destructive">模型不可用</span>}
-          {/* 角色包能力标记：人设（character.md）/ 音色（voice/ 克隆参考） */}
-          {(model.has_persona || model.has_voice) && (
+          {/* 能力标记：人设（character.md）/ 音色（目录自带或绑定生效；绑定失效单独标红） */}
+          {(model.has_persona || model.has_voice || model.voice_id != null) && (
             <span className="mt-0.5 flex gap-1">
               {model.has_persona && (
                 <Badge variant="outline" className="px-1 py-0 text-[10px] text-muted-foreground">
                   人设
                 </Badge>
               )}
-              {model.has_voice && (
+              {model.voice_id != null && !model.has_voice ? (
+                <Badge
+                  variant="outline"
+                  className="border-destructive/30 px-1 py-0 text-[10px] text-destructive"
+                  title="绑定的音色已被删除，已回退全局默认音色"
+                >
+                  音色已失效
+                </Badge>
+              ) : model.has_voice ? (
                 <Badge variant="outline" className="px-1 py-0 text-[10px] text-muted-foreground">
                   音色
                 </Badge>
-              )}
+              ) : null}
             </span>
           )}
         </span>
@@ -368,6 +384,7 @@ export function CompanionPage() {
     importModel,
     setActive,
     rename,
+    setVoice,
     remove,
     openAssetsDir,
     saveCover,
@@ -515,6 +532,29 @@ export function CompanionPage() {
   // 静态图像伙伴（GIF/角色包立绘）不走 PIXI 预览（无 canvas/动作目录），单独 img 分支。
   const showStage = !!selected?.valid && !isGif && previewSize.width > 0 && previewSize.height > 0;
 
+  // 音色绑定：音色库条目（模型无关全量）+ 当前 TTS 模型类型（非克隆族提示用）。
+  // 绑定是持久化元数据，与当前模型无关，故非克隆模型下不禁用，仅提示。
+  const [voiceLibrary, setVoiceLibrary] = useState<TtsVoice[]>([]);
+  const [ttsModelType, setTtsModelType] = useState("");
+  useEffect(() => {
+    void api
+      .listVoiceLibrary()
+      .then(setVoiceLibrary)
+      .catch(() => {});
+    void api
+      .getTtsConfig()
+      .then((c) => setTtsModelType(c.model_type))
+      .catch(() => {});
+  }, []);
+  const handleVoiceChange = useCallback(
+    (value: string) => {
+      if (!selected) return;
+      const voiceName = voiceLibrary.find((v) => v.id === value)?.name;
+      void setVoice(selected.id, value === "" ? null : value, voiceName);
+    },
+    [selected, setVoice, voiceLibrary],
+  );
+
   return (
     <div className="flex h-full flex-col gap-4">
       {/* 顶部：页面标题 */}
@@ -618,6 +658,40 @@ export function CompanionPage() {
                     />
                     <span className="w-10 shrink-0 text-right tabular-nums">{opacityPercent}%</span>
                   </div>
+                  <div className="flex w-full items-center gap-2">
+                    <span className="w-20 shrink-0">音色</span>
+                    <Select value={selected.voice_id ?? ""} onValueChange={handleVoiceChange}>
+                      <SelectTrigger aria-label="伙伴音色" className="h-8 w-48">
+                        <SelectValue placeholder="使用全局默认" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="">使用全局默认</SelectItem>
+                        {selected.voice_source === "pack" && (
+                          <SelectItem value="__pack_voice__" disabled>
+                            角色包自带音色（优先生效）
+                          </SelectItem>
+                        )}
+                        {voiceLibrary.map((v) => (
+                          <SelectItem key={v.id} value={v.id}>
+                            {v.name}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  {selected.voice_id != null && !selected.has_voice ? (
+                    <p className="text-xs text-destructive">
+                      绑定的音色已被删除，该伙伴已回退全局默认音色。
+                    </p>
+                  ) : selected.voice_source === "pack" ? (
+                    <p className="text-xs text-muted-foreground">
+                      角色包自带的音色优先生效；上方绑定仅在移除自带音色后生效。
+                    </p>
+                  ) : !isCloneTtsKind(ttsModelType) && selected.voice_id != null ? (
+                    <p className="text-xs text-muted-foreground">
+                      当前 TTS 模型不支持音色克隆，绑定将在切换到克隆模型后生效。
+                    </p>
+                  ) : null}
                 </>
               )}
             </div>

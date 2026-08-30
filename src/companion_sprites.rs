@@ -291,7 +291,14 @@ mod tests {
             assert!(out.contains("happy"), "应确认切换：{out}");
             let ev = rx.recv_timeout(Duration::from_secs(1)).unwrap();
             assert_eq!(ev.name, "happy");
-            assert!(ev.path.ends_with("sprites/happy.png"));
+            // ev.path 是 String（display 序列化），Windows 下分隔符为 `\`：
+            // 子串 ends_with 会挂，转 Path 按组件比较（跨平台）。
+            assert!(
+                std::path::Path::new(&ev.path)
+                    .ends_with(std::path::Path::new("sprites").join("happy.png")),
+                "ev.path: {}",
+                ev.path
+            );
             assert!(ev.companion_id.starts_with("companion-"));
 
             reset_notifier_for_test();

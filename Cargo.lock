@@ -7110,6 +7110,7 @@ dependencies = [
 name = "zapmomo-app"
 version = "0.1.19"
 dependencies = [
+ "objc2-app-kit",
  "serde",
  "serde_json",
  "tauri",

@@ -16,6 +16,8 @@ export interface CompanionLibraryState {
   setActive: (id: string) => Promise<void>;
   /** 重命名伙伴（只改展示名）。 */
   rename: (id: string, name: string) => Promise<void>;
+  /** 绑定/解绑伙伴音色（voiceId 传 null 解绑，回退目录自带或全局默认；voiceName 仅供 toast 展示）。 */
+  setVoice: (id: string, voiceId: string | null, voiceName?: string) => Promise<void>;
   /** 移除伙伴（删除托管文件；若删的是 active 会自动落位/清空）。 */
   remove: (id: string) => Promise<void>;
   /** 在文件管理器中打开伙伴的托管资产目录（音色参考等可自行调整）。 */
@@ -127,6 +129,24 @@ export function useCompanionLibrary(): CompanionLibraryState {
     [library, toast],
   );
 
+  const setVoice = useCallback(
+    async (id: string, voiceId: string | null, voiceName?: string) => {
+      try {
+        const view = await api.setCompanionVoice({ id, voiceId });
+        setLibrary(view);
+        const name = view.models.find((m) => m.id === id)?.name ?? id;
+        toast.success(
+          voiceId === null
+            ? `✓ 「${name}」已恢复默认音色`
+            : `✓ 「${name}」已绑定音色「${voiceName ?? voiceId}」`,
+        );
+      } catch (e) {
+        toast.error(String(e));
+      }
+    },
+    [toast],
+  );
+
   const openAssetsDir = useCallback(
     async (id: string) => {
       try {
@@ -161,6 +181,7 @@ export function useCompanionLibrary(): CompanionLibraryState {
     importModel,
     setActive,
     rename,
+    setVoice,
     remove,
     openAssetsDir,
     saveCover,

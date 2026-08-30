@@ -17,6 +17,7 @@
 ///                   └──────────────────────────────┴──► Speaking ──┘
 ///   Armed <--WaitTimeout-- WaitingSpeech（第一轮无人说话回待唤醒）
 ///   Armed <--BargeIn------- Thinking|Speaking（打断）
+///   Listening <--VoiceBargeIn-- Thinking|Speaking（语音打断，直接接话）
 ///   Listening 空识别 → 保持聆听不退出（session 内重建 ASR 流，不回 Armed）
 /// ```
 use serde::Serialize;
@@ -65,6 +66,8 @@ pub enum SessionEvent {
     FollowUp,
     /// 打断（Thinking|Speaking → Armed）
     BargeIn,
+    /// 语音打断（Thinking|Speaking → Listening，直接接话；区别于 BargeIn 回待唤醒）
+    VoiceBargeIn,
     /// 停止（任意 → Idle）
     Stop,
 }
@@ -94,6 +97,8 @@ pub fn transition(state: SessionState, ev: SessionEvent) -> Result<SessionState,
         // 打断 → 回到待唤醒（Greeting：文字输入到达时停掉欢迎语）
         (Thinking | Speaking, BargeIn) => Armed,
         (Greeting, BargeIn) => Armed,
+        // 语音打断（ASR 识别到用户说话）→ 直接进聆听接话（不回待唤醒）
+        (Thinking | Speaking, VoiceBargeIn) => Listening,
         // Stop 从任意状态（含 Idle）回到 Idle
         (_, Stop) => Idle,
         (s, ev) => {
@@ -147,6 +152,18 @@ mod tests {
         );
         // 欢迎语播放中收到文字 → 允许打断停掉欢迎语
         assert_eq!(transition(Greeting, BargeIn).unwrap(), Armed);
+    }
+
+    #[test]
+    fn test_voice_barge_in_goes_listening() {
+        use SessionEvent::*;
+        use SessionState::*;
+        // 语音打断：思考中/播报中 → 直接进聆听（不回待唤醒）
+        assert_eq!(transition(Thinking, VoiceBargeIn).unwrap(), Listening);
+        assert_eq!(transition(Speaking, VoiceBargeIn).unwrap(), Listening);
+        // roundtrip：打断 → 聆听 → 说完 → 新一轮思考（接话语义闭环）
+        let s = transition(Speaking, VoiceBargeIn).unwrap();
+        assert_eq!(transition(s, UserUtteranceFinal).unwrap(), Thinking);
     }
 
     #[test]
@@ -209,6 +226,7 @@ mod tests {
             (Idle, FirstSentenceEnqueued),
             (Idle, ReplyFinished),
             (Idle, BargeIn),
+            (Idle, VoiceBargeIn),
             (Idle, FollowUp),
             (Armed, Start),
             (Armed, WelcomeDone),
@@ -217,6 +235,7 @@ mod tests {
             (Armed, FirstSentenceEnqueued),
             (Armed, ReplyFinished),
             (Armed, BargeIn),
+            (Armed, VoiceBargeIn),
             (Armed, FollowUp),
             (Greeting, KeywordDetected),
             (Greeting, SpeechDetected),
@@ -225,12 +244,14 @@ mod tests {
             (Greeting, FirstSentenceEnqueued),
             (Greeting, ReplyFinished),
             (Greeting, FollowUp),
+            (Greeting, VoiceBargeIn),
             (WaitingSpeech, KeywordDetected),
             (WaitingSpeech, WelcomeDone),
             (WaitingSpeech, FirstSentenceEnqueued),
             (WaitingSpeech, ReplyFinished),
             (WaitingSpeech, BargeIn),
             (WaitingSpeech, FollowUp),
+            (WaitingSpeech, VoiceBargeIn),
             (Listening, Start),
             (Listening, KeywordDetected),
             (Listening, WelcomeDone),
@@ -239,6 +260,7 @@ mod tests {
             (Listening, ReplyFinished),
             (Listening, BargeIn),
             (Listening, FollowUp),
+            (Listening, VoiceBargeIn),
             (Thinking, Start),
             (Thinking, KeywordDetected),
             (Thinking, WelcomeDone),

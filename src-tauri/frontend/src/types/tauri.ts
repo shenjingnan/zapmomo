@@ -245,7 +245,11 @@ export interface CompanionModelInfo {
   cover_image: string | null;
   /** 角色包是否带人设（character.md 非空；非角色包恒 false） */
   has_persona: boolean;
-  /** 角色包是否带音色克隆参考（voice/reference.wav + reference.txt 成对） */
+  /** 绑定的音色库条目 id（null = 未绑定；条目被删后字段保留，以 has_voice=false 体现） */
+  voice_id: string | null;
+  /** 生效音色来源："pack"（托管目录 voice/ 自带）/ "library"（音色库绑定）；无生效音色为 null */
+  voice_source: "pack" | "library" | null;
+  /** 是否有生效音色（目录自带或绑定命中；绑定指向的音色已删除时为 false） */
   has_voice: boolean;
 }
 
