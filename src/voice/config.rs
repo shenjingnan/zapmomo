@@ -22,6 +22,9 @@ pub const DEFAULT_WELCOME_TEXT: &str = "你好，我在。";
 pub const DEFAULT_VAD_SILENCE_THRESHOLD: f32 = 0.02;
 /// 默认 ASR 说完的连续静音秒数。
 pub const DEFAULT_ASR_MAX_TRAILING_SILENCE: f32 = 3.0;
+/// 默认单句连续语音时长上限（秒）：达到即强制断句进入回复，杜绝无限聆听
+/// （对齐 sherpa 端点 rule3「超长句强制断段」语义）。
+pub const DEFAULT_ASR_MAX_UTTERANCE_DURATION: f32 = 30.0;
 /// 默认欢迎语后等用户说话的超时（秒），超时回待唤醒。
 pub const DEFAULT_WELCOME_WAIT_TIMEOUT: f32 = 8.0;
 
@@ -87,6 +90,8 @@ pub struct ResolvedSessionConfig {
     pub vad_silence_threshold: f32,
     /// ASR 说完的连续静音秒数
     pub asr_max_trailing_silence: f32,
+    /// 单句连续语音时长上限（秒），达到即强制断句（防无限聆听兜底）
+    pub asr_max_utterance_duration: f32,
     /// 欢迎语后等用户说话的超时（秒）
     pub welcome_wait_timeout: f32,
     /// active 伙伴的音色克隆参考（`apply_companion_overrides` 注入；None = 无伙伴音色，
@@ -178,6 +183,10 @@ pub fn resolve(
             .asr_max_trailing_silence
             .or_else(|| voice.and_then(|v| v.asr_max_trailing_silence))
             .unwrap_or(DEFAULT_ASR_MAX_TRAILING_SILENCE),
+        // 仅 settings 可调（无 CLI flag，与 barge_in_similarity_threshold 同款）
+        asr_max_utterance_duration: voice
+            .and_then(|v| v.asr_max_utterance_duration)
+            .unwrap_or(DEFAULT_ASR_MAX_UTTERANCE_DURATION),
         welcome_wait_timeout: cli
             .welcome_wait_timeout
             .or_else(|| voice.and_then(|v| v.welcome_wait_timeout))
@@ -236,6 +245,10 @@ mod tests {
                 cfg.asr_max_trailing_silence,
                 DEFAULT_ASR_MAX_TRAILING_SILENCE
             );
+            assert_eq!(
+                cfg.asr_max_utterance_duration,
+                DEFAULT_ASR_MAX_UTTERANCE_DURATION
+            );
             assert_eq!(cfg.welcome_wait_timeout, DEFAULT_WELCOME_WAIT_TIMEOUT);
             assert_eq!(cfg.voice_id, None);
             assert_eq!(cfg.keywords, None);
@@ -276,6 +289,7 @@ mod tests {
                 welcome_text: Some("我在呢".to_string()),
                 vad_silence_threshold: Some(0.03),
                 asr_max_trailing_silence: Some(2.5),
+                asr_max_utterance_duration: Some(45.0),
                 welcome_wait_timeout: Some(6.0),
                 ..Default::default()
             };
@@ -293,6 +307,7 @@ mod tests {
             assert_eq!(cfg.welcome_text, "我在呢");
             assert_eq!(cfg.vad_silence_threshold, 0.03);
             assert_eq!(cfg.asr_max_trailing_silence, 2.5);
+            assert_eq!(cfg.asr_max_utterance_duration, 45.0);
             assert_eq!(cfg.welcome_wait_timeout, 6.0);
         });
     }
@@ -425,6 +440,7 @@ mod tests {
                 welcome_text: Some("你好".to_string()),
                 vad_silence_threshold: Some(0.02),
                 asr_max_trailing_silence: Some(3.0),
+                asr_max_utterance_duration: Some(30.0),
                 welcome_wait_timeout: Some(8.0),
                 voice_barge_in: Some(true),
                 barge_in_similarity_threshold: Some(0.55),
