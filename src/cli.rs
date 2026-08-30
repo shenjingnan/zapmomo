@@ -63,6 +63,52 @@ pub enum Commands {
         #[command(subcommand)]
         cmd: VoiceCmd,
     },
+    /// 声纹识别（Speaker Recognition：注册 / 验证 / 识别）
+    Speaker {
+        #[command(subcommand)]
+        cmd: SpeakerCmd,
+    },
+}
+
+/// 声纹识别（Speaker Recognition）子命令
+#[derive(Subcommand)]
+pub enum SpeakerCmd {
+    /// 从 wav 文件/目录注册说话人（同名覆盖重建；目录取其下全部 *.wav）
+    Enroll {
+        /// 说话人 id（仅英文字母/数字/下划线/连字符，如 owner）
+        speaker_id: String,
+        /// wav 文件路径或目录（多个）
+        #[arg(value_name = "WAV")]
+        wavs: Vec<PathBuf>,
+    },
+    /// 识别 wav 中的说话人（1:N，未过阈值报 unknown）
+    Identify {
+        /// wav 路径
+        wav: PathBuf,
+    },
+    /// 验证 wav 是否为指定说话人（1:1）
+    Verify {
+        /// 已注册的说话人 id
+        speaker_id: String,
+        /// wav 路径
+        wav: PathBuf,
+    },
+    /// 列出已注册说话人
+    List,
+    /// 移除已注册说话人（索引与声纹档案一并删除）
+    Remove {
+        /// 说话人 id
+        speaker_id: String,
+    },
+    /// 下载并安装声纹 embedding 模型（默认安装到 ~/.zapmomo/models/<模型名>）
+    InstallModel {
+        /// 安装目标模型目录（默认 ~/.zapmomo/models/<模型名>）
+        #[arg(long)]
+        model_dir: Option<PathBuf>,
+        /// 已安装也强制重新下载
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 /// KWS 子命令
@@ -329,6 +375,7 @@ pub async fn run(cli: Cli) -> Result<(), String> {
         Some(Commands::Tts { cmd }) => tokio::task::block_in_place(|| cmd_tts(cmd)),
         Some(Commands::Llm { cmd }) => cmd_llm(cmd).await,
         Some(Commands::Voice { cmd }) => cmd_voice(cmd).await,
+        Some(Commands::Speaker { cmd }) => cmd_speaker(cmd).await,
         None => unreachable!(),
     }
 }
@@ -394,6 +441,188 @@ fn kws_config(
     let settings = crate::config::settings::load_settings()?;
     let kws_settings = settings.as_ref().and_then(|s| s.kws.clone());
     crate::kws::config::resolve(kws_settings.as_ref(), cli_model_dir.map(|p| p.as_path()))
+}
+
+/// 声纹识别命令入口
+async fn cmd_speaker(cmd: SpeakerCmd) -> Result<(), String> {
+    match cmd {
+        SpeakerCmd::Enroll { speaker_id, wavs } => {
+            let recognizer = crate::speaker::SpeakerRecognizer::new(speaker_config()?)?;
+            let files = expand_wav_inputs(&wavs)?;
+            if files.is_empty() {
+                return Err(
+                    "未提供任何 wav 文件（参数可以是 wav 文件或包含 *.wav 的目录）".to_string(),
+                );
+            }
+            let samples = files
+                .iter()
+                .map(|p| {
+                    let wave = sherpa_onnx::Wave::read(&p.to_string_lossy())
+                        .ok_or_else(|| format!("读取 wav 失败: {}", p.display()))?;
+                    Ok((wave.samples().to_vec(), wave.sample_rate() as u32))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            let summary = recognizer.enroll(&speaker_id, &samples)?;
+            println!(
+                "已注册 {}: {} 段样本，embedding 维度 {}，耗时 {:.0}ms",
+                summary.speaker_id, summary.sample_count, summary.dim, summary.embedding_ms
+            );
+            Ok(())
+        }
+        SpeakerCmd::Identify { wav } => {
+            let recognizer = crate::speaker::SpeakerRecognizer::new(speaker_config()?)?;
+            let wave = read_wav(&wav)?;
+            let id = recognizer.identify(wave.samples(), wave.sample_rate() as u32)?;
+            if let Some(reason) = &id.skipped {
+                println!("speaker: （跳过识别）");
+                println!("reason: {}", format_skip_reason(reason));
+            } else {
+                println!("speaker: {}", id.speaker_id.as_deref().unwrap_or("unknown"));
+                println!("score: {:.3}", id.score.unwrap_or(f32::NAN));
+                println!("matched: {}", id.matched);
+            }
+            println!("threshold: {:.2}", id.threshold);
+            println!(
+                "latency: total {:.0}ms (audio {:.0}ms, embedding {:.1}ms, matching {:.1}ms)",
+                id.latency.total_ms,
+                id.latency.audio_duration_ms,
+                id.latency.embedding_ms,
+                id.latency.matching_ms
+            );
+            if !id.scores.is_empty() {
+                println!("scores:");
+                for s in &id.scores {
+                    println!("  {:<20} {:.3}", s.speaker_id, s.score);
+                }
+            }
+            Ok(())
+        }
+        SpeakerCmd::Verify { speaker_id, wav } => {
+            let recognizer = crate::speaker::SpeakerRecognizer::new(speaker_config()?)?;
+            let wave = read_wav(&wav)?;
+            let v = recognizer.verify(&speaker_id, wave.samples(), wave.sample_rate() as u32)?;
+            if let Some(reason) = &v.skipped {
+                println!("matched: false");
+                println!("reason: {}", format_skip_reason(reason));
+            } else {
+                println!("matched: {}", v.matched);
+                println!("speaker: {}", v.speaker_id.as_deref().unwrap_or("unknown"));
+                println!("score: {:.3}", v.score.unwrap_or(f32::NAN));
+            }
+            println!("threshold: {:.2}", v.threshold);
+            println!(
+                "latency: total {:.0}ms (audio {:.0}ms, embedding {:.1}ms, matching {:.1}ms)",
+                v.latency.total_ms,
+                v.latency.audio_duration_ms,
+                v.latency.embedding_ms,
+                v.latency.matching_ms
+            );
+            Ok(())
+        }
+        SpeakerCmd::List => {
+            let recognizer = crate::speaker::SpeakerRecognizer::new(speaker_config()?)?;
+            let speakers = recognizer.list_speakers()?;
+            if speakers.is_empty() {
+                println!("尚未注册任何说话人。用 `zapmomo speaker enroll <id> <wav...>` 注册。");
+                return Ok(());
+            }
+            println!("已注册说话人:");
+            for s in speakers {
+                println!(
+                    "  {:<20} 样本 {}  dim {}  {}",
+                    s.speaker_id, s.sample_count, s.dim, s.updated_at
+                );
+            }
+            Ok(())
+        }
+        SpeakerCmd::Remove { speaker_id } => {
+            let recognizer = crate::speaker::SpeakerRecognizer::new(speaker_config()?)?;
+            if recognizer.remove_speaker(&speaker_id)? {
+                println!("已移除 {speaker_id}");
+            } else {
+                println!("{speaker_id} 未注册（无档案可删）");
+            }
+            Ok(())
+        }
+        SpeakerCmd::InstallModel { model_dir, force } => {
+            use crate::kws::model::{
+                DownloadProgress, DownloadStage, install_raw_file_to, speaker_asset,
+                speaker_user_model_path,
+            };
+            // raw 单文件资产：目标 = <目录>/<archive 文件名>
+            let dest = match model_dir {
+                Some(dir) => dir.join(&speaker_asset().archive),
+                None => speaker_user_model_path(),
+            };
+            let mut progress = |p: DownloadProgress| {
+                let stage = match p.stage {
+                    DownloadStage::Downloading => "下载",
+                    DownloadStage::Verifying => "校验",
+                    DownloadStage::Extracting => "解压",
+                    DownloadStage::Done => "完成",
+                };
+                println!("[{stage}] {}", p.message);
+            };
+            install_raw_file_to(speaker_asset(), &dest, force, &mut progress)
+                .map_err(|e| e.to_string())?;
+            println!("模型已就绪: {}", dest.display());
+            Ok(())
+        }
+    }
+}
+
+/// 读取 settings 并解析声纹识别配置
+fn speaker_config() -> Result<crate::speaker::ResolvedSpeakerConfig, String> {
+    let settings = crate::config::settings::load_settings()?;
+    let speaker = settings.as_ref().and_then(|s| s.speaker.clone());
+    crate::speaker::config::resolve(speaker.as_ref())
+}
+
+/// 读取 wav 文件为（samples, sample_rate）。
+fn read_wav(path: &std::path::Path) -> Result<sherpa_onnx::Wave, String> {
+    sherpa_onnx::Wave::read(&path.to_string_lossy()).ok_or_else(|| {
+        format!(
+            "读取 wav 失败: {}（请提供 16k 或常见采样率的单声道 wav）",
+            path.display()
+        )
+    })
+}
+
+/// 展开 enroll 输入：文件直接用；目录取其下（不递归）全部 *.wav（排序保证确定性）。
+fn expand_wav_inputs(inputs: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
+    let mut out = Vec::new();
+    for p in inputs {
+        if p.is_dir() {
+            let mut wavs: Vec<PathBuf> = std::fs::read_dir(p)
+                .map_err(|e| format!("读取目录 {} 失败: {e}", p.display()))?
+                .flatten()
+                .map(|e| e.path())
+                .filter(|c| {
+                    c.extension()
+                        .and_then(|e| e.to_str())
+                        .is_some_and(|e| e.eq_ignore_ascii_case("wav"))
+                })
+                .collect();
+            wavs.sort();
+            out.extend(wavs);
+        } else {
+            out.push(p.clone());
+        }
+    }
+    Ok(out)
+}
+
+/// 跳过原因的人类可读描述。
+fn format_skip_reason(reason: &crate::speaker::SkipReason) -> String {
+    match reason {
+        crate::speaker::SkipReason::TooShort {
+            duration_ms,
+            min_ms,
+        } => {
+            format!("语音太短（{duration_ms:.0}ms < 最少 {min_ms:.0}ms）")
+        }
+        crate::speaker::SkipReason::NoRegisteredSpeakers => "尚未注册任何说话人".to_string(),
+    }
 }
 
 /// ASR 命令入口

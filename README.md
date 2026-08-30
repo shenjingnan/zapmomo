@@ -39,6 +39,7 @@ An open-source, real-time desktop **AI companion** with voice, memory, and a cus
 - **文本转语音（TTS）** — 中英双语语音合成，内置多音色，支持用参考音频克隆自己的音色
 - **本地大语言模型（LLM）** — 基于 llama.cpp 的本地推理（流式对话 + Agent 工具调用），应用内一键下载预设模型；也可接入 OpenAI 兼容远程 API
 - **语音会话** — 一句话唤醒 → 语音识别 → 流式回复 → 实时播报，支持唤醒词打断与免唤醒续聊
+- **声纹识别（Speaker Recognition）** — 录入声纹后识别「是谁在说话」：基于本地 CAM++ 声纹模型（声音特征而非 ASR 文本），支持多人注册、相似度阈值与 unknown 判定；仅用于区分说话人，**不构成安全认证**
 - **Live2D 虚拟角色** — 桌面常驻角色窗口（Cubism 2/3/4/5），位置记忆与百分比缩放，拖动不抢焦点；也支持 GIF 动图与「角色包」（静态立绘 + 人设 + 音色克隆）
 - **跨平台桌面应用** — Windows / macOS / Linux 三平台安装包，多页面控制面板 + 常驻角色窗口
 - **deepseek-harness 集成** — 桌宠实时感知 [deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) 任务状态，任务开始 / 完成 / 失败 / 中断时以气泡 + 语音播报（[使用说明](docs/content/docs/desktop-app/dsh-bridge.mdx)）
@@ -137,6 +138,7 @@ dsh plugin --profile web add @zapmomo-ai/dsh-plugin
 | `[tts]` | 文本转语音：默认音色参考音频、语速、解码步数等 |
 | `[llm]` | 大语言模型：模型路径、采样参数、OpenAI 兼容远程 API 等 |
 | `[voice]` | 语音会话：唤醒词、回复音色、打断与免唤醒续聊开关等 |
+| `[speaker]` | 声纹识别：enabled 开关（默认关）、相似度阈值、最短语音时长等 |
 | `[live2d]` | Live2D 角色：模型目录、窗口位置记忆与缩放 |
 | `[dsh]` | deepseek-harness 集成：桥开关、监听端口、语音播报与对话记录开关 |
 

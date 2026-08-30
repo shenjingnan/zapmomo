@@ -121,6 +121,49 @@ cargo test -- --test-threads=1
 ./scripts/run-kws-model-tests.sh
 ```
 
+### 声纹识别（Speaker Recognition）
+
+基于 sherpa-onnx 官方 CAM++ 声纹模型（3D-Speaker，中文 16k，192 维），从**声音特征**（而非 ASR 文本）
+判断「是谁在说话」：支持多人注册（每段音频独立提取 embedding，检索取最大相似度）、1:1 验证、
+1:N 识别与 unknown 判定。声纹档案持久化在 `~/.zapmomo/speaker_profiles/<id>.json`，
+语音会话内可通过 `[speaker].enabled` 在 ASR 前对用户语音打说话人标签（默认关闭）。
+
+> 声纹识别仅用于区分说话人，**不是安全认证**：录音回放、噪声、麦克风差异与声音变化都可能导致误判。
+
+```bash
+# 1. 下载声纹模型（约 27MB，默认安装到 ~/.zapmomo/models/<模型名>）
+cargo run -- speaker install-model
+
+# 2. 注册：传多个 wav 或一个目录（目录取全部 *.wav；同名覆盖重建）
+cargo run -- speaker enroll owner ./samples/owner/
+
+# 3. 识别（1:N）：输出 speaker/score/threshold/latency 与全量分数表
+cargo run -- speaker identify test.wav
+
+# 4. 验证（1:1）
+cargo run -- speaker verify owner test.wav
+
+# 5. 管理已注册说话人
+cargo run -- speaker list
+cargo run -- speaker remove owner
+```
+
+配置（`~/.zapmomo/settings.toml` 的 `[speaker]` 段，全部可选）：
+
+```toml
+[speaker]
+enabled = false                   # 语音会话内启用声纹打标，默认 false
+threshold = 0.6                   # 相似度阈值（余弦），越大越严格
+min_audio_duration_secs = 1.0     # 短于该时长直接跳过识别（防「嗯/啊」短促声误识别）
+model_dir = "/path/to/model"      # 模型目录（支持 ${env.VAR}）
+model = "xxx.onnx"                # 模型文件名（缺省扫描目录探测 campplus 模型）
+provider = "cpu"                  # 推理后端
+num_threads = 1                   # 推理线程数
+auto_download = true              # 模型缺失时自动下载
+max_buffer_duration_secs = 20.0   # 会话内声纹缓冲上限（超长截断保留最近音频）
+debug = false
+```
+
 ### 语音识别（ASR）
 
 接入 sherpa-onnx 语音识别模型，把麦克风语音实时转成文本（支持中英混说）。模型族：

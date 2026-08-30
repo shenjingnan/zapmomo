@@ -1679,7 +1679,10 @@ fn make_voice_emit(app: AppHandle) -> Box<dyn Fn(VoiceEvent) + Send> {
             VoiceEvent::Started
             | VoiceEvent::BargeIn
             | VoiceEvent::Stopped { .. }
-            | VoiceEvent::FollowUp => {}
+            | VoiceEvent::FollowUp
+            // 声纹标签（[speaker].enabled 时出现）：第一阶段仅日志镜像（log_voice_event
+            // 已记录），前端暂不消费；后续做身份策略时在此发 `voice-session-speaker`
+            | VoiceEvent::Speaker { .. } => {}
             VoiceEvent::State { state } => {
                 // 镜像到宿主共享状态：dsh 空档插播据此判断当前是否可插播
                 if let Some(vs) = app.try_state::<VoiceSessionState>() {

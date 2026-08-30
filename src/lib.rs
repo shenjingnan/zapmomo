@@ -15,6 +15,7 @@ pub mod llm;
 pub mod logging;
 pub mod model_library;
 pub mod performance;
+pub mod speaker;
 pub mod tts;
 pub mod voice;
 

@@ -37,6 +37,17 @@ pub enum VoiceEvent {
     Error { kind: ErrorKind, message: String },
     /// 唤醒词打断（`[打断] 检测到唤醒词...`）
     BargeIn,
+    /// 声纹识别（`[speaker].enabled` 时，ASR 最终文本前打说话人标签）。
+    ///
+    /// `speaker_id = None` 表示 unknown（最高分低于阈值）；`score` 为最高分
+    /// （低于阈值也返回，便于误识别分析）；`scores` 为全量分数表（降序）。
+    Speaker {
+        speaker_id: Option<String>,
+        score: Option<f32>,
+        matched: bool,
+        scores: Vec<crate::speaker::SpeakerScore>,
+        threshold: f32,
+    },
     /// 会话停止（结束 / 达最大轮数）
     Stopped { reason: StoppedReason, turns: u32 },
 }
@@ -100,6 +111,25 @@ pub fn log_voice_event(ev: &VoiceEvent) {
             tracing::warn!("[voice] 错误 kind={kind:?} message={message}")
         }
         VoiceEvent::BargeIn => tracing::info!("[voice] 唤醒词打断"),
+        VoiceEvent::Speaker {
+            speaker_id,
+            score,
+            matched,
+            scores,
+            threshold,
+        } => {
+            tracing::info!(
+                "[voice] 声纹识别: {} score={:?} matched={} threshold={:.2} table={:?}",
+                speaker_id.as_deref().unwrap_or("unknown"),
+                score,
+                matched,
+                threshold,
+                scores
+                    .iter()
+                    .map(|s| (s.speaker_id.as_str(), s.score))
+                    .collect::<Vec<_>>()
+            );
+        }
         VoiceEvent::Stopped { reason, turns } => {
             tracing::info!("[voice] 会话停止 reason={reason:?} turns={turns}")
         }
@@ -139,6 +169,24 @@ pub fn cli_sink(ev: VoiceEvent) {
             ErrorKind::BargeIn => eprintln!("[打断] {message}"),
         },
         VoiceEvent::BargeIn => println!("\n[打断] 检测到唤醒词，回到待唤醒"),
+        VoiceEvent::Speaker {
+            speaker_id,
+            score,
+            matched,
+            scores,
+            threshold,
+        } => {
+            println!(
+                "\n[声纹] {}（score {:.3} / threshold {:.2} / matched {}）",
+                speaker_id.as_deref().unwrap_or("unknown"),
+                score.unwrap_or(f32::NAN),
+                threshold,
+                matched
+            );
+            for s in scores {
+                println!("    {:<20} {:.3}", s.speaker_id, s.score);
+            }
+        }
         VoiceEvent::Stopped { reason, turns } => match reason {
             StoppedReason::MaxTurns { max } => println!("[会话] 已达最大轮数 {max}，退出"),
             StoppedReason::Manual => println!("[会话] 结束（共 {turns} 轮）"),
@@ -194,6 +242,23 @@ mod tests {
                 message: "x".to_string(),
             },
             VoiceEvent::BargeIn,
+            VoiceEvent::Speaker {
+                speaker_id: Some("owner".to_string()),
+                score: Some(0.83),
+                matched: true,
+                scores: vec![crate::speaker::SpeakerScore {
+                    speaker_id: "owner".to_string(),
+                    score: 0.83,
+                }],
+                threshold: 0.6,
+            },
+            VoiceEvent::Speaker {
+                speaker_id: None,
+                score: Some(0.38),
+                matched: false,
+                scores: vec![],
+                threshold: 0.6,
+            },
             VoiceEvent::Stopped {
                 reason: StoppedReason::Manual,
                 turns: 2,
@@ -290,6 +355,29 @@ mod tests {
             ),
             (VoiceEvent::FollowUp, r#"{"type":"follow_up"}"#),
             (
+                VoiceEvent::Speaker {
+                    speaker_id: Some("owner".to_string()),
+                    score: Some(0.83),
+                    matched: true,
+                    scores: vec![crate::speaker::SpeakerScore {
+                        speaker_id: "owner".to_string(),
+                        score: 0.83,
+                    }],
+                    threshold: 0.6,
+                },
+                r#"{"type":"speaker","speaker_id":"owner","score":0.83,"matched":true,"scores":[{"speaker_id":"owner","score":0.83}],"threshold":0.6}"#,
+            ),
+            (
+                VoiceEvent::Speaker {
+                    speaker_id: None,
+                    score: None,
+                    matched: false,
+                    scores: vec![],
+                    threshold: 0.6,
+                },
+                r#"{"type":"speaker","speaker_id":null,"score":null,"matched":false,"scores":[],"threshold":0.6}"#,
+            ),
+            (
                 VoiceEvent::Stopped {
                     reason: StoppedReason::MaxTurns { max: 5 },
                     turns: 5,
@@ -352,6 +440,16 @@ mod tests {
                 message: "x".to_string(),
             },
             VoiceEvent::BargeIn,
+            VoiceEvent::Speaker {
+                speaker_id: None,
+                score: Some(0.38),
+                matched: false,
+                scores: vec![crate::speaker::SpeakerScore {
+                    speaker_id: "owner".to_string(),
+                    score: 0.38,
+                }],
+                threshold: 0.6,
+            },
             VoiceEvent::Stopped {
                 reason: StoppedReason::Manual,
                 turns: 3,

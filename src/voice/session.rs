@@ -99,6 +99,10 @@ pub struct VoiceSession {
     /// 引擎，编排循环每轮开头取走并句间换入。`None` = CLI，不感知外部切换。
     tts_swap_slot: Option<TtsSwapSlot>,
     speaker: Box<dyn AudioPlayer>,
+    /// 声纹识别器（`[speaker].enabled` 且初始化成功才为 Some；失败降级 None 不阻断会话）
+    speaker_rec: Option<crate::speaker::SpeakerRecognizer>,
+    /// 当前说话段的 PCM 缓冲（speech 块攒入，finalize 时整段识别后清空）
+    speaker_buf: Vec<f32>,
     synth: SynthHandle,
     mic: MicLoop,
     kws_stream: OnlineStream,
@@ -210,6 +214,26 @@ impl VoiceSession {
         )?;
         let speaker = Box::new(crate::voice::player::Speaker::try_new()?);
         let kws_stream = Self::make_kws_stream(&kws, &cfg)?;
+        // 声纹识别（[speaker].enabled，默认关）：构造失败（模型缺失/下载失败）
+        // 只降级为无声纹，不阻断会话
+        let speaker_rec = if cfg.speaker.enabled {
+            match crate::speaker::SpeakerRecognizer::new(cfg.speaker.clone()) {
+                Ok(rec) => {
+                    tracing::info!(
+                        "[voice] 声纹识别已启用（threshold {:.2}，已注册 {} 人）",
+                        cfg.speaker.threshold,
+                        rec.num_registered()
+                    );
+                    Some(rec)
+                }
+                Err(e) => {
+                    tracing::warn!("[voice] 声纹识别初始化失败，本次会话禁用: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         Ok(Self {
             cfg,
@@ -222,6 +246,8 @@ impl VoiceSession {
             llm_slot,
             tts_swap_slot,
             speaker,
+            speaker_rec,
+            speaker_buf: Vec::new(),
             synth,
             mic,
             kws_stream,
@@ -393,6 +419,11 @@ impl VoiceSession {
                 // 复位后端：流式重建流（丢上轮识别状态）；离线清空 PCM 缓冲
                 self.asr.reset(&self.cfg.asr);
                 self.silence_accum = 0.0;
+                self.speaker_buf.clear();
+            }
+            SessionState::Armed => {
+                // 回待唤醒（含打断/超时路径）：丢弃残留的半段声纹缓冲
+                self.speaker_buf.clear();
             }
             SessionState::WaitingSpeech => {
                 self.speech_wait_accum = 0.0;
@@ -525,6 +556,16 @@ impl VoiceSession {
         let chunk_secs = self.cfg.asr.chunk_size as f32 / self.cfg.asr.sample_rate as f32;
         let speech_active = chunk_rms(&chunk) > self.cfg.vad_silence_threshold;
         self.asr.feed_chunk(&chunk, speech_active);
+        // 声纹缓冲：speech 块攒入（识别推迟到 finalize 整段做，避免逐 chunk 误识别）
+        if speech_active && self.speaker_rec.is_some() {
+            let max_len = (self.cfg.speaker.max_buffer_duration_secs.max(0.0)
+                * self.cfg.asr.sample_rate as f32) as usize;
+            self.speaker_buf.extend_from_slice(&chunk);
+            let overflow = self.speaker_buf.len().saturating_sub(max_len);
+            if overflow > 0 {
+                self.speaker_buf.drain(..overflow);
+            }
+        }
         let mut collector = AsrCollector::default();
         self.asr.decode_into(&mut collector);
         // 流式字幕：部分识别结果逐步刷新（覆盖同一行）；离线无 partial，天然不发
@@ -542,12 +583,42 @@ impl VoiceSession {
         }
         // 结束判定：sherpa is_final（流式兜底）或连续静音达到 asr_max_trailing_silence
         if let Some(text) = collector.final_text {
+            self.emit_speaker_tag();
             self.handle_user_final(text)?;
         } else if self.silence_accum >= self.cfg.asr_max_trailing_silence {
+            self.emit_speaker_tag();
             let text = self.force_finalize_asr();
             self.handle_user_final(text)?;
         }
         Ok(())
+    }
+
+    /// 对当前声纹缓冲整段识别并 emit [`VoiceEvent::Speaker`]（`[speaker].enabled` 时）。
+    ///
+    /// 放在 `step_listening` 的 finalize 分支内（而非 `handle_user_final`）——后者
+    /// 还被键盘文字输入路径复用，那里没有语音缓冲。无论结果如何都清空缓冲；
+    /// 识别失败只 warn，不影响会话。
+    fn emit_speaker_tag(&mut self) {
+        let Some(recognizer) = self.speaker_rec.as_ref() else {
+            return;
+        };
+        let buf = std::mem::take(&mut self.speaker_buf);
+        if buf.is_empty() {
+            return;
+        }
+        let sample_rate = self.cfg.asr.sample_rate as u32;
+        match recognizer.identify(&buf, sample_rate) {
+            Ok(id) => {
+                (self.emit)(VoiceEvent::Speaker {
+                    speaker_id: id.speaker_id,
+                    score: id.score,
+                    matched: id.matched,
+                    scores: id.scores,
+                    threshold: id.threshold,
+                });
+            }
+            Err(e) => tracing::warn!("[voice] 声纹识别失败（忽略）: {e}"),
+        }
     }
 
     /// 轮询文字输入收件箱（输入条窗口）。文字与 ASR 最终文本等价，复用
@@ -588,6 +659,7 @@ impl VoiceSession {
                 // Listening 中 ASR 可能残留 partial 音频，丢弃避免后续误转写混入
                 if matches!(self.state, SessionState::Listening) {
                     self.asr.reset(&self.cfg.asr);
+                    self.speaker_buf.clear();
                 }
                 // 排空上一轮遗留的 LLM 事件，再发起新一轮
                 while self.llm_rx.try_recv().is_ok() {}
@@ -609,6 +681,7 @@ impl VoiceSession {
             // force_finalize 已终结旧句，复位后端后继续聆听（不回待唤醒）
             tracing::debug!("[voice] ASR 空识别，保持聆听");
             self.asr.reset(&self.cfg.asr);
+            self.speaker_buf.clear();
             return Ok(());
         }
         (self.emit)(VoiceEvent::Transcript {

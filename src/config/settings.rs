@@ -240,6 +240,9 @@ pub struct AppConfig {
     /// 语音会话（KWS→ASR→LLM→TTS 全链路）配置
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub voice: Option<VoiceSettings>,
+    /// 声纹识别（Speaker Recognition）配置
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker: Option<SpeakerSettings>,
     /// 模型库配置（用户通过「添加本地模型」注册的 external 模型等）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_library: Option<ModelLibrarySettings>,
@@ -700,6 +703,44 @@ pub struct DshSettings {
     pub record_to_history: Option<bool>,
 }
 
+/// 声纹识别（Speaker Recognition）配置。
+///
+/// 全部字段可缺省：未配置的项在解析时回退到 `speaker::config` 的内置默认值，
+/// 因此这里用 `Option` 以区分「未配置」与「配置了」。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct SpeakerSettings {
+    /// 是否在语音会话中启用声纹识别（ASR 前对用户语音打说话人标签），缺省 false
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// 声纹模型目录（支持 ${env.VAR} 引用），缺省 `~/.zapmomo/models/<模型名>`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_dir: Option<String>,
+    /// 声纹 embedding 模型 onnx 文件名，缺省扫描模型目录探测 campplus 模型
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// 说话人相似度判定阈值（余弦相似度，越大越严格），缺省 0.6
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threshold: Option<f32>,
+    /// 参与识别的最短语音时长（秒），低于则跳过识别，缺省 1.0
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_audio_duration_secs: Option<f32>,
+    /// 推理后端，缺省 "cpu"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// 推理线程数，缺省 1
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub num_threads: Option<i32>,
+    /// 模型缺失时是否自动下载，缺省 true
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_download: Option<bool>,
+    /// 实时会话声纹缓冲上限（秒），超长截断保留最近音频，缺省 20.0
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_buffer_duration_secs: Option<f32>,
+    /// 调试输出，缺省 false
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub debug: Option<bool>,
+}
+
 fn default_log_level() -> String {
     "info".to_string()
 }
@@ -742,6 +783,7 @@ impl Default for AppConfig {
             live2d: None,
             llm: None,
             voice: None,
+            speaker: None,
             model_library: None,
             shortcuts: None,
             dsh: None,
@@ -934,6 +976,7 @@ mod tests {
             live2d: None,
             llm: None,
             voice: None,
+            speaker: None,
             model_library: None,
             shortcuts: None,
             dsh: None,
@@ -1259,6 +1302,7 @@ mod tests {
                 }),
                 llm: None,
                 voice: None,
+                speaker: None,
                 model_library: None,
                 shortcuts: None,
                 dsh: None,
