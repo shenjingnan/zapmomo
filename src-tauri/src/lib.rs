@@ -1555,6 +1555,8 @@ fn forward_llm_events(
                 let _ = app.emit("llm-error", e);
                 break;
             }
+            // 工具轮只在根 crate 侧回传跨轮上下文，前端/持久化只承载文本，忽略
+            Ok(LlmEvent::ToolRound { .. }) => {}
             Ok(LlmEvent::Status { ready }) => {
                 let _ = app.emit("llm-status", LlmStatusPayload { ready });
                 if stop_on_status {

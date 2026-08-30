@@ -19,7 +19,7 @@ pub enum ChatRole {
 /// 一条对话消息。
 ///
 /// `tool_calls` 为后续 Tool Calling 预留（第一版不使用）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: ChatRole,
     pub content: String,
@@ -38,7 +38,7 @@ impl ChatMessage {
 }
 
 /// 一次工具调用（预留，第一版不实现）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolCall {
     pub name: String,
     /// JSON 编码的参数
@@ -217,7 +217,7 @@ impl LlmParamsPatch {
 }
 
 /// 工具调用结果（对应 OpenAI Responses 的 `function_call_output` item）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolResult {
     /// 关联的 tool call id
     pub id: String,
@@ -238,7 +238,7 @@ pub struct ToolDefinition {
 /// LLM 输入项（一次 Agent 步的上下文，有序）。
 ///
 /// 统一抽象：Responses API 的 `input` 与 Chat Completions 的 `messages` 都映射到它。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum InputItem {
     /// 一条聊天消息（system / user / assistant）
     Message(ChatMessage),

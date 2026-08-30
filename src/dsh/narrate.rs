@@ -152,6 +152,8 @@ pub fn generate_narration(
                 tracing::warn!("dsh LLM 播报生成失败（{e}），回退模板台词");
                 return None;
             }
+            // 工具轮仅 voice 会话跨轮回传消费，播报单轮无 history，忽略
+            Ok(LlmEvent::ToolRound { .. }) => {}
             // 加载/卸载状态与播报无关，跳过
             Ok(LlmEvent::Status { .. }) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
