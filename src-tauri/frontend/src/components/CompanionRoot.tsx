@@ -2,14 +2,9 @@ import { getCurrentWindow, LogicalPosition, LogicalSize } from "@tauri-apps/api/
 import type { Live2DModel } from "pixi-live2d-display/cubism4";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { GifStage } from "@/components/gif/GifStage";
-import {
-  Live2dStage,
-  type Live2dStageHandle,
-  type ModelLayout,
-} from "@/components/live2d/Live2dStage";
+import { Live2dStage, type ModelLayout } from "@/components/live2d/Live2dStage";
 import { computeModelHitRects } from "@/components/live2d/modelLayout";
 import { PropsLayer } from "@/components/performance/PropsLayer";
-import { usePerformance } from "@/components/performance/usePerformance";
 import { VoiceStatusDot } from "@/components/voice/VoiceStatusDot";
 import { useLive2dConfig } from "@/hooks/useLive2dConfig";
 import { useVoiceSession } from "@/hooks/useVoiceSession";
@@ -22,6 +17,7 @@ import {
   onCompanionLayerChanged,
   onCompanionLockedChanged,
   onCompanionOpacityChanged,
+  onCompanionPlayMotion,
   onCompanionScaleChanged,
   onCompanionSpriteChanged,
   onDshSpeak,
@@ -95,11 +91,9 @@ export function CompanionRoot() {
   // 拖拽模式：modifier = 需按住 cmd/ctrl 才能拖动（缺省 direct = 直接拖动）。
   const [dragMode, setDragMode] = useState<CompanionDragMode>("direct");
   const [size, setSize] = useState({ width: INITIAL_WIDTH, height: BASE_HEIGHT + BUBBLE_STRIP });
-  // 表演（BongoCat 兼容模拟键鼠）：道具资源、模型布局与引擎。
-  const stageRef = useRef<Live2dStageHandle | null>(null);
+  // BongoCat 道具资源（键盘背景静态展示；模拟键鼠表演已下线）。
   const [props, setProps] = useState<PerformancePropsInfo | null>(null);
   const [modelLayout, setModelLayout] = useState<ModelLayout | null>(null);
-  const { pressedKeys } = usePerformance(props, stageRef);
 
   // Live2D 模型句柄：dsh 事件触发动作用（模型缺对应组时静默跳过）。
   const modelRef = useRef<Live2DModel | null>(null);
@@ -392,6 +386,20 @@ export function CompanionRoot() {
     };
   }, []);
 
+  // 右键菜单「状态切换（动作）」：指定组内下标播放一次，播完自动回待机 idle。
+  useEffect(() => {
+    const unlisten = onCompanionPlayMotion(({ group, index }) => {
+      const model = modelRef.current;
+      if (!model) return;
+      if (!model.internalModel.motionManager) return;
+      // FORCE 优先级（3）：同 dsh 联动语义，打断 idle/在播动作。
+      void model.internalModel.motionManager.startMotion(group, index, 3);
+    });
+    return () => {
+      void unlisten.then((fn) => fn());
+    };
+  }, []);
+
   // 监听窗口移动：拖动停止（debounce）后把逻辑像素坐标写回 settings，供下次启动恢复。
   useEffect(() => {
     const win = getCurrentWindow();
@@ -519,7 +527,6 @@ export function CompanionRoot() {
             />
           ) : (
             <Live2dStage
-              ref={stageRef}
               modelUrl={stage.url}
               width={size.width}
               height={size.height - BUBBLE_STRIP}
@@ -531,11 +538,11 @@ export function CompanionRoot() {
               }}
             />
           )}
-          {/* BongoCat 道具层：键盘背景 + 爪子按键贴图（仅 BongoCat 伙伴有 props） */}
+          {/* BongoCat 道具层：键盘背景静态展示（模拟键鼠表演已下线，无按键贴图） */}
           <PropsLayer
             layout={modelLayout}
             backgroundUrl={props?.background ? toAssetUrl(props.background) : null}
-            pressedKeys={pressedKeys}
+            pressedKeys={[]}
           />
         </div>
       </div>

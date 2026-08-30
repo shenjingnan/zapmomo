@@ -25,8 +25,7 @@ pub const EXIT_MARGIN_PX: f64 = 24.0;
 
 /// 角色窗口可命中矩形（窗口内逻辑像素，原点 = 窗口左上角）。
 ///
-/// 不复用 [`crate::performance::Rect`]：后者无 serde derive，且语义是全屏
-/// 物理像素活动区域，与本次用途不同。
+/// 语义是窗口内逻辑像素，与全屏物理像素活动区域（原表演模块的 `Rect`）不同。
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct HitRect {
     pub x: f64,
