@@ -91,7 +91,7 @@ xattr -cr "/Applications/ZapMomo.app"
 - **本地运行** — llama.cpp 本地推理，流式对话 + Agent 工具调用，数据不出设备
 - **一键下载** — 应用内提供 Qwen3-0.6B / 4B 等预设，点击即下载（推荐 Qwen3-4B-Instruct-2507，Q4_K_M 量化约 2.5GB）
 - **自备模型** — 任意 GGUF 模型放入 `~/.zapmomo/models/` 即自动发现
-- **远程接入** — 支持配置 OpenAI 兼容 API（官方 API 或自建 `llama-server`）
+- **远程接入** — 支持配置 OpenAI 兼容 API（官方 API 或自建 `llama-server`），免费云端模型见下方「免费 LLM 推荐」
 
 ### Live2D 虚拟角色
 
@@ -114,6 +114,14 @@ xattr -cr "/Applications/ZapMomo.app"
 设置页「通用」、角色右键菜单与托盘菜单均提供「重启」：退出后自动重新拉起，用于让需要重启才能生效的配置立即生效。
 
 </details>
+
+## 免费 LLM 推荐
+
+没有独立显卡或不想下载本地模型？可以直接使用免费云端模型，在「AI 大脑（LLM）配置」页选择远程 API 接入：
+
+| 服务商 | 免费模型 | 说明 |
+| --- | --- | --- |
+| [智谱开放平台](https://bigmodel.cn/) | `glm-4.7-flash` | 免费使用，注册后获取 API Key |
 
 ## deepseek-harness 集成（dsh 桥）
 

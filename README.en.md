@@ -292,7 +292,7 @@ cargo run -- llm chat --text "你好，你是谁？"
 - **Recommended model** — Qwen3-4B-Instruct-2507 (`Qwen3-4B-Instruct-2507-Q4_K_M.gguf`); any GGUF works and is auto-discovered
 - **Backend** — pure CPU by default; Metal acceleration is reserved (`gpu_layers` is configurable; blocked on the llama-cpp-2 0.1.154 Metal logits crash, to be enabled after upgrading the dependency)
 - **Agent** — loops provider calls and tool executions until a plain-text reply is produced (max 10 rounds to prevent infinite loops)
-- **Remote** — set `base_url / api_key / model` to use an OpenAI-compatible `/v1/responses` endpoint (official API or `llama-server`)
+- **Remote** — set `base_url / api_key / model` to use an OpenAI-compatible `/v1/responses` endpoint (official API or `llama-server`); for free cloud models see "Free LLM" below
 
 ### Commands
 
@@ -373,6 +373,14 @@ welcome_text = "你好，我在。"  # Welcome message after waking
 ```
 
 </details>
+
+## Free LLM
+
+No dedicated GPU, or prefer not to download a local model? Use a free cloud model instead — configure a remote API in the "AI Brain (LLM)" settings page:
+
+| Provider | Free Model | Notes |
+| --- | --- | --- |
+| [Zhipu BigModel](https://bigmodel.cn/) | `glm-4.7-flash` | Free to use; sign up to get an API key |
 
 ## Desktop App (Tauri 2)
 
