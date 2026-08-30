@@ -23,7 +23,7 @@ const STATE_META: Record<IntegrationState, { label: string; tone: "online" | "wa
 const NOW_TICK_MS = 5_000;
 
 /**
- * 插件集成页「deepseek-harness（dsh 桥）」集成卡片。
+ * 插件集成页「deepseek-harness」（dsh 桥）集成卡片。
  *
  * 状态机（lib/dshIntegration 纯函数合成）：no-dsh / no-profile / not-installed /
  * half-activated / awaiting-restart / online。检测全走文件级（~/.dsh 布局），
@@ -159,7 +159,7 @@ export function DshIntegrationCard() {
           <Puzzle className="h-4 w-4 shrink-0 text-text-secondary" />
           <div>
             <h2 className="text-base font-semibold text-text-primary">
-              deepseek-harness（dsh 桥）
+              deepseek-harness
             </h2>
             <p className="mt-0.5 text-xs text-text-muted">
               dsh 任务事件实时联动桌宠：气泡 + 语音播报
