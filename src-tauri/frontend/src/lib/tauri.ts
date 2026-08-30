@@ -22,6 +22,8 @@ import type {
   DownloadProgress,
   DshBridgeStatus,
   DshConfigInfo,
+  DshInstallProgress,
+  DshIntegrationInfo,
   DshParamsPatch,
   DshSpeakPayload,
   HitRect,
@@ -166,6 +168,9 @@ export const api = {
   setDshParams: (args: { params: DshParamsPatch }) => invoke<void>("set_dsh_params", args),
   getDshBridgeStatus: () => invoke<DshBridgeStatus>("get_dsh_bridge_status"),
   testDshAnnounce: () => invoke<void>("test_dsh_announce"),
+  // ---- dsh 集成（插件检测 / 一键安装；「插件集成」页）----
+  detectDshIntegration: () => invoke<DshIntegrationInfo>("detect_dsh_integration"),
+  installDshPlugin: (args: { path?: string | null }) => invoke<void>("install_dsh_plugin", args),
   // ---- 模型列表（registry 预设 + 安装状态；供各「选择模型」弹窗）----
   listModelLibrary: () => invoke<LibraryModel[]>("list_model_library"),
   getSystemResources: () => invoke<SystemResources>("get_system_resources"),
@@ -442,6 +447,13 @@ export function onDshBridgeStatus(
   handler: (payload: DshBridgeStatus) => void,
 ): Promise<UnlistenFn> {
   return listen<DshBridgeStatus>("dsh-bridge-status", (e) => handler(e.payload));
+}
+
+/** 订阅 dsh 插件安装进度（一键安装的逐行输出 / 状态翻转）。 */
+export function onDshInstallProgress(
+  handler: (p: DshInstallProgress) => void,
+): Promise<UnlistenFn> {
+  return listen<DshInstallProgress>("dsh-install-progress", (e) => handler(e.payload));
 }
 
 /**

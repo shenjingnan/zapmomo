@@ -6,7 +6,9 @@
 /// （权限 0600），插件每次发送前现读；ZapMomo 未运行时插件静默跳过。
 pub mod announce;
 pub mod config;
+pub mod discover;
 pub mod event;
+pub mod integration;
 pub mod lines;
 pub mod narrate;
 

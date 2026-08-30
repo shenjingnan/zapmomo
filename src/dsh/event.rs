@@ -38,6 +38,9 @@ pub enum DshEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
     },
+    /// 插件心跳（控制事件）：dsh 插件启动即发 + 周期重发，桥据此判定「插件在线」。
+    /// 只在 tauri 侧 `handle_dsh_event` 顶部拦截回写状态，不进节流/播报/历史管线。
+    PluginHello,
 }
 
 impl DshEvent {
@@ -48,6 +51,7 @@ impl DshEvent {
             Self::TaskFinished { .. } => "task-finished",
             Self::TaskFailed { .. } => "task-failed",
             Self::TaskInterrupted { .. } => "task-interrupted",
+            Self::PluginHello => "plugin-hello",
         }
     }
 
@@ -58,6 +62,8 @@ impl DshEvent {
             | Self::TaskFinished { session_id, .. }
             | Self::TaskFailed { session_id, .. }
             | Self::TaskInterrupted { session_id, .. } => session_id,
+            // 心跳无会话语义；不进节流（tauri 侧提前拦截），此退化值仅满足接口
+            Self::PluginHello => "",
         }
     }
 
@@ -68,6 +74,7 @@ impl DshEvent {
             | Self::TaskFinished { title, .. }
             | Self::TaskFailed { title, .. }
             | Self::TaskInterrupted { title, .. } => title.as_deref(),
+            Self::PluginHello => None,
         }
     }
 }
@@ -145,6 +152,8 @@ pub fn parse_event(body: &str) -> Result<Option<DshEvent>, String> {
             title,
             reason,
         }),
+        // 心跳：无字段语义，多余字段（如 session_id）忽略
+        "plugin-hello" => Some(DshEvent::PluginHello),
         _ => None,
     })
 }
@@ -198,6 +207,18 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_plugin_hello() {
+        // 心跳：多余字段（session_id）忽略；无 session_id 也照常解析
+        let ev = parse_event(r#"{"type":"plugin-hello","session_id":"plugin"}"#)
+            .unwrap()
+            .expect("心跳应返回 Some");
+        assert_eq!(ev, DshEvent::PluginHello);
+        assert_eq!(ev.kind(), "plugin-hello");
+        let ev = parse_event(r#"{"type":"plugin-hello"}"#).unwrap().unwrap();
+        assert_eq!(ev, DshEvent::PluginHello);
+    }
+
+    #[test]
     fn test_empty_title_treated_as_missing() {
         let ev = parse_event(r#"{"type":"task-started","session_id":"s","title":"  "}"#)
             .unwrap()
@@ -230,6 +251,7 @@ mod tests {
                 r#"{"type":"task-interrupted","session_id":"s"}"#,
                 "task-interrupted",
             ),
+            (r#"{"type":"plugin-hello"}"#, "plugin-hello"),
         ] {
             assert_eq!(parse_event(body).unwrap().unwrap().kind(), kind);
         }
@@ -260,6 +282,7 @@ mod tests {
                 title: None,
                 reason: None,
             },
+            DshEvent::PluginHello,
         ] {
             assert_eq!(
                 serde_json::to_value(&ev).unwrap()["type"].as_str(),

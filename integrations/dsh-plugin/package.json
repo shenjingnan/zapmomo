@@ -1,6 +1,6 @@
 {
   "name": "@zapmomo-ai/dsh-plugin",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "dsh（DeepSeek Harness）→ ZapMomo 桌宠任务事件桥：监听 agent/status 与 turn/end，把任务开始/完成/失败/中断推给 ZapMomo 的 loopback 桥，桌宠以气泡 + 语音播报。",
   "license": "MIT",
   "repository": {
