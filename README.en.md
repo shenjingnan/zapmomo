@@ -380,10 +380,11 @@ No dedicated GPU, or prefer not to download a local model? Use a free cloud mode
 
 | Provider | Free Model | Notes |
 | --- | --- | --- |
-| [Zhipu BigModel](https://bigmodel.cn/) | `glm-4.7-flash` | Free to use; sign up to get an API key |
+| [Zhipu BigModel](https://bigmodel.cn/) | `glm-4.7-flash` | Free to use, but tightly rate-limited — 429s are common; sign up to get an API key |
 | [Groq](https://console.groq.com/) | `openai/gpt-oss-120b` / `openai/gpt-oss-20b` / Qwen3 series | Free with tight rate limits (30 RPM / 1K RPD / 8K TPM, [per-model limits](https://console.groq.com/docs/rate-limits)); sign up to get an API key |
 | [Google AI Studio (Gemini)](https://aistudio.google.com/) | `gemini-3.7-flash` and other Flash models, `gemini-2.5-pro` | Free tier with rate limits; free-tier content may be used to improve Google products; sign up to get an API key |
 | [OpenRouter](https://openrouter.ai/models?max_price=0) | Many `:free` models: Nemotron 3 Ultra, MiniMax M3, GLM 5.2, etc. | Model aggregator; free tier is rate-limited ([limits doc](https://openrouter.ai/docs/api-reference/limits)); sign up to get an API key |
+| [SiliconFlow](https://cloud.siliconflow.cn/) | 10+ free models: `Qwen3-8B`, `DeepSeek-R1-0528-Qwen3-8B`, `GLM-Z1-9B-0414`, etc. | Free tier is rate-limited; sign up to get an API key |
 
 ## Desktop App (Tauri 2)
 

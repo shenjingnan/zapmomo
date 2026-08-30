@@ -121,10 +121,11 @@ xattr -cr "/Applications/ZapMomo.app"
 
 | 服务商 | 免费模型 | 说明 |
 | --- | --- | --- |
-| [智谱开放平台](https://bigmodel.cn/) | `glm-4.7-flash` | 免费使用，注册后获取 API Key |
+| [智谱开放平台](https://bigmodel.cn/) | `glm-4.7-flash` | 免费使用，但限速较严、易触发 429 限流，注册后获取 API Key |
 | [Groq](https://console.groq.com/) | `openai/gpt-oss-120b` / `openai/gpt-oss-20b` / Qwen3 系列 | 免费，限速较严（30 RPM / 1K RPD / 8K TPM，[各模型限额](https://console.groq.com/docs/rate-limits)），注册后获取 API Key |
 | [Google AI Studio（Gemini）](https://aistudio.google.com/) | `gemini-3.7-flash` 等 Flash 系列、`gemini-2.5-pro` | 免费额度有限速；免费档对话数据会被用于改进产品，注册后获取 API Key |
 | [OpenRouter](https://openrouter.ai/models?max_price=0) | 大量 `:free` 模型：Nemotron 3 Ultra、MiniMax M3、GLM 5.2 等 | 模型聚合平台，免费档有限速（[限速说明](https://openrouter.ai/docs/api-reference/limits)），注册后获取 API Key |
+| [硅基流动 SiliconFlow](https://cloud.siliconflow.cn/) | `Qwen3-8B`、`DeepSeek-R1-0528-Qwen3-8B`、`GLM-Z1-9B-0414` 等十余个免费模型 | 免费档限速，注册后获取 API Key |
 
 ## deepseek-harness 集成（dsh 桥）
 
