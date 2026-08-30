@@ -14,7 +14,6 @@ export function SpeakerParamsCard() {
 
   const [threshold, setThreshold] = useState(0.6);
   const [minDuration, setMinDuration] = useState("1.0");
-  const [respondOnly, setRespondOnly] = useState(false);
   const [numThreads, setNumThreads] = useState("1");
   const [debug, setDebug] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -27,7 +26,6 @@ export function SpeakerParamsCard() {
     if (!config) return;
     setThreshold(config.threshold);
     setMinDuration(String(config.min_audio_duration_secs));
-    setRespondOnly(config.respond_only_matched);
     setNumThreads(String(config.num_threads));
     setDebug(config.debug);
   }, [config]);
@@ -50,7 +48,6 @@ export function SpeakerParamsCard() {
       await setParams({
         threshold,
         min_audio_duration_secs: parsedMin,
-        respond_only_matched: respondOnly,
         num_threads: parsedThreads,
         debug,
       });
@@ -122,22 +119,6 @@ export function SpeakerParamsCard() {
               onChange={(e) => setMinDuration(e.target.value)}
               aria-label="最短语音时长（秒）"
               className="ml-auto h-8 w-24 text-right"
-            />
-          </dd>
-        </div>
-        <div className="flex items-center justify-between gap-3.5 px-3.5 py-2.5">
-          <dt className="shrink-0 text-sm text-text-primary">
-            仅响应已注册说话人
-            <span className="mt-0.5 block text-xs text-text-muted">
-              不匹配的语音将被忽略（不回复、不入历史、不存记录）；短于最短时长的
-              语音无法确认身份，同样会被忽略。欢迎语对所有人播放。
-            </span>
-          </dt>
-          <dd>
-            <Switch
-              checked={respondOnly}
-              onCheckedChange={setRespondOnly}
-              aria-label="仅响应已注册说话人"
             />
           </dd>
         </div>

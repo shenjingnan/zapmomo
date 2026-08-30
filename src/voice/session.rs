@@ -128,18 +128,11 @@ enum SpeakerGateVerdict {
     FailOpen,
 }
 
-/// 声纹响应门控裁决（纯函数）：`respond_only_matched` 开启时，只有 matched 的
-/// 说话人放行；无法判定（太短/空缓冲）沿用粘性身份；明确不匹配拒绝；识别故障
-/// fail-open（不因故障全聋）。「0 注册放行 + warn_once」需要可变日志状态，由调用
-/// 方（`speaker_gate`）处理，不属于本函数。
-fn decide_speaker_gate(
-    gate_on: bool,
-    evidence: &SpeakerEvidence,
-    sticky: Option<&str>,
-) -> SpeakerGateVerdict {
-    if !gate_on {
-        return SpeakerGateVerdict::Allow;
-    }
+/// 声纹响应门控裁决（纯函数）：只有 matched 的说话人放行；无法判定（太短/
+/// 空缓冲）沿用粘性身份；明确不匹配拒绝；识别故障 fail-open（不因故障全聋）。
+/// 「0 注册放行 + warn_once」需要可变日志状态，由调用方（`speaker_gate`）处理，
+/// 不属于本函数。
+fn decide_speaker_gate(evidence: &SpeakerEvidence, sticky: Option<&str>) -> SpeakerGateVerdict {
     match evidence {
         SpeakerEvidence::Matched(_) => SpeakerGateVerdict::Allow,
         SpeakerEvidence::Skipped if sticky.is_some() => SpeakerGateVerdict::Allow,
@@ -803,9 +796,10 @@ impl VoiceSession {
     /// 放在 `step_listening` 的 finalize 分支最前（`force_finalize_asr` 之前）——
     /// 被拒句若先 finalize，会经「LLM 忙转文字队列」路径绕过门控（文字路径不门控）。
     /// Speaker 事件无论放行与否都照发（前端/CLI 可观测）；识别失败 fail-open；
-    /// `[speaker].enabled=false` 或识别器未挂载时恒放行（现状行为）。
+    /// 识别器未挂载（未启用/构造失败）时恒放行。**enabled 即门控**：不匹配的
+    /// 句子不进 LLM/TTS、不入历史、不落盘。
     fn speaker_gate(&mut self) -> bool {
-        let gate_on = self.cfg.speaker.respond_only_matched;
+        // enabled 即门控：识别器未挂载（未启用/构造失败）时恒放行
         let Some(recognizer) = self.speaker_rec.clone() else {
             return true;
         };
@@ -849,7 +843,7 @@ impl VoiceSession {
                 }
             }
         };
-        let verdict = decide_speaker_gate(gate_on, &evidence, self.speaker_identity.as_deref());
+        let verdict = decide_speaker_gate(&evidence, self.speaker_identity.as_deref());
         match verdict {
             SpeakerGateVerdict::Deny => {
                 tracing::info!("[voice] 声纹不匹配，忽略该句（不响应）");
@@ -1625,35 +1619,28 @@ impl Reaction for BargeInReaction {
 mod tests {
     use super::*;
 
-    /// 声纹门控裁决矩阵：开关关恒放行；matched 放行；skipped 看粘性；unknown 拒绝；
+    /// 声纹门控裁决矩阵：matched 放行；skipped 看粘性；unknown 拒绝；
     /// 故障 fail-open（不因模型/推理故障全聋）。
     #[test]
     fn test_decide_speaker_gate_matrix() {
         use SpeakerEvidence::{Failed, Matched, Skipped, Unknown};
         use SpeakerGateVerdict::{Allow, Deny, FailOpen};
-        // 开关关闭：恒放行（现状行为）
-        for ev in [Matched("owner".into()), Skipped, Unknown, Failed] {
-            assert_eq!(decide_speaker_gate(false, &ev, None), Allow);
-        }
-        // 开关开启 + 有粘性身份
+        // 有粘性身份：matched/skipped 沿用放行，unknown 拒绝，故障 fail-open
         assert_eq!(
-            decide_speaker_gate(true, &Matched("owner".into()), Some("owner")),
+            decide_speaker_gate(&Matched("owner".into()), Some("owner")),
             Allow
         );
-        assert_eq!(decide_speaker_gate(true, &Skipped, Some("owner")), Allow);
-        assert_eq!(decide_speaker_gate(true, &Unknown, Some("owner")), Deny);
-        assert_eq!(decide_speaker_gate(true, &Failed, Some("owner")), FailOpen);
-        // 开关开启 + 无粘性（首句）
-        assert_eq!(
-            decide_speaker_gate(true, &Matched("owner".into()), None),
-            Allow
-        );
-        assert_eq!(decide_speaker_gate(true, &Skipped, None), Deny);
-        assert_eq!(decide_speaker_gate(true, &Unknown, None), Deny);
-        assert_eq!(decide_speaker_gate(true, &Failed, None), FailOpen);
+        assert_eq!(decide_speaker_gate(&Skipped, Some("owner")), Allow);
+        assert_eq!(decide_speaker_gate(&Unknown, Some("owner")), Deny);
+        assert_eq!(decide_speaker_gate(&Failed, Some("owner")), FailOpen);
+        // 无粘性（首句）：只有 matched 放行
+        assert_eq!(decide_speaker_gate(&Matched("owner".into()), None), Allow);
+        assert_eq!(decide_speaker_gate(&Skipped, None), Deny);
+        assert_eq!(decide_speaker_gate(&Unknown, None), Deny);
+        assert_eq!(decide_speaker_gate(&Failed, None), FailOpen);
         // 粘性身份是「是谁」而非「匹配谁」：换人 matched 任何注册者都放行
         assert_eq!(
-            decide_speaker_gate(true, &Matched("user_1".into()), Some("owner")),
+            decide_speaker_gate(&Matched("user_1".into()), Some("owner")),
             Allow
         );
     }

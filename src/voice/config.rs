@@ -260,7 +260,6 @@ mod tests {
             // 声纹识别默认关闭（零行为改变的契约）
             assert!(!cfg.speaker.enabled);
             assert_eq!(cfg.speaker.threshold, 0.6);
-            assert!(!cfg.speaker.respond_only_matched);
         });
     }
 
