@@ -181,6 +181,35 @@ beforeEach(() => {
           return Promise.resolve(false);
         case "list_model_library":
           return Promise.resolve([]);
+        case "get_dsh_config":
+          return Promise.resolve({
+            enabled: false,
+            port: 0,
+            voice_enabled: true,
+            llm_enabled: true,
+            record_to_history: true,
+            running: false,
+            actual_port: null,
+            error: null,
+            discovery_path: "/tmp/dsh-bridge.json",
+          });
+        case "detect_dsh_integration":
+          return Promise.resolve({
+            status: {
+              dsh_home_detected: false,
+              profile_ready: false,
+              plugin_installed: false,
+              plugin_activated: false,
+            },
+            manual_command: "dsh plugin --profile web add @zapmomo-ai/dsh-plugin",
+          });
+        case "get_dsh_bridge_status":
+          return Promise.resolve({
+            running: false,
+            port: null,
+            error: null,
+            last_heartbeat_at: null,
+          });
         case "start_listen":
         case "stop_listen":
         case "download_kws_model":
@@ -197,7 +226,17 @@ describe("App（KWS 控制面板）", () => {
     renderApp("/models");
     expect(screen.getByAltText("ZapMomo")).toBeInTheDocument();
     expect(screen.getByText("概览")).toBeInTheDocument();
+    expect(screen.getByText("插件集成")).toBeInTheDocument();
     expect(screen.getByText("模型摘要")).toBeInTheDocument();
+  });
+
+  it("插件集成页：渲染 dsh 集成卡片（未检测到 dsh 引导）", async () => {
+    renderApp("/integrations");
+    // 「插件集成」同时出现在侧栏与页标题，这里用 heading role 消歧
+    expect(screen.getByRole("heading", { name: "插件集成" })).toBeInTheDocument();
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("detect_dsh_integration"));
+    expect(screen.getByText("deepseek-harness（dsh 桥）")).toBeInTheDocument();
+    expect(screen.getByTestId("dsh-integration-state").textContent).toContain("未检测到 dsh");
   });
 
   it("概览页 ASR 开关调用 start_asr_listen", async () => {

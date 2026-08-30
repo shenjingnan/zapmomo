@@ -6,6 +6,7 @@ import { queryClient } from "@/lib/queryClient";
 import { ChatPage } from "@/pages/ChatPage";
 import { CompanionPage } from "@/pages/CompanionPage";
 import { HomePage } from "@/pages/HomePage";
+import { IntegrationsPage } from "@/pages/IntegrationsPage";
 import { ModelsOverviewPage } from "@/pages/ModelsOverviewPage";
 import { AsrPage } from "@/pages/models/AsrPage";
 import { KwsPage } from "@/pages/models/KwsPage";
@@ -33,6 +34,7 @@ export default function App() {
               <Route path="models/llm" element={<LlmPage />} />
               <Route path="models/tts" element={<TtsPage />} />
               <Route path="models/speaker" element={<SpeakerPage />} />
+              <Route path="integrations" element={<IntegrationsPage />} />
               <Route path="settings" element={<SettingsPage />} />
             </Route>
           </Routes>
