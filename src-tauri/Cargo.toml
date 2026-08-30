@@ -49,6 +49,11 @@ zapmomo = { path = ".." }
 # 把角色窗口转成 macOS 非激活面板（non-activating panel）：拖动/点击不抢前台焦点
 tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", branch = "v2.1" }
 
+# 气泡子窗口联动需要 NSWindow addChildWindow:ordered:（objc2 以 NSGraphics feature 门控）：
+# AppKit 在窗口服务器同一事务内随父移动，替代 Moved 事件联动。已是 tauri-nspanel 的
+# 传递依赖（0.3.x），此处显式声明固定所需 feature，与下方 windows crate 同一模式。
+objc2-app-kit = { version = "0.3", features = ["NSGraphics"] }
+
 [target.'cfg(windows)'.dependencies]
 # 置底：SetWindowPos(HWND_BOTTOM) 把角色窗口沉到 Z 序底部
 #（windows crate 已是 tauri 的传递依赖，此处显式声明为直接依赖并启用所需 feature）
