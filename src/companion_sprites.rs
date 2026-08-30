@@ -136,23 +136,19 @@ fn list_sprites_in(model_dir: &Path) -> Vec<SpriteInfo> {
         .collect()
 }
 
-/// `set_character_sprite` 工具执行入口：解析参数 → 校验 → 通知 → 返回结果文本。
+/// 结构化执行入口：校验名字 → 匹配形象 → 发切换事件。
 ///
-/// 模型可见的失败一律返回提示文本（失败即结果），绝不 `Err` 中断 Agent Loop。
-pub fn apply_tool_call(arguments: &str) -> String {
-    let name = serde_json::from_str::<serde_json::Value>(arguments)
-        .ok()
-        .and_then(|v| v.get("name")?.as_str().map(str::to_string));
-    let Some(name) = name else {
-        return "参数错误：缺少字符串字段 name".to_string();
-    };
+/// Ok = canonical stem（保留原大小写）；Err = 面向模型的失败原因。
+/// 成功才发 [`SpriteEvent`]；失败路径（未知名 / 无角色包）不发事件。
+/// 供 `apply_tool_call` 与 `voice::sprite_agent` 共用。
+pub fn apply_sprite(name: &str) -> Result<String, String> {
     let name = name.trim();
     if name.is_empty() {
-        return "参数错误：name 不能为空".to_string();
+        return Err("参数错误：name 不能为空".to_string());
     }
 
     let Some(model) = active_character() else {
-        return "当前没有使用角色包伙伴，无法切换形象".to_string();
+        return Err("当前没有使用角色包伙伴，无法切换形象".to_string());
     };
 
     let sprites = list_sprites_in(Path::new(&model.model_dir));
@@ -168,7 +164,7 @@ pub fn apply_tool_call(arguments: &str) -> String {
             .find(|s| s.name.eq_ignore_ascii_case(name))
             .cloned()
         else {
-            return match sprites.is_empty() {
+            return Err(match sprites.is_empty() {
                 true => format!("未找到形象「{name}」，当前角色没有可用形象"),
                 false => {
                     let names: Vec<&str> = sprites.iter().map(|s| s.name.as_str()).collect();
@@ -177,7 +173,7 @@ pub fn apply_tool_call(arguments: &str) -> String {
                         names.join(", ")
                     )
                 }
-            };
+            });
         };
         (hit.name, hit.path)
     };
@@ -187,7 +183,23 @@ pub fn apply_tool_call(arguments: &str) -> String {
         name: final_name.clone(),
         path: path.display().to_string(),
     });
-    format!("已切换形象：{final_name}")
+    Ok(final_name)
+}
+
+/// `set_character_sprite` 工具执行入口：解析参数 → [`apply_sprite`] → 返回结果文本。
+///
+/// 模型可见的失败一律返回提示文本（失败即结果），绝不 `Err` 中断 Agent Loop。
+pub fn apply_tool_call(arguments: &str) -> String {
+    let name = serde_json::from_str::<serde_json::Value>(arguments)
+        .ok()
+        .and_then(|v| v.get("name")?.as_str().map(str::to_string));
+    let Some(name) = name else {
+        return "参数错误：缺少字符串字段 name".to_string();
+    };
+    match apply_sprite(&name) {
+        Ok(final_name) => format!("已切换形象：{final_name}"),
+        Err(reason) => reason,
+    }
 }
 
 #[cfg(test)]

@@ -33,7 +33,7 @@ use crate::asr::{AsrReaction, AsrResult};
 use crate::kws::{KwsEngine, KwsResult, Reaction, ReactionOutcome};
 use crate::llm::LlmEngine;
 use crate::llm::LlmEvent;
-use crate::llm::types::{ChatMessage, ChatRole, InputItem};
+use crate::llm::types::{ChatMessage, ChatRole, FinishReason, InputItem};
 use crate::tts::TtsEngine;
 use crate::voice::asr_backend::AsrBackend;
 use crate::voice::bargein::{EchoTracker, VoiceBargeInDetector, is_echo_leak};
@@ -43,6 +43,7 @@ use crate::voice::listen::{MicEvent, MicLoop};
 use crate::voice::player::AudioPlayer;
 use crate::voice::sanitizer::{TtsSanitizer, sanitize_for_tts};
 use crate::voice::splitter::SentenceSplitter;
+use crate::voice::sprite_agent::{self, Decision, SpriteAgentHandle};
 use crate::voice::state::{SessionEvent, SessionState};
 use crate::voice::synthesizer::{SynthHandle, SynthResult};
 use crate::voice::thinking::ThinkingFilter;
@@ -144,6 +145,13 @@ pub struct VoiceSession {
     reply: ReplyAccumulator,
     reply_done: bool,
     current_gen: u64,
+    /// 形象切换 subagent 句柄（`[llm] sprite_agent` 开启时在回复结束后派发决策；
+    /// 主循环每轮 `poll_sprite_decision` 消费，失败一律静默保持现状）
+    sprite_agent: SpriteAgentHandle,
+    /// 当前形象（canonical stem；会话态，会话开始为 default，不持久化）
+    current_sprite: String,
+    /// 本轮用户说的话（供形象决策配对；打断 / 新一轮开始时清空）
+    last_user_text: Option<String>,
     synth_enqueued: u64,
     synth_consumed: u64,
     turns: u32,
@@ -286,6 +294,9 @@ impl VoiceSession {
             reply: ReplyAccumulator::new(),
             reply_done: false,
             current_gen: 0,
+            sprite_agent: SpriteAgentHandle::new(),
+            current_sprite: crate::companion_sprites::DEFAULT_SPRITE_NAME.to_string(),
+            last_user_text: None,
             synth_enqueued: 0,
             synth_consumed: 0,
             turns: 0,
@@ -362,6 +373,8 @@ impl VoiceSession {
             }
             // 文字输入（输入条窗口）：每轮开头轮询收件箱，与 LLM/TTS 热切换同模式
             self.poll_text_input()?;
+            // 形象切换 subagent 结果消费（非阻塞；与 TTS 播报并行落地）
+            self.poll_sprite_decision();
             match self.state {
                 SessionState::Idle => break,
                 SessionState::Armed => self.step_armed()?,
@@ -726,6 +739,7 @@ impl VoiceSession {
             is_final: true,
         });
         self.turns += 1;
+        self.last_user_text = Some(text.clone());
         self.history
             .push(InputItem::Message(ChatMessage::new(ChatRole::User, text)));
         truncate_history(&mut self.history, self.cfg.history_max);
@@ -754,6 +768,64 @@ impl VoiceSession {
     /// （按模型族分派到 `AsrBackend::finalize`）。
     fn force_finalize_asr(&mut self) -> String {
         self.asr.finalize(&self.cfg.asr)
+    }
+
+    /// 形象切换 subagent 派发（`[llm] sprite_agent` 开启且本轮有完整问答对时）。
+    ///
+    /// 仅 `Eos` / `MaxTokens` 派发（文本已可供判断；Cancelled / Error 不派发）。
+    /// catalog 在会话线程现读磁盘构建（不进子线程，规避测试 HOME env 竞态）；
+    /// 无 sprites 时连线程都不起。任何条件不满足都静默跳过。
+    fn maybe_dispatch_sprite_agent(&mut self, reason: FinishReason, reply_text: Option<String>) {
+        if !matches!(reason, FinishReason::Eos | FinishReason::MaxTokens) {
+            return;
+        }
+        // `sprite_tool = true` 是对话内工具模式（sprite_agent = false 回滚开关）
+        if self.cfg.llm.sprite_tool {
+            return;
+        }
+        let Some(user_text) = self.last_user_text.clone() else {
+            return;
+        };
+        let Some(reply_text) = reply_text.filter(|t| !t.trim().is_empty()) else {
+            return;
+        };
+        let sprites = crate::companion_sprites::list_active_sprites();
+        if sprites.is_empty() {
+            return; // 非角色包 / 无 sprites 目录：不派发
+        }
+        let catalog = sprite_agent::build_catalog(&sprites);
+        self.sprite_agent.dispatch(
+            self.current_gen,
+            &self.cfg.llm,
+            sprite_agent::DecisionInput {
+                user_text,
+                reply_text,
+                current_sprite: self.current_sprite.clone(),
+                catalog,
+            },
+        );
+    }
+
+    /// 消费形象决策结果（非阻塞）：`Switch` 且异于当前形象 → `apply_sprite` 落地
+    /// （成功回填 `current_sprite`，失败只记日志）；`Keep` / 过期 / 无结果无动作。
+    /// 切换事件经既有 notifier 转发前端，本方法不发新 VoiceEvent。
+    fn poll_sprite_decision(&mut self) {
+        let Some(decision) = self.sprite_agent.poll(self.current_gen) else {
+            return;
+        };
+        let decision = sprite_agent::fold_noop(decision, &self.current_sprite);
+        let Decision::Switch(stem) = decision else {
+            return;
+        };
+        match crate::companion_sprites::apply_sprite(&stem) {
+            Ok(name) => {
+                self.current_sprite = name.clone();
+                tracing::info!("[voice] 形象决策落地：{name}");
+            }
+            Err(reason) => {
+                tracing::debug!("[voice] 形象决策落地失败（{reason}），保持当前形象");
+            }
+        }
     }
 
     /// 进入一轮新生成前的重置（gen 递增、清空上一轮回复状态、复位合成取消）。
@@ -847,10 +919,14 @@ impl VoiceSession {
                         reply_text.as_deref(),
                         self.cfg.history_max,
                     );
+                    let sprite_reply = reply_text.clone();
                     (self.emit)(VoiceEvent::ReplyFinished {
                         reason: format!("{reason:?}"),
                         text: reply_text,
                     });
+                    // 形象切换 subagent：回复完整结束后台派发决策（subagent 模式；
+                    // 失败 / 非角色包 / 无问答对均静默跳过）
+                    self.maybe_dispatch_sprite_agent(reason, sprite_reply);
                 }
                 LlmEvent::Error(e) => {
                     self.reply_done = true;
@@ -1033,6 +1109,9 @@ impl VoiceSession {
     fn abort_current_generation(&mut self) {
         self.llm.cancel();
         self.current_gen += 1;
+        // 打断即作废在途形象决策（cancel 置位 + 暂存问答对清空，迟到结果由 gen 丢弃）
+        self.sprite_agent.invalidate();
+        self.last_user_text = None;
         self.speaker.stop();
         self.reply = ReplyAccumulator::new();
         self.reply_done = false;

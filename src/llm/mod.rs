@@ -260,6 +260,7 @@ fn worker_loop(
     ready: Arc<AtomicBool>,
 ) {
     let cli_tools = config.cli_tools;
+    let sprite_tool = config.sprite_tool;
     let mut provider = match create_provider(config) {
         Ok(p) => p,
         Err(e) => {
@@ -267,7 +268,7 @@ fn worker_loop(
             return;
         }
     };
-    let agent = Agent::new(ToolRuntime::new(cli_tools));
+    let agent = Agent::new(ToolRuntime::new(cli_tools).with_sprite_tool(sprite_tool));
 
     while let Ok(cmd) = cmd_rx.recv() {
         match cmd {
@@ -379,6 +380,7 @@ mod tests {
         crate::llm::config::ResolvedLlmConfig {
             enabled: true,
             cli_tools: false,
+            sprite_tool: true,
             prompt_cache: true,
             thinking: false,
             reasoning_effort: None,
