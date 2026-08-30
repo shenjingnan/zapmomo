@@ -54,6 +54,8 @@ pub fn pick_line(event: &DshEvent, roll: f32) -> String {
         DshEvent::TaskFinished { .. } => (FINISHED, FINISHED_PLAIN),
         DshEvent::TaskFailed { .. } => (FAILED, FAILED_PLAIN),
         DshEvent::TaskInterrupted { .. } => (INTERRUPTED, INTERRUPTED_PLAIN),
+        // 不可达：心跳在桥 sink 已拦截，不进播报管线（穷尽性要求）
+        DshEvent::PluginHello => (STARTED, STARTED_PLAIN),
     };
     let candidates: Vec<String> = match event.title() {
         Some(t) => titled.iter().map(|s| s.replace("{t}", t)).collect(),

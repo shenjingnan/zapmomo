@@ -2103,6 +2103,9 @@ struct DshBridgeState {
     announcer: Mutex<Option<std::sync::Arc<zapmomo::dsh::announce::Announcer>>>,
     /// 懒构建的 LLM 播报 worker（进程级单例；桥重启不重建）
     llm_worker: Mutex<Option<std::sync::Arc<DshLlmWorker>>>,
+    /// 最近一次插件心跳（epoch ms）：桥线程 sink 写、轮询/事件读；start 清空
+    /// （「在线」不跨代继承——旧桥的心跳对新桥毫无意义）
+    last_heartbeat: Arc<Mutex<Option<i64>>>,
 }
 
 impl DshBridgeState {
@@ -2114,6 +2117,7 @@ impl DshBridgeState {
             last_error: Mutex::new(None),
             announcer: Mutex::new(None),
             llm_worker: Mutex::new(None),
+            last_heartbeat: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -2142,6 +2146,24 @@ impl DshBridgeState {
             .expect("dsh port lock poisoned")
             .load(Ordering::Relaxed)
     }
+
+    /// 组装前端状态载荷（running/port/last_error/last_heartbeat 快照）。
+    fn status_payload(&self) -> DshBridgeStatusPayload {
+        let port = self.current_port();
+        DshBridgeStatusPayload {
+            running: self.is_running(),
+            port: (port != 0).then_some(port),
+            error: self
+                .last_error
+                .lock()
+                .expect("dsh last_error lock poisoned")
+                .clone(),
+            last_heartbeat_at: *self
+                .last_heartbeat
+                .lock()
+                .expect("dsh heartbeat lock poisoned"),
+        }
+    }
 }
 
 /// `dsh-speak` 事件载荷（气泡台词 + 原始事件）。
@@ -2157,6 +2179,9 @@ struct DshBridgeStatusPayload {
     running: bool,
     port: Option<u16>,
     error: Option<String>,
+    /// 最近一次插件心跳（epoch ms；None = 本代桥尚未收到心跳）。
+    /// 「在线」判定在前端：now - last_heartbeat_at < 45s（3 个心跳周期）。
+    last_heartbeat_at: Option<i64>,
 }
 
 /// dsh 事件处理管线：节流 → 投递给 LLM 播报 worker（覆盖式单槽）。
@@ -2178,6 +2203,27 @@ fn handle_dsh_event(
         return;
     }
     dsh_llm_worker(app).submit(event);
+}
+
+/// 桥 sink 的心跳拦截：刷新「插件在线」时间戳并广播状态（不进节流/播报/历史管线）。
+///
+/// 代际防护同线程 epilogue：stop 超时被分离的旧线程用旧 token 迟到收到的心跳，
+/// 不得写入新桥状态、不得触发新桥的状态事件。
+fn handle_plugin_hello(app: &AppHandle, running_generation: &Arc<AtomicBool>) {
+    let bridge_state = app.state::<DshBridgeState>();
+    if !bridge_state.is_current_generation(running_generation) {
+        tracing::debug!("dsh 心跳来自旧代桥，忽略");
+        return;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    *bridge_state
+        .last_heartbeat
+        .lock()
+        .expect("dsh heartbeat lock poisoned") = Some(now);
+    let _ = app.emit("dsh-bridge-status", bridge_state.status_payload());
 }
 
 /// dsh LLM 播报 worker：覆盖式单槽 + 条件变量，串行执行「文案生成 → 气泡/TTS/落盘」。
@@ -2413,6 +2459,11 @@ fn start_dsh_bridge_impl(app: AppHandle, state: &DshBridgeState) -> Result<(), S
         .last_error
         .lock()
         .expect("dsh last_error lock poisoned") = None;
+    // 心跳不跨代继承：新桥以「未在线」起步，等插件重启 dsh 后的心跳翻转
+    *state
+        .last_heartbeat
+        .lock()
+        .expect("dsh heartbeat lock poisoned") = None;
     // 每次启动重新探测播报器（清空懒构建缓存：TTS 模型下载后立即生效，无需等重启）
     *state.announcer.lock().expect("dsh announcer lock poisoned") = None;
     let thread_app = app;
@@ -2436,12 +2487,20 @@ fn start_dsh_bridge_impl(app: AppHandle, state: &DshBridgeState) -> Result<(), S
                     running: true,
                     port: Some(port),
                     error: None,
+                    // 新代起步：无心跳（start 已清，此处直书 None 表意）
+                    last_heartbeat_at: None,
                 },
             );
         };
         let throttle = zapmomo::dsh::EventThrottle::new(std::time::Duration::from_secs(3));
         let app_for_sink = thread_app.clone();
+        let running_for_sink = running.clone();
         let mut sink = move |event: zapmomo::dsh::event::DshEvent| {
+            // 心跳拦截：控制事件只刷新在线状态，不进节流/LLM/播报管线
+            if matches!(event, zapmomo::dsh::event::DshEvent::PluginHello) {
+                handle_plugin_hello(&app_for_sink, &running_for_sink);
+                return;
+            }
             handle_dsh_event(&app_for_sink, &throttle, event);
         };
         let result = zapmomo::dsh::serve(cfg.port, &token, &mut sink, &running, &mut on_ready);
@@ -2469,6 +2528,8 @@ fn start_dsh_bridge_impl(app: AppHandle, state: &DshBridgeState) -> Result<(), S
                     running: false,
                     port: None,
                     error: err,
+                    // 终态不携带心跳：running=false 已把在线判定关死
+                    last_heartbeat_at: None,
                 },
             );
         }
@@ -2624,16 +2685,7 @@ fn set_dsh_params(
 
 #[tauri::command]
 fn get_dsh_bridge_status(state: State<'_, DshBridgeState>) -> DshBridgeStatusPayload {
-    let port = state.current_port();
-    DshBridgeStatusPayload {
-        running: state.is_running(),
-        port: (port != 0).then_some(port),
-        error: state
-            .last_error
-            .lock()
-            .expect("dsh last_error lock poisoned")
-            .clone(),
-    }
+    state.status_payload()
 }
 
 /// 测试播报：灌一条假事件进管线（设置页按钮全链路验收，不用 curl）。
@@ -2651,6 +2703,259 @@ fn test_dsh_announce(app: AppHandle) -> Result<(), String> {
         },
     );
     Ok(())
+}
+
+// ---- dsh 集成（插件检测 / 一键安装 / 心跳在线；页面：插件集成）----
+
+/// `detect_dsh_integration` 返回：文件级检测状态 + 手动命令兜底。
+#[derive(Serialize)]
+struct DshIntegrationInfo {
+    status: zapmomo::dsh::integration::DshIntegrationStatus,
+    manual_command: String,
+}
+
+/// dsh 集成检测：纯文件级读取（`~/.dsh` 布局），亚毫秒级，可跑主线程。
+#[tauri::command]
+fn detect_dsh_integration() -> DshIntegrationInfo {
+    let dsh_home = settings::get_home_dir().join(".dsh");
+    DshIntegrationInfo {
+        status: zapmomo::dsh::integration::detect(&dsh_home),
+        manual_command: zapmomo::dsh::integration::MANUAL_COMMAND.to_string(),
+    }
+}
+
+/// `dsh-install-progress` 事件载荷（state: discovering / installing / done / failed）。
+#[derive(Clone, Serialize)]
+struct DshInstallProgress {
+    state: String,
+    message: String,
+}
+
+/// 插件安装状态：防重入（双击 / 并发调用）。
+#[derive(Default)]
+struct DshInstallState {
+    running: Arc<AtomicBool>,
+}
+
+impl DshInstallState {
+    fn is_running(&self) -> bool {
+        self.running.load(Ordering::Relaxed)
+    }
+}
+
+/// 安装 guard：所有出口（成功/失败/panic）复位 running。
+struct DshInstallGuard {
+    running: Arc<AtomicBool>,
+}
+
+impl Drop for DshInstallGuard {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::SeqCst);
+    }
+}
+
+/// 安装全程超时：`dsh plugin add` 底层 pnpm 需要网络，宽限到 120s。
+const DSH_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// 一键安装 dsh 桥插件：定位 dsh 可执行文件并代跑安装命令。
+///
+/// - `path` 为手动指认（自动发现失败后经文件选择器兜底）；两者皆无 → Err 带 searched
+/// - 命令参数写死（`plugin --profile web add <包名>`），无注入面
+/// - 进度逐行经 `dsh-install-progress` 推送；[`DSH_INSTALL_TIMEOUT`] 未退出则 kill
+#[tauri::command]
+async fn install_dsh_plugin(
+    app: AppHandle,
+    install: State<'_, DshInstallState>,
+    path: Option<String>,
+) -> Result<(), String> {
+    if install.is_running() {
+        return Err("插件安装已在进行中".to_string());
+    }
+    install.running.store(true, Ordering::SeqCst);
+    let running = install.running.clone();
+    let emit_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = DshInstallGuard { running };
+        run_dsh_plugin_install(&emit_app, path.as_deref())
+    })
+    .await
+    .map_err(|e| format!("安装任务异常: {e}"))?
+}
+
+/// 安装的阻塞实现（spawn_blocking 内执行）。
+fn run_dsh_plugin_install(app: &AppHandle, manual_path: Option<&str>) -> Result<(), String> {
+    use std::io::{BufRead, BufReader};
+    use std::sync::mpsc::RecvTimeoutError;
+
+    let emit = |state: &str, message: String| {
+        let _ = app.emit(
+            "dsh-install-progress",
+            DshInstallProgress {
+                state: state.to_string(),
+                message,
+            },
+        );
+    };
+    let home = settings::get_home_dir();
+
+    // 1) 定位 dsh 可执行文件（手动指认优先；自动发现失败带 searched 诊断）
+    emit(
+        "discovering",
+        "正在定位 dsh 可执行文件…".to_string(),
+    );
+    let dsh = match manual_path {
+        Some(p) => {
+            let dsh = PathBuf::from(p);
+            if !dsh.is_file() {
+                let msg = format!("指定的路径不是文件：{p}");
+                emit("failed", msg.clone());
+                return Err(msg);
+            }
+            emit("discovering", format!("使用指定的 dsh：{}", dsh.display()));
+            dsh
+        }
+        None => match zapmomo::dsh::discover::find_dsh_executable(&home) {
+            Ok(dsh) => {
+                emit("discovering", format!("找到 dsh：{}", dsh.display()));
+                dsh
+            }
+            Err(e) => {
+                let msg = format!("自动定位 dsh 失败（{}）。请在下方手动选择 dsh 可执行文件。", e);
+                emit("failed", msg.clone());
+                return Err(msg);
+            }
+        },
+    };
+
+    // 2) 代跑安装命令。PATH 增补全部 node bin 目录 + dsh 所在目录：pnpm 可能住在
+    //    另一个 node 版本目录（实测如此），只补 dsh 目录会 pnpm not found。
+    emit(
+        "installing",
+        format!("正在安装 {}（可能需要下载依赖，请耐心等待）…", zapmomo::dsh::integration::PLUGIN_PACKAGE),
+    );
+    let mut cmd = if cfg!(windows) {
+        // .cmd 垫片必须经 cmd 解释器启动
+        let mut c = std::process::Command::new("cmd");
+        c.arg("/C").arg(&dsh);
+        c
+    } else {
+        std::process::Command::new(&dsh)
+    };
+    cmd.args([
+        "plugin",
+        "--profile",
+        "web",
+        "add",
+        zapmomo::dsh::integration::PLUGIN_PACKAGE,
+    ]);
+    {
+        let mut dirs = zapmomo::dsh::discover::node_bin_dirs(&home);
+        if let Some(parent) = dsh.parent() {
+            dirs.push(parent.to_path_buf());
+        }
+        if let Ok(old) = std::env::var("PATH") {
+            dirs.extend(std::env::split_paths(&old));
+        }
+        if let Ok(joined) = std::env::join_paths(dirs) {
+            cmd.env("PATH", joined);
+        }
+    }
+    cmd.stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // 同 audiocpp server：不弹控制台窗
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            let msg = format!("启动 dsh 安装命令失败：{e}。请改用手动命令在终端执行。");
+            emit("failed", msg.clone());
+            return Err(msg);
+        }
+    };
+
+    // 3) stdout/stderr 逐行转投进度事件；主循环等待退出（deadline kill）
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let tx_err = tx.clone();
+    // 泛型管道类型（ChildStdout / ChildStderr）共用同一逐行 drain
+    fn drain_lines<R: std::io::Read + Send + 'static>(
+        pipe: Option<R>,
+        tx: std::sync::mpsc::Sender<String>,
+    ) {
+        if let Some(pipe) = pipe {
+            for line in BufReader::new(pipe).lines().map_while(Result::ok) {
+                let _ = tx.send(line);
+            }
+        }
+    }
+    let reader_out = std::thread::spawn(move || drain_lines(stdout, tx));
+    let reader_err = std::thread::spawn(move || drain_lines(stderr, tx_err));
+
+    let deadline = std::time::Instant::now() + DSH_INSTALL_TIMEOUT;
+    let mut tail: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+    let outcome: Result<std::process::ExitStatus, String> = loop {
+        match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(line) => {
+                emit("installing", line.clone());
+                tail.push_back(line);
+                if tail.len() > 5 {
+                    tail.pop_front();
+                }
+                continue;
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {}
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break Err("安装超时（120s），已终止。请检查网络后重试，或改用手动命令。".to_string());
+                }
+            }
+            Err(e) => break Err(format!("等待安装进程失败：{e}")),
+        }
+    };
+
+    // 读取线程在管道 EOF 后自行结束，detach 即可（不参与结果）
+    let _ = reader_out.join();
+    let _ = reader_err.join();
+
+    match outcome {
+        Ok(status) if status.success() => {
+            emit(
+                "done",
+                "安装完成。重启 dsh web 后插件生效，桌宠即可联动。".to_string(),
+            );
+            tracing::info!("dsh 插件安装成功：{}", dsh.display());
+            Ok(())
+        }
+        Ok(status) => {
+            let tail_text = tail.iter().map(String::as_str).collect::<Vec<_>>().join(" | ");
+            let msg = format!(
+                "安装命令退出码异常（{status}）。{}",
+                if tail_text.is_empty() {
+                    "请改用手动命令在终端执行。".to_string()
+                } else {
+                    format!("输出尾部：{tail_text}")
+                }
+            );
+            emit("failed", msg.clone());
+            Err(msg)
+        }
+        Err(msg) => {
+            emit("failed", msg.clone());
+            Err(msg)
+        }
+    }
 }
 
 /// 读取持久化的对话记录（`~/.zapmomo/conversations.json`），供前端「对话记录」页载入。
@@ -5972,6 +6277,7 @@ pub fn run() {
         .manage(LlmState::new())
         .manage(VoiceSessionState::new())
         .manage(DshBridgeState::new())
+        .manage(DshInstallState::default())
         .manage(ModelLibraryState::default())
         .manage(StorageMigrateState::default())
         .invoke_handler(tauri::generate_handler![
@@ -6032,6 +6338,8 @@ pub fn run() {
             set_dsh_params,
             get_dsh_bridge_status,
             test_dsh_announce,
+            detect_dsh_integration,
+            install_dsh_plugin,
             get_conversation_records,
             list_model_library,
             get_system_resources,

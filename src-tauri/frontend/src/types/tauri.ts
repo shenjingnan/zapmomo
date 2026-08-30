@@ -479,6 +479,8 @@ export interface DshBridgeStatus {
   running: boolean;
   port: number | null;
   error: string | null;
+  /** 最近一次插件心跳（epoch ms；null = 本代桥尚未收到心跳）。在线判定在前端。 */
+  last_heartbeat_at: number | null;
 }
 
 /** `get_dsh_config` 返回 */
@@ -501,4 +503,31 @@ export interface DshParamsPatch {
   llm_enabled?: boolean;
   record_to_history?: boolean;
   port?: number;
+}
+
+// ---- dsh 集成（插件检测 / 一键安装；「插件集成」页）----
+
+/** `detect_dsh_integration` 返回的文件级检测状态（Rust `DshIntegrationStatus` 直出） */
+export interface DshIntegrationStatusInfo {
+  /** ~/.dsh/ 数据目录存在（有 dsh 环境） */
+  dsh_home_detected: boolean;
+  /** web profile 的 package.json 存在（通常 = 至少跑过一次 dsh web） */
+  profile_ready: boolean;
+  /** 插件已安装为 profile 依赖（dependencies 含包名；link/git/npm 值均算） */
+  plugin_installed: boolean;
+  /** 插件已激活（dsh.profile.bundles 含包名，dsh 启动时会加载） */
+  plugin_activated: boolean;
+}
+
+/** `detect_dsh_integration` 返回 */
+export interface DshIntegrationInfo {
+  status: DshIntegrationStatusInfo;
+  /** 手动安装命令（一键安装失败时的复制兜底） */
+  manual_command: string;
+}
+
+/** `dsh-install-progress` 事件载荷 */
+export interface DshInstallProgress {
+  state: "discovering" | "installing" | "done" | "failed";
+  message: string;
 }

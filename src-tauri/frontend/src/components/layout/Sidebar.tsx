@@ -1,4 +1,4 @@
-import { Home, Layers, MessageCircle, Settings, Users } from "lucide-react";
+import { Home, Layers, MessageCircle, Puzzle, Settings, Users } from "lucide-react";
 import { isMacOs } from "@/lib/platform";
 import { NavItem } from "./NavItem";
 
@@ -7,6 +7,7 @@ const PRIMARY_NAV = [
   { to: "/chat", icon: MessageCircle, label: "对话记录", end: true },
   { to: "/companion", icon: Users, label: "伙伴" },
   { to: "/models", icon: Layers, label: "模型" },
+  { to: "/integrations", icon: Puzzle, label: "插件集成" },
   { to: "/settings", icon: Settings, label: "设置", end: true },
 ];
 

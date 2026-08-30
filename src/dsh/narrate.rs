@@ -42,6 +42,8 @@ fn status_text(event: &DshEvent) -> &'static str {
         DshEvent::TaskFinished { .. } => "任务已完成",
         DshEvent::TaskFailed { .. } => "任务失败",
         DshEvent::TaskInterrupted { .. } => "任务被中断",
+        // 不可达：心跳在桥 sink 已拦截，不进 LLM 播报管线（穷尽性要求）
+        DshEvent::PluginHello => "插件心跳",
     }
 }
 
@@ -65,6 +67,8 @@ pub fn build_user_text(event: &DshEvent) -> String {
         DshEvent::TaskFinished { reason, .. } => (reason.as_deref(), None),
         DshEvent::TaskFailed { reason, detail, .. } => (reason.as_deref(), detail.as_deref()),
         DshEvent::TaskInterrupted { reason, .. } => (reason.as_deref(), None),
+        // 不可达：心跳不进 LLM 播报管线（穷尽性要求）
+        DshEvent::PluginHello => (None, None),
     };
     if let Some(line) = field_line("结束原因", reason) {
         lines.push(line);

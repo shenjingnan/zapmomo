@@ -163,6 +163,14 @@ export function apply(ctx: Context, _config: Config) {
   // 会话 -> 最近一条用户指令摘要（模板台词的 title；前 40 字符）
   const titleBySession = new Map<string, string>()
 
+  // 心跳：ZapMomo「插件集成」页据此判定「插件在线」。启动即发一次，之后每
+  // 15s 重发（ZapMomo 侧 45s 无心跳视为离线 = 3 个周期容错）。unref 保证
+  // 定时器不阻塞 dsh 宿主退出；post 本身 fire-and-forget，绝不影响宿主。
+  post('plugin-hello', 'plugin')
+  const heartbeat = setInterval(() => post('plugin-hello', 'plugin'), 15_000)
+  heartbeat.unref?.()
+  logger.info('zapmomo-bridge 心跳已启动（15s 间隔）')
+
   ctx.on('session/event', (session: SessionLike, ev: SessionEventLike) => {
     const type = ev?.type
     const sessionId = session?.id
