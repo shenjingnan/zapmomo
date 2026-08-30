@@ -1,7 +1,7 @@
 import { createContext, useContext } from "react";
 import type { AsrConfigState } from "@/hooks/useAsrConfig";
-import type { AsrDictateResultsState } from "@/hooks/useAsrDictateResults";
 import type { AsrDictateState } from "@/hooks/useAsrDictate";
+import type { AsrDictateResultsState } from "@/hooks/useAsrDictateResults";
 import type { AsrListeningState } from "@/hooks/useAsrListening";
 import type { AsrModelDownloadState } from "@/hooks/useAsrModelDownload";
 import type { AsrResultsState } from "@/hooks/useAsrResults";
@@ -11,6 +11,9 @@ import type { ListeningState } from "@/hooks/useListening";
 import type { LlmState } from "@/hooks/useLlm";
 import type { ModelDownloadState } from "@/hooks/useModelDownload";
 import type { DetectionEntry } from "@/hooks/useResults";
+import type { SpeakerConfigState } from "@/hooks/useSpeakerConfig";
+import type { SpeakerModelDownloadState } from "@/hooks/useSpeakerModelDownload";
+import type { SpeakersState } from "@/hooks/useSpeakers";
 import type { TtsState } from "@/hooks/useTts";
 import type { VoiceSessionState } from "@/hooks/useVoiceSession";
 import type { AppInfo } from "@/types/tauri";
@@ -38,6 +41,12 @@ export interface RuntimeState {
   llm: LlmState;
   tts: TtsState;
   voice: VoiceSessionState;
+  /** 声纹识别：配置 / 模型下载 / 已注册说话人与录音注册操作 */
+  speaker: {
+    config: SpeakerConfigState;
+    download: SpeakerModelDownloadState;
+    speakers: SpeakersState;
+  };
   /** 全局选中的麦克风设备（KWS 与 ASR 共用） */
   device: string;
   setDevice: (device: string) => void;

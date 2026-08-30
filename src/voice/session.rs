@@ -82,6 +82,10 @@ pub struct TtsSwap {
 /// TTS 热切换邮箱（宿主 `VoiceSessionState` 与会话各持一份 Arc）。
 pub type TtsSwapSlot = Arc<Mutex<Option<TtsSwap>>>;
 
+/// 声纹识别共享引擎槽（宿主 Tauri `SpeakerState` 与会话各持一份 Arc）：
+/// GUI 注册/识别与语音会话打标共用同一实例，注册即时生效。
+pub type SpeakerSlot = Arc<Mutex<Option<Arc<crate::speaker::SpeakerRecognizer>>>>;
+
 /// 打断后识别文本的去向（后置回声兜底的结果）。
 #[derive(Debug, PartialEq, Eq)]
 enum PostBargeAction {
@@ -99,6 +103,42 @@ fn classify_post_barge_text(text: &str, echo_ref: &str, threshold: f32) -> PostB
         PostBargeAction::EchoDrop
     } else {
         PostBargeAction::Keep
+    }
+}
+
+/// 声纹门控的证据输入（由 `SpeakerIdentification` 映射而来，不含识别器类型；
+/// 纯函数可单测，见 [`decide_speaker_gate`]）。
+#[derive(Debug, PartialEq, Eq)]
+enum SpeakerEvidence {
+    /// matched：携带命中说话人（粘性更新由调用方负责）
+    Matched(String),
+    /// 无法判定：语音太短 / 缓冲为空（有粘性则沿用，无粘性拒绝）
+    Skipped,
+    /// 明确不匹配（低于阈值）
+    Unknown,
+    /// 识别故障（模型/推理错误）：故障 ≠ 不匹配，fail-open
+    Failed,
+}
+
+/// 声纹门控裁决。
+#[derive(Debug, PartialEq, Eq)]
+enum SpeakerGateVerdict {
+    Allow,
+    Deny,
+    FailOpen,
+}
+
+/// 声纹响应门控裁决（纯函数）：只有 matched 的说话人放行；无法判定（太短/
+/// 空缓冲）沿用粘性身份；明确不匹配拒绝；识别故障 fail-open（不因故障全聋）。
+/// 「0 注册放行 + warn_once」需要可变日志状态，由调用方（`speaker_gate`）处理，
+/// 不属于本函数。
+fn decide_speaker_gate(evidence: &SpeakerEvidence, sticky: Option<&str>) -> SpeakerGateVerdict {
+    match evidence {
+        SpeakerEvidence::Matched(_) => SpeakerGateVerdict::Allow,
+        SpeakerEvidence::Skipped if sticky.is_some() => SpeakerGateVerdict::Allow,
+        SpeakerEvidence::Skipped => SpeakerGateVerdict::Deny,
+        SpeakerEvidence::Unknown => SpeakerGateVerdict::Deny,
+        SpeakerEvidence::Failed => SpeakerGateVerdict::FailOpen,
     }
 }
 
@@ -125,6 +165,16 @@ pub struct VoiceSession {
     /// 引擎，编排循环每轮开头取走并句间换入。`None` = CLI，不感知外部切换。
     tts_swap_slot: Option<TtsSwapSlot>,
     speaker: Box<dyn AudioPlayer>,
+    /// 声纹识别器（`[speaker].enabled` 且初始化成功才为 Some；失败降级 None 不阻断会话）。
+    /// Arc 指向可能与宿主 `SpeakerState` 槽共享的同一实例（见 [`SpeakerSlot`]）。
+    speaker_rec: Option<Arc<crate::speaker::SpeakerRecognizer>>,
+    /// 会话内声纹身份粘性：最近一次 matched 的说话人。短句（TooShort/空缓冲）沿用
+    /// 放行；unknown 清除；回 Armed 清除（见 [`SpeakerSlot`] 门控说明）。
+    speaker_identity: Option<String>,
+    /// 「0 注册放行」的 warn 只打一次（GUI 中途注册即时生效后无需复位，仅影响日志）
+    speaker_no_enroll_warned: bool,
+    /// 当前说话段的 PCM 缓冲（speech 块攒入，finalize 时整段识别后清空）
+    speaker_buf: Vec<f32>,
     synth: SynthHandle,
     mic: MicLoop,
     kws_stream: OnlineStream,
@@ -199,6 +249,7 @@ impl VoiceSession {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -212,6 +263,9 @@ impl VoiceSession {
     ///   运行中切 TTS 模型时句间换引擎（见 [`TtsSwap`]）；`None` 不感知（CLI）。
     /// - `text_rx`：`Some` 接宿主的文字输入收件箱（输入条窗口），文字与 ASR 最终文本
     ///   等价进入对话链路；`None` 仅语音（CLI）。
+    /// - `speaker_slot`：`Some` 接宿主（Tauri `SpeakerState`）的声纹共享引擎槽，GUI
+    ///   注册/识别与会话打标共用同一实例（注册即时生效）；槽空且 `[speaker].enabled`
+    ///   时构造并回填。**enabled=false 时槽有实例也忽略**（不打标）；`None` = CLI 自建。
     /// - **说完判定由 session 内说话门控的静音累计统一控制**（Silero VAD 优先判人声、
     ///   模型缺失降级 RMS，见 [`vad_gate::SpeechGate`]），因此这里强制禁用 sherpa
     ///   endpoint（避免其 rule1/rule2 的 1.2s/2.4s 尾静音在期望的 3s 前提前断句并
@@ -223,6 +277,7 @@ impl VoiceSession {
         llm_slot: Option<Arc<Mutex<Option<Arc<LlmEngine>>>>>,
         tts_swap_slot: Option<TtsSwapSlot>,
         text_rx: Option<Receiver<String>>,
+        speaker_slot: Option<SpeakerSlot>,
     ) -> Result<Self, String> {
         cfg.asr.enable_endpoint = false;
         let kws = KwsEngine::new(cfg.kws.clone())?;
@@ -263,6 +318,49 @@ impl VoiceSession {
         let barge_detector = VoiceBargeInDetector::new(cfg.barge_in_similarity_threshold);
         // 说话门控同样在 move 前构造（VAD 在位即启用，模式日志在内部打）
         let speech_gate = SpeechGate::new(&cfg.asr, cfg.vad_silence_threshold);
+        // 声纹识别（[speaker].enabled，默认关）：优先复用宿主共享槽（GUI 注册/识别与
+        // 会话打标共用同一实例，注册即时生效）；槽空则构造并回填。enabled=false 时槽有
+        // 实例也忽略（不打标）。构造失败（模型缺失/下载失败）只降级为无声纹，不阻断会话。
+        // 注意：槽内实例的 threshold 等参数以其构造时快照为准（参数修改会清槽）。
+        let speaker_rec: Option<Arc<crate::speaker::SpeakerRecognizer>> = if !cfg.speaker.enabled {
+            None
+        } else {
+            let shared = speaker_slot.as_ref().and_then(|slot| {
+                slot.lock()
+                    .map_err(|_| "speaker lock poisoned")
+                    .ok()
+                    .and_then(|guard| guard.clone())
+            });
+            match shared {
+                Some(rec) => {
+                    tracing::info!(
+                        "[voice] 声纹识别已启用（复用共享引擎，已注册 {} 人）",
+                        rec.num_registered()
+                    );
+                    Some(rec)
+                }
+                None => match crate::speaker::SpeakerRecognizer::new(cfg.speaker.clone()) {
+                    Ok(rec) => {
+                        tracing::info!(
+                            "[voice] 声纹识别已启用（threshold {:.2}，已注册 {} 人）",
+                            cfg.speaker.threshold,
+                            rec.num_registered()
+                        );
+                        let rec = Arc::new(rec);
+                        if let Some(slot) = &speaker_slot
+                            && let Ok(mut guard) = slot.lock()
+                        {
+                            *guard = Some(rec.clone());
+                        }
+                        Some(rec)
+                    }
+                    Err(e) => {
+                        tracing::warn!("[voice] 声纹识别初始化失败，本次会话禁用: {e}");
+                        None
+                    }
+                },
+            }
+        };
 
         Ok(Self {
             cfg,
@@ -275,6 +373,10 @@ impl VoiceSession {
             llm_slot,
             tts_swap_slot,
             speaker,
+            speaker_rec,
+            speaker_identity: None,
+            speaker_no_enroll_warned: false,
+            speaker_buf: Vec::new(),
             synth,
             mic,
             kws_stream,
@@ -463,6 +565,13 @@ impl VoiceSession {
                 self.speech_accum = 0.0;
                 // VAD 流内状态同样复位（防跨句残留「在说话」判定）
                 self.speech_gate.reset();
+                self.speaker_buf.clear();
+            }
+            SessionState::Armed => {
+                // 回待唤醒（含打断/超时路径）：丢弃残留的半段声纹缓冲与身份粘性
+                //（下一轮对话重新验证说话人）
+                self.speaker_buf.clear();
+                self.speaker_identity = None;
             }
             SessionState::WaitingSpeech => {
                 self.speech_wait_accum = 0.0;
@@ -597,6 +706,16 @@ impl VoiceSession {
         let chunk_secs = self.cfg.asr.chunk_size as f32 / self.cfg.asr.sample_rate as f32;
         let speech_active = self.speech_gate.is_speech(&chunk);
         self.asr.feed_chunk(&chunk, speech_active);
+        // 声纹缓冲：speech 块攒入（识别推迟到 finalize 整段做，避免逐 chunk 误识别）
+        if speech_active && self.speaker_rec.is_some() {
+            let max_len = (self.cfg.speaker.max_buffer_duration_secs.max(0.0)
+                * self.cfg.asr.sample_rate as f32) as usize;
+            self.speaker_buf.extend_from_slice(&chunk);
+            let overflow = self.speaker_buf.len().saturating_sub(max_len);
+            if overflow > 0 {
+                self.speaker_buf.drain(..overflow);
+            }
+        }
         let mut collector = AsrCollector::default();
         self.asr.decode_into(&mut collector);
         // 流式字幕：部分识别结果逐步刷新（覆盖同一行）；离线无 partial，天然不发
@@ -616,10 +735,19 @@ impl VoiceSession {
         }
         // 结束判定：sherpa is_final（流式兜底）、连续静音达 asr_max_trailing_silence、
         // 或连续语音达 asr_max_utterance_duration（强制断句，防媒体人声等让说完判定
-        // 永不达成）
+        // 永不达成）。三个分支均在 finalize 前过声纹门控——被拒句在 finalize 前拦截，
+        // 否则会经「LLM 忙转文字队列」路径绕过门控（文字路径不门控）。
         if let Some(text) = collector.final_text {
+            if !self.speaker_gate() {
+                self.reject_utterance();
+                return Ok(());
+            }
             self.handle_user_final(text)?;
         } else if self.silence_accum >= self.cfg.asr_max_trailing_silence {
+            if !self.speaker_gate() {
+                self.reject_utterance();
+                return Ok(());
+            }
             let text = self.force_finalize_asr();
             // 上一轮打断的 cancel 尚未落地（worker 释放 generating 互斥有延迟）：
             // 此时发起 generate 必得 Busy 走报错回 Armed 丢掉这句话——转文字队列，
@@ -634,6 +762,10 @@ impl VoiceSession {
         } else if self.speech_accum >= self.cfg.asr_max_utterance_duration {
             // 超长兜底：持续「说话」却始终等不到静音（媒体人声/回声漏网）→ 强制断句
             // 进入回复轮；识别为空则 handle_user_final 保持聆听（累计已在其中清零）。
+            if !self.speaker_gate() {
+                self.reject_utterance();
+                return Ok(());
+            }
             tracing::info!(
                 "[voice] 连续语音达 {:.0}s 上限，强制断句",
                 self.cfg.asr_max_utterance_duration
@@ -642,6 +774,91 @@ impl VoiceSession {
             self.handle_user_final(text)?;
         }
         Ok(())
+    }
+
+    /// 声纹门控拒绝后的复位：该句「没发生过」——留在 Listening 继续听，不响应、
+    /// 不入历史、不落盘。对照 `handle_user_final` 空文本分支的复位项，另清
+    /// `speech_accum`（否则超长分支连环触发声纹推理）与 `barge_echo_ref`（防陈旧
+    /// 回声快照误杀下一轮放行句）。
+    fn reject_utterance(&mut self) {
+        self.asr.reset(&self.cfg.asr);
+        self.silence_accum = 0.0;
+        self.speech_accum = 0.0;
+        self.speaker_buf.clear();
+        self.barge_echo_ref = None;
+    }
+
+    /// 声纹响应门控：对当前声纹缓冲整段识别并裁决「该句是否放行进 LLM/TTS」。
+    ///
+    /// 返回 `true` = 放行（调 `handle_user_final`）；`false` = 拒绝（调用方做拒绝
+    /// 复位后留在 Listening，该句等于没发生过：不响应、不入历史、不落盘）。
+    ///
+    /// 放在 `step_listening` 的 finalize 分支最前（`force_finalize_asr` 之前）——
+    /// 被拒句若先 finalize，会经「LLM 忙转文字队列」路径绕过门控（文字路径不门控）。
+    /// Speaker 事件无论放行与否都照发（前端/CLI 可观测）；识别失败 fail-open；
+    /// 识别器未挂载（未启用/构造失败）时恒放行。**enabled 即门控**：不匹配的
+    /// 句子不进 LLM/TTS、不入历史、不落盘。
+    fn speaker_gate(&mut self) -> bool {
+        // enabled 即门控：识别器未挂载（未启用/构造失败）时恒放行
+        let Some(recognizer) = self.speaker_rec.clone() else {
+            return true;
+        };
+        let buf = std::mem::take(&mut self.speaker_buf);
+        let evidence = if buf.is_empty() {
+            SpeakerEvidence::Skipped
+        } else {
+            let sample_rate = self.cfg.asr.sample_rate as u32;
+            match recognizer.identify(&buf, sample_rate) {
+                Ok(id) => {
+                    (self.emit)(VoiceEvent::Speaker {
+                        speaker_id: id.speaker_id.clone(),
+                        score: id.score,
+                        matched: id.matched,
+                        scores: id.scores,
+                        threshold: id.threshold,
+                    });
+                    match id.skipped {
+                        Some(crate::speaker::SkipReason::NoRegisteredSpeakers) => {
+                            // 空档 fail-open：0 注册时门控不生效，warn 一次
+                            if !self.speaker_no_enroll_warned {
+                                tracing::warn!(
+                                    "[voice] 声纹门控开启但尚未注册任何说话人，门控不生效（请在声纹页注册）"
+                                );
+                                self.speaker_no_enroll_warned = true;
+                            }
+                            SpeakerEvidence::Skipped
+                        }
+                        Some(crate::speaker::SkipReason::TooShort { .. }) => {
+                            SpeakerEvidence::Skipped
+                        }
+                        None if id.matched => {
+                            SpeakerEvidence::Matched(id.speaker_id.unwrap_or_default())
+                        }
+                        None => SpeakerEvidence::Unknown,
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("[voice] 声纹识别失败（fail-open 放行）: {e}");
+                    SpeakerEvidence::Failed
+                }
+            }
+        };
+        let verdict = decide_speaker_gate(&evidence, self.speaker_identity.as_deref());
+        match verdict {
+            SpeakerGateVerdict::Deny => {
+                tracing::info!("[voice] 声纹不匹配，忽略该句（不响应）");
+                self.speaker_identity = None;
+                return false;
+            }
+            // matched 刷新粘性身份；skipped 沿用；failed 保留原状
+            SpeakerGateVerdict::Allow => {
+                if let SpeakerEvidence::Matched(id) = evidence {
+                    self.speaker_identity = Some(id.clone());
+                }
+            }
+            SpeakerGateVerdict::FailOpen => {}
+        }
+        true
     }
 
     /// 轮询文字输入收件箱（输入条窗口）。文字与 ASR 最终文本等价，复用
@@ -682,6 +899,7 @@ impl VoiceSession {
                 // Listening 中 ASR 可能残留 partial 音频，丢弃避免后续误转写混入
                 if matches!(self.state, SessionState::Listening) {
                     self.asr.reset(&self.cfg.asr);
+                    self.speaker_buf.clear();
                 }
                 // 文字输入与回声无关：清掉语音打断可能遗留的比对快照，防止误丢文字
                 self.barge_echo_ref = None;
@@ -721,6 +939,7 @@ impl VoiceSession {
             tracing::debug!("[voice] ASR 空识别，保持聆听");
             self.asr.reset(&self.cfg.asr);
             self.flush_stale_partial();
+            self.speaker_buf.clear();
             return Ok(());
         }
         (self.emit)(VoiceEvent::Transcript {
@@ -1413,6 +1632,32 @@ impl Reaction for BargeInReaction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 声纹门控裁决矩阵：matched 放行；skipped 看粘性；unknown 拒绝；
+    /// 故障 fail-open（不因模型/推理故障全聋）。
+    #[test]
+    fn test_decide_speaker_gate_matrix() {
+        use SpeakerEvidence::{Failed, Matched, Skipped, Unknown};
+        use SpeakerGateVerdict::{Allow, Deny, FailOpen};
+        // 有粘性身份：matched/skipped 沿用放行，unknown 拒绝，故障 fail-open
+        assert_eq!(
+            decide_speaker_gate(&Matched("owner".into()), Some("owner")),
+            Allow
+        );
+        assert_eq!(decide_speaker_gate(&Skipped, Some("owner")), Allow);
+        assert_eq!(decide_speaker_gate(&Unknown, Some("owner")), Deny);
+        assert_eq!(decide_speaker_gate(&Failed, Some("owner")), FailOpen);
+        // 无粘性（首句）：只有 matched 放行
+        assert_eq!(decide_speaker_gate(&Matched("owner".into()), None), Allow);
+        assert_eq!(decide_speaker_gate(&Skipped, None), Deny);
+        assert_eq!(decide_speaker_gate(&Unknown, None), Deny);
+        assert_eq!(decide_speaker_gate(&Failed, None), FailOpen);
+        // 粘性身份是「是谁」而非「匹配谁」：换人 matched 任何注册者都放行
+        assert_eq!(
+            decide_speaker_gate(&Matched("user_1".into()), Some("owner")),
+            Allow
+        );
+    }
 
     /// 热切换音色解析失败兜底：强制克隆族（qwen3_tts 两尺寸）不换引擎（None），
     /// 其余族兜底 Sid(0)（auto voice / 默认音色语义）。
