@@ -16,6 +16,7 @@ pub mod records;
 pub mod sanitizer;
 pub mod session;
 pub mod splitter;
+pub mod sprite_agent;
 pub mod state;
 pub mod synthesizer;
 pub(crate) mod thinking;

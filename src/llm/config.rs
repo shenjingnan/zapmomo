@@ -6,6 +6,10 @@
 use crate::config::settings::LlmSettings;
 use crate::llm::types::GenParams;
 
+/// 形象切换 subagent 缺省开启：对话内不再注册 `set_character_sprite`，
+/// 语音链路在回复结束后由后台单次调用自动决策切形象（见 `voice::sprite_agent`）。
+pub const DEFAULT_SPRITE_AGENT: bool = true;
+
 /// 解析后的 LLM 配置（字段全部为具体类型，非 `Option`）。
 #[derive(Debug, Clone)]
 pub struct ResolvedLlmConfig {
@@ -13,6 +17,9 @@ pub struct ResolvedLlmConfig {
     pub enabled: bool,
     /// 是否注册 CLI 工具（run_command）；未注册即对模型不可达
     pub cli_tools: bool,
+    /// 是否注册形象切换工具（`set_character_sprite`）＝ `!sprite_agent`；
+    /// false 时语音链路由 subagent 自动决策（`voice::sprite_agent`）
+    pub sprite_tool: bool,
     /// 是否启用 prompt caching（仅 anthropic provider 生效）
     pub prompt_cache: bool,
     /// 是否启用思考（extended thinking 开关；仅 anthropic provider 生效）
@@ -60,6 +67,9 @@ pub fn resolve(settings: Option<&LlmSettings>) -> Result<ResolvedLlmConfig, Stri
     Ok(ResolvedLlmConfig {
         enabled: settings.and_then(|s| s.enabled).unwrap_or(false),
         cli_tools: settings.and_then(|s| s.cli_tools).unwrap_or(false),
+        sprite_tool: !settings
+            .and_then(|s| s.sprite_agent)
+            .unwrap_or(DEFAULT_SPRITE_AGENT),
         prompt_cache: settings.and_then(|s| s.prompt_cache).unwrap_or(true),
         thinking,
         reasoning_effort,
@@ -152,6 +162,22 @@ mod tests {
             err.to_string().contains("不支持的 LLM provider"),
             "实际错误：{err}"
         );
+    }
+
+    #[test]
+    fn test_resolve_sprite_agent_flag() {
+        crate::test_util::run_with_temp_home(|_| {
+            // 缺省：subagent 开启 → 不注册对话内工具
+            let cfg = resolve(None).unwrap();
+            assert!(!cfg.sprite_tool);
+            // 显式关闭 subagent → 恢复对话内工具（一键回滚）
+            let s = LlmSettings {
+                sprite_agent: Some(false),
+                ..Default::default()
+            };
+            let cfg = resolve(Some(&s)).unwrap();
+            assert!(cfg.sprite_tool);
+        });
     }
 
     #[test]

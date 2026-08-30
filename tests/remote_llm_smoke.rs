@@ -25,6 +25,7 @@ fn test_zhipu_glm_streaming_smoke() {
     let config = ResolvedLlmConfig {
         enabled: true,
         cli_tools: false,
+        sprite_tool: true,
         prompt_cache: true,
         thinking: false,
         reasoning_effort: None,
@@ -68,6 +69,7 @@ fn test_anthropic_streaming_smoke() {
     let config = ResolvedLlmConfig {
         enabled: true,
         cli_tools: false,
+        sprite_tool: true,
         prompt_cache: true,
         thinking: false,
         reasoning_effort: None,

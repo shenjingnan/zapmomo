@@ -47,9 +47,12 @@ const BLOCKED_PATTERNS: &[(&str, &str)] = &[
     ("sudo ", "sudo 提权（交互密码会挂起）"),
 ];
 
-/// 工具运行时（硬编码工具列表；`cli_tools` 控制是否注册 run_command）。
+/// 工具运行时（硬编码工具列表；`cli_tools` 控制是否注册 run_command，
+/// `sprite_tool` 控制是否注册 set_character_sprite）。
 pub struct ToolRuntime {
     cli_tools: bool,
+    /// 是否注册形象切换工具；false 时语音链路由 subagent 接管（`voice::sprite_agent`）
+    sprite_tool: bool,
     /// run_command 超时（测试可缩短）
     cmd_timeout: Duration,
 }
@@ -58,8 +61,17 @@ impl ToolRuntime {
     pub fn new(cli_tools: bool) -> Self {
         Self {
             cli_tools,
+            sprite_tool: true,
             cmd_timeout: CMD_TIMEOUT,
         }
+    }
+
+    /// 门控形象切换工具的注册（false = 对话内不注册，模型不可达）。
+    /// `execute` 的分支保留：模型幻觉调用未注册工具时走 apply_tool_call
+    /// 优雅降级（失败即结果），而非 Err 中断 Agent Loop。
+    pub fn with_sprite_tool(mut self, on: bool) -> Self {
+        self.sprite_tool = on;
+        self
     }
 
     #[cfg(test)]
@@ -96,7 +108,12 @@ impl ToolRuntime {
         }
         // 角色形象：active 角色包带 sprites/ 时动态注册（每轮探测，
         // 中途加图 / 切换伙伴下一轮自动生效）；文件名 stem 即形象语义。
-        let sprites = crate::companion_sprites::list_active_sprites();
+        // `sprite_tool` 关闭时不注册——语音链路由 subagent 自动决策。
+        let sprites = if self.sprite_tool {
+            crate::companion_sprites::list_active_sprites()
+        } else {
+            Vec::new()
+        };
         if !sprites.is_empty() {
             let names: Vec<&str> = sprites.iter().map(|s| s.name.as_str()).collect();
             defs.push(ToolDefinition {
@@ -306,6 +323,41 @@ mod tests {
             );
             assert_eq!(def.parameters["required"], serde_json::json!(["name"]));
             assert_eq!(def.parameters["properties"]["name"]["type"], "string");
+        });
+    }
+
+    #[test]
+    fn test_sprite_tool_gated_by_flag() {
+        run_with_temp_home(|home| {
+            import_pack_with_sprites(home);
+            // 门控关闭：有 sprites 也不注册（语音 subagent 模式）
+            let rt = ToolRuntime::new(false).with_sprite_tool(false);
+            assert!(
+                rt.definitions()
+                    .iter()
+                    .all(|d| d.name != "set_character_sprite")
+            );
+            // 门控开启：现状回归，照常注册
+            let rt = ToolRuntime::new(false).with_sprite_tool(true);
+            assert!(
+                rt.definitions()
+                    .iter()
+                    .any(|d| d.name == "set_character_sprite"),
+                "sprite_tool=true 时应注册形象工具"
+            );
+        });
+    }
+
+    #[test]
+    fn test_execute_unregistered_sprite_tool_still_applies() {
+        run_with_temp_home(|home| {
+            import_pack_with_sprites(home);
+            // 门控关闭（未注册）时模型幻觉调用：走优雅降级而非 Err 中断
+            let rt = ToolRuntime::new(false).with_sprite_tool(false);
+            let out = rt
+                .execute("set_character_sprite", r#"{"name":"happy"}"#)
+                .unwrap();
+            assert!(out.contains("已切换"), "实际：{out}");
         });
     }
 

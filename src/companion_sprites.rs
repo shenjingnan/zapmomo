@@ -136,7 +136,7 @@ fn list_sprites_in(model_dir: &Path) -> Vec<SpriteInfo> {
         .collect()
 }
 
-/// 名字解析 → 校验 → 通知的共享核心（LLM 工具与右键菜单两个入口共用）。
+/// 名字解析 → 校验 → 通知的共享核心（LLM 工具、右键菜单、subagent 三个入口共用）。
 ///
 /// `default` 恢复默认立绘（character.png）；名字与枚举 stem 大小写不敏感精确
 /// 匹配，**从不拼接路径**。失败返回提示文案（`Err` 即结果），成功发 `SpriteEvent`
@@ -186,7 +186,13 @@ fn resolve_and_notify(name: &str) -> Result<(String, PathBuf), String> {
     Ok((final_name, path))
 }
 
-/// `set_character_sprite` 工具执行入口：解析参数 → 校验 → 通知 → 返回结果文本。
+/// 结构化执行入口（`voice::sprite_agent` 决策落地用）：成功返回 canonical stem
+/// （保留原大小写），失败返回面向模型的提示文案。
+pub fn apply_sprite(name: &str) -> Result<String, String> {
+    resolve_and_notify(name).map(|(final_name, _)| final_name)
+}
+
+/// `set_character_sprite` 工具执行入口：解析参数 → [`resolve_and_notify`] → 返回结果文本。
 ///
 /// 模型可见的失败一律返回提示文本（失败即结果），绝不 `Err` 中断 Agent Loop。
 pub fn apply_tool_call(arguments: &str) -> String {

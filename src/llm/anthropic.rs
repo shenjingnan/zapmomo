@@ -452,6 +452,7 @@ mod tests {
         ResolvedLlmConfig {
             enabled: true,
             cli_tools: false,
+            sprite_tool: true,
             prompt_cache: true,
             thinking: false,
             reasoning_effort: None,

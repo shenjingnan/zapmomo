@@ -587,6 +587,12 @@ pub struct LlmSettings {
     /// 仅 provider = "anthropic" 时生效
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_cache: Option<bool>,
+    /// 是否启用形象切换 subagent（LLM 回复结束后由后台单次调用自动决策切形象），
+    /// 缺省 true。true 时对话内不再注册 set_character_sprite 工具（GUI 文字聊天
+    /// 暂时失去切形象能力，语音链路由 subagent 接管）；false = 恢复对话内工具
+    /// 自主调用的一键回滚开关
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sprite_agent: Option<bool>,
     /// 是否启用思考（extended thinking 开关），缺省按「是否配置了推理强度」推断：
     /// 未显式配置时，配过 reasoning_effort 视为 true，否则 false（最快响应）。
     /// 仅 provider = "anthropic" 时生效
