@@ -10,7 +10,7 @@ import { SpeakerTestDialog } from "@/components/speaker/SpeakerTestDialog";
 
 /**
  * 声纹识别（Speaker Recognition）配置页：
- * 启用开关 + 声纹模型下载 + 识别参数 + 说话人管理（录音注册/删除/识别测试）。
+ * 启用开关 + 说话人管理（录音注册/删除/识别测试）+ 声纹模型下载 + 识别参数。
  */
 export function SpeakerPage() {
   const [enrollOpen, setEnrollOpen] = useState(false);
@@ -34,14 +34,14 @@ export function SpeakerPage() {
 
       <SpeakerEnableCard />
 
-      <SpeakerModelCard />
-
-      <SpeakerParamsCard />
-
       <SpeakerRosterCard
         onEnrollOpen={() => setEnrollOpen(true)}
         onTestOpen={() => setTestOpen(true)}
       />
+
+      <SpeakerModelCard />
+
+      <SpeakerParamsCard />
 
       <SpeakerEnrollDialog open={enrollOpen} onClose={() => setEnrollOpen(false)} />
 
