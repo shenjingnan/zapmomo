@@ -39,6 +39,7 @@ An open-source, real-time desktop **AI companion** with voice, memory, and a cus
 - **文本转语音（TTS）** — 中英双语语音合成，内置多音色，支持用参考音频克隆自己的音色
 - **本地大语言模型（LLM）** — 基于 llama.cpp 的本地推理（流式对话 + Agent 工具调用），应用内一键下载预设模型；也可接入 OpenAI 兼容远程 API
 - **语音会话** — 一句话唤醒 → 语音识别 → 流式回复 → 实时播报，支持唤醒词打断与免唤醒续聊
+- **声纹识别（Speaker Recognition）** — 录入声纹后识别「是谁在说话」：基于本地 CAM++ 声纹模型（声音特征而非 ASR 文本），支持多人注册、相似度阈值与 unknown 判定；仅用于区分说话人，**不构成安全认证**
 - **Live2D 虚拟角色** — 桌面常驻角色窗口（Cubism 2/3/4/5），位置记忆与百分比缩放，拖动不抢焦点；也支持 GIF 动图与「角色包」（静态立绘 + 人设 + 音色克隆）
 - **跨平台桌面应用** — Windows / macOS / Linux 三平台安装包，多页面控制面板 + 常驻角色窗口
 - **deepseek-harness 集成** — 桌宠实时感知 [deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) 任务状态，任务开始 / 完成 / 失败 / 中断时以气泡 + 语音播报（[使用说明](docs/content/docs/desktop-app/dsh-bridge.mdx)）
@@ -90,7 +91,7 @@ xattr -cr "/Applications/ZapMomo.app"
 - **本地运行** — llama.cpp 本地推理，流式对话 + Agent 工具调用，数据不出设备
 - **一键下载** — 应用内提供 Qwen3-0.6B / 4B 等预设，点击即下载（推荐 Qwen3-4B-Instruct-2507，Q4_K_M 量化约 2.5GB）
 - **自备模型** — 任意 GGUF 模型放入 `~/.zapmomo/models/` 即自动发现
-- **远程接入** — 支持配置 OpenAI 兼容 API（官方 API 或自建 `llama-server`）
+- **远程接入** — 支持配置 OpenAI 兼容 API（官方 API 或自建 `llama-server`），免费云端模型见下方「免费 LLM 推荐」
 
 ### Live2D 虚拟角色
 
@@ -113,6 +114,19 @@ xattr -cr "/Applications/ZapMomo.app"
 设置页「通用」、角色右键菜单与托盘菜单均提供「重启」：退出后自动重新拉起，用于让需要重启才能生效的配置立即生效。
 
 </details>
+
+## 免费 LLM 推荐
+
+没有独立显卡或不想下载本地模型？可以直接使用免费云端模型，在「AI 大脑（LLM）配置」页选择远程 API 接入：
+
+| 服务商 | 免费模型 | 说明 |
+| --- | --- | --- |
+| [智谱开放平台](https://bigmodel.cn/) | `glm-4.7-flash` | 免费使用，但限速较严、易触发 429 限流，注册后获取 API Key |
+| [Groq](https://console.groq.com/) | `openai/gpt-oss-120b` / `openai/gpt-oss-20b` / Qwen3 系列 | 免费，限速较严（30 RPM / 1K RPD / 8K TPM，[各模型限额](https://console.groq.com/docs/rate-limits)），注册后获取 API Key |
+| [Google AI Studio（Gemini）](https://aistudio.google.com/) | `gemini-3.7-flash` 等 Flash 系列、`gemini-2.5-pro` | 免费额度有限速；免费档对话数据会被用于改进产品，注册后获取 API Key |
+| [OpenRouter](https://openrouter.ai/models?max_price=0) | 大量 `:free` 模型：Nemotron 3 Ultra、MiniMax M3、GLM 5.2 等 | 模型聚合平台，免费档有限速（[限速说明](https://openrouter.ai/docs/api-reference/limits)），注册后获取 API Key |
+| [硅基流动 SiliconFlow](https://cloud.siliconflow.cn/) | `Qwen3-8B`、`DeepSeek-R1-0528-Qwen3-8B`、`GLM-Z1-9B-0414` 等十余个免费模型 | 免费档限速，注册后获取 API Key |
+| [魔搭 ModelScope](https://modelscope.cn/) | `Qwen`、`DeepSeek` 等大量模型免费推理 | 每账号 2000 次/天（单模型约 100~200 次/天），不按 Token 收费、无 SLA 保证，注册后获取 API Key |
 
 ## deepseek-harness 集成（dsh 桥）
 
@@ -137,6 +151,7 @@ dsh plugin --profile web add @zapmomo-ai/dsh-plugin
 | `[tts]` | 文本转语音：默认音色参考音频、语速、解码步数等 |
 | `[llm]` | 大语言模型：模型路径、采样参数、OpenAI 兼容远程 API 等 |
 | `[voice]` | 语音会话：唤醒词、回复音色、打断与免唤醒续聊开关等 |
+| `[speaker]` | 声纹识别：enabled 开关（启用即仅响应已注册说话人）、相似度阈值等 |
 | `[live2d]` | Live2D 角色：模型目录、窗口位置记忆与缩放 |
 | `[dsh]` | deepseek-harness 集成：桥开关、监听端口、语音播报与对话记录开关 |
 

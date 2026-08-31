@@ -1,6 +1,6 @@
 /// dsh 事件的 LLM 播报文案：薄字段事件 → LLM 输入构造 + 输出后处理 + 降级决策。
 ///
-/// 设计（DSH_LLM_NARRATION_DESIGN.md）：dsh 事件只有 title/reason/detail 薄字段，
+/// 设计（docs/plans/2026-08-29-dsh-llm-narration-design.md）：dsh 事件只有 title/reason/detail 薄字段，
 /// LLM 的职责是把事件转述成有陪伴感的一句话文案（替代固定模板），而非总结任务
 /// 实质内容。全部纯函数，不触 IO，便于单测；引擎获取/流式消费在 src-tauri 侧
 /// worker 完成。

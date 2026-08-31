@@ -121,12 +121,26 @@ function makeTts(o?: { modelsPresent?: boolean; enabled?: boolean; synthesizing?
   };
 }
 
+function makeSpeaker(o?: { error?: string | null; modelPresent?: boolean; enabled?: boolean }) {
+  return {
+    config: {
+      config: {
+        enabled: o?.enabled ?? false,
+        model_present: o?.modelPresent ?? false,
+      },
+      error: o?.error ?? null,
+      refresh: vi.fn(),
+    },
+  };
+}
+
 function makeRuntime(
   overrides?: Partial<{
     kws: ReturnType<typeof makeKws>;
     asr: ReturnType<typeof makeAsr>;
     llm: ReturnType<typeof makeLlm>;
     tts: ReturnType<typeof makeTts>;
+    speaker: ReturnType<typeof makeSpeaker>;
   }>,
 ): RuntimeState {
   return {
@@ -134,6 +148,7 @@ function makeRuntime(
     asr: overrides?.asr ?? makeAsr(),
     llm: overrides?.llm ?? makeLlm(),
     tts: overrides?.tts ?? makeTts(),
+    speaker: overrides?.speaker ?? makeSpeaker(),
     device: null,
     sessionKeywords: null,
   } as unknown as RuntimeState;
@@ -263,10 +278,10 @@ describe("ModelSummary 模型摘要状态", () => {
     expectRowStatus(rowFor("tts"), "已关闭");
   });
 
-  it("默认全未配置：四行状态均显示未配置模型", () => {
+  it("默认全未配置：五行状态均显示未配置模型", () => {
     renderSummary();
-    // 每行模型名 `<p>` 也是「未配置模型」，这里只统计状态 span（4 行各 1 个）。
-    expect(screen.getAllByText("未配置模型", { selector: "span" })).toHaveLength(4);
+    // 每行模型名 `<p>` 也是「未配置模型」，这里只统计状态 span（5 行各 1 个）。
+    expect(screen.getAllByText("未配置模型", { selector: "span" })).toHaveLength(5);
   });
 });
 

@@ -129,6 +129,19 @@ pub fn asr_vad_user_model_path() -> PathBuf {
         .join(&asr_vad_asset().archive)
 }
 
+/// 声纹识别 embedding 模型资产（清单中 `role == "speaker-embedding"` 的资产，
+/// 裸 .onnx 单文件，CAM++ 中文 16k）。
+pub fn speaker_asset() -> &'static ModelAsset {
+    asset_by_role("speaker-embedding").expect("模型清单缺少 speaker-embedding 资产")
+}
+
+/// 声纹识别模型文件路径：`~/.zapmomo/models/<name>/<archive>`。
+pub fn speaker_user_model_path() -> PathBuf {
+    get_models_dir()
+        .join(&speaker_asset().name)
+        .join(&speaker_asset().archive)
+}
+
 /// 下载/安装阶段（CLI 打日志 / GUI 推事件共用）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DownloadStage {

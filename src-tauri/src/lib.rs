@@ -48,10 +48,6 @@ use zapmomo::model_library::{
     SetCurrentResult, SystemResources, registry::ModelType as LibModelType,
     storage::StorageInfoView,
 };
-use zapmomo::performance::{
-    DeviceEvent, MouseSimulator, PerformanceScene, PerformanceSource, Rect, Rng, StopSignal,
-    TypingSimulator, run_source,
-};
 use zapmomo::tts::config::TtsParamsPatch;
 use zapmomo::voice::VoiceSession;
 use zapmomo::voice::config::CliOverrides as VoiceCliOverrides;
@@ -449,6 +445,628 @@ fn get_kws_config(state: State<'_, DownloadState>) -> Result<KwsConfigInfo, Stri
             .to_string(),
         active_wake_word: zapmomo::companion::active_wake_word(),
     })
+}
+
+// ---- 声纹识别（Speaker Recognition）----
+
+/// 声纹识别共享状态：模型下载防重入 + 共享引擎槽 + 录音挂起快照。
+///
+/// GUI 注册/识别与语音会话打标共用同一 `SpeakerRecognizer` 实例（槽内 Arc），
+/// 注册/删除即时生效；参数或模型变更时清槽（下次按新配置重建）。
+/// **锁只护 Arc 读写，识别/注册推理必须在锁外**（会话编排循环同锁打标）。
+struct SpeakerState {
+    download: Arc<AtomicBool>,
+    recognizer: Arc<Mutex<Option<Arc<zapmomo::speaker::SpeakerRecognizer>>>>,
+    /// 录音挂起快照（`Some` = 麦克风消费者已被挂起，resume 时按此恢复）
+    suspended: Arc<Mutex<Option<SuspendedMic>>>,
+}
+
+impl SpeakerState {
+    fn new() -> Self {
+        Self {
+            download: Arc::new(AtomicBool::new(false)),
+            recognizer: Arc::new(Mutex::new(None)),
+            suspended: Arc::new(Mutex::new(None)),
+        }
+    }
+}
+
+/// 录音挂起快照：挂起瞬间哪些麦克风消费者在跑（resume 时按此逐个恢复）。
+#[derive(Debug, Clone, Copy)]
+struct SuspendedMic {
+    voice: bool,
+    kws: bool,
+    asr_listen: bool,
+    dictate: bool,
+}
+
+/// 解析声纹配置（settings.toml `[speaker]` + 默认值）。
+fn speaker_resolved_cfg() -> Result<zapmomo::speaker::config::ResolvedSpeakerConfig, String> {
+    let settings = zapmomo::config::settings::load_settings()?;
+    zapmomo::speaker::config::resolve(settings.as_ref().and_then(|s| s.speaker.as_ref()))
+}
+
+/// 模型文件是否存在（未配置/未下载返回 false）。
+fn speaker_model_present(cfg: &zapmomo::speaker::config::ResolvedSpeakerConfig) -> bool {
+    cfg.model_path().is_some_and(|p| p.is_file())
+}
+
+/// GUI 展示用的声纹配置信息。
+#[derive(Serialize)]
+struct SpeakerConfigInfo {
+    enabled: bool,
+    threshold: f32,
+    min_audio_duration_secs: f32,
+    provider: String,
+    num_threads: i32,
+    debug: bool,
+    model_dir: String,
+    model_present: bool,
+    model_downloading: bool,
+    speaker_profiles_dir: String,
+    settings_path: String,
+}
+
+/// `set_speaker_params` 载荷：可调整的声纹参数（snake_case 直传，缺省项不修改）。
+#[derive(Debug, Clone, Default, Deserialize)]
+struct SpeakerParamsPatch {
+    threshold: Option<f32>,
+    min_audio_duration_secs: Option<f32>,
+    num_threads: Option<i32>,
+    provider: Option<String>,
+    debug: Option<bool>,
+}
+
+impl SpeakerParamsPatch {
+    /// 先整体校验（任一越界立即 Err），再逐项写入 `SpeakerSettings`。
+    fn apply_to(
+        &self,
+        speaker: &mut zapmomo::config::settings::SpeakerSettings,
+    ) -> Result<(), String> {
+        if let Some(v) = self.threshold
+            && !(0.0..=1.0).contains(&v)
+        {
+            return Err(format!("相似度阈值需在 0~1，当前 {v}"));
+        }
+        if let Some(v) = self.min_audio_duration_secs
+            && !(0.1..=5.0).contains(&v)
+        {
+            return Err(format!("最短语音时长需在 0.1~5 秒，当前 {v}"));
+        }
+        if let Some(v) = self.num_threads
+            && !(1..=32).contains(&v)
+        {
+            return Err(format!("线程数需在 1~32，当前 {v}"));
+        }
+        if let Some(v) = self.provider.as_deref()
+            && !matches!(v, "cpu" | "cuda" | "coreml")
+        {
+            return Err(format!("推理后端仅支持 cpu/cuda/coreml，当前 {v}"));
+        }
+
+        if let Some(v) = self.threshold {
+            speaker.threshold = Some(v);
+        }
+        if let Some(v) = self.min_audio_duration_secs {
+            speaker.min_audio_duration_secs = Some(v);
+        }
+        if let Some(v) = self.num_threads {
+            speaker.num_threads = Some(v);
+        }
+        if let Some(v) = self.provider.clone() {
+            speaker.provider = Some(v);
+        }
+        if let Some(v) = self.debug {
+            speaker.debug = Some(v);
+        }
+        Ok(())
+    }
+}
+
+/// 读取合并后的声纹配置（settings.toml + 默认值），并给出模型/档案目录状态。
+#[tauri::command]
+fn get_speaker_config(state: State<'_, SpeakerState>) -> Result<SpeakerConfigInfo, String> {
+    let cfg = speaker_resolved_cfg()?;
+    Ok(SpeakerConfigInfo {
+        enabled: cfg.enabled,
+        threshold: cfg.threshold,
+        min_audio_duration_secs: cfg.min_audio_duration_secs,
+        provider: cfg.provider.clone(),
+        num_threads: cfg.num_threads,
+        debug: cfg.debug,
+        model_dir: cfg.model_dir.display().to_string(),
+        model_present: speaker_model_present(&cfg),
+        model_downloading: state.download.load(Ordering::Relaxed),
+        speaker_profiles_dir: zapmomo::speaker::profiles::profiles_dir()
+            .display()
+            .to_string(),
+        settings_path: zapmomo::config::settings::get_settings_path()
+            .display()
+            .to_string(),
+    })
+}
+
+/// 持久化声纹识别启用状态，写入 `[speaker].enabled`。
+///
+/// 运行中的语音会话自动重启：开启后打标生效、关闭后停止打标（会话内声纹
+/// 引擎在构造时按 enabled 决定是否挂载）。
+#[tauri::command]
+fn set_speaker_enabled(app: AppHandle, enabled: bool) -> Result<(), String> {
+    let mut settings = settings::load_settings()?.unwrap_or_default();
+    settings
+        .speaker
+        .get_or_insert_with(zapmomo::config::settings::SpeakerSettings::default)
+        .enabled = Some(enabled);
+    settings::save_settings(&settings)?;
+    restart_voice_session_if_running(&app);
+    Ok(())
+}
+
+/// 持久化声纹参数（阈值/最短时长/线程/后端/调试），写入 `[speaker]`。
+///
+/// 参数在引擎构造时固化：保存后清共享引擎槽并重启运行中的会话，使其立即生效。
+#[tauri::command]
+fn set_speaker_params(
+    app: AppHandle,
+    state: State<'_, SpeakerState>,
+    params: SpeakerParamsPatch,
+) -> Result<(), String> {
+    let mut settings = settings::load_settings()?.unwrap_or_default();
+    let speaker = settings
+        .speaker
+        .get_or_insert_with(zapmomo::config::settings::SpeakerSettings::default);
+    params.apply_to(speaker)?;
+    settings::save_settings(&settings)?;
+    if let Ok(mut guard) = state.recognizer.lock() {
+        *guard = None;
+    }
+    restart_voice_session_if_running(&app);
+    Ok(())
+}
+
+/// 下载并安装声纹 embedding 模型（安装到解析后的 `[speaker].model_dir`）。
+///
+/// 防重入；下载在阻塞线程池执行，进度经 `speaker-model-download-progress` 事件
+/// 推给前端；完成后清共享引擎槽并重启运行中的会话（此前因缺模型降级的会话得以挂载）。
+#[tauri::command]
+async fn download_speaker_model(
+    app: AppHandle,
+    state: State<'_, SpeakerState>,
+) -> Result<(), String> {
+    let flag = state.download.clone();
+    if flag.swap(true, Ordering::SeqCst) {
+        return Err("模型下载已在进行中，请稍候".to_string());
+    }
+    // 目标目录尊重自定义 [speaker].model_dir（raw 单文件：dest = <model_dir>/<archive>）
+    let dest = match speaker_resolved_cfg() {
+        Ok(cfg) => cfg
+            .model_dir
+            .join(&zapmomo::kws::model::speaker_asset().archive),
+        Err(e) => {
+            flag.store(false, Ordering::SeqCst);
+            return Err(e);
+        }
+    };
+    let slot = state.recognizer.clone();
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = ResetOnDrop(flag);
+        let mut progress = |p: zapmomo::kws::model::DownloadProgress| {
+            let stage = match p.stage {
+                zapmomo::kws::model::DownloadStage::Downloading => "downloading",
+                zapmomo::kws::model::DownloadStage::Verifying => "verifying",
+                zapmomo::kws::model::DownloadStage::Extracting => "extracting",
+                zapmomo::kws::model::DownloadStage::Done => "done",
+            };
+            let _ = app.emit(
+                "speaker-model-download-progress",
+                DownloadProgressPayload {
+                    stage: stage.to_string(),
+                    percent: p.percent,
+                    message: p.message,
+                },
+            );
+        };
+        let result = zapmomo::kws::model::install_raw_file_to(
+            zapmomo::kws::model::speaker_asset(),
+            &dest,
+            false,
+            &mut progress,
+        )
+        .map_err(|e| e.to_string());
+        if result.is_ok() {
+            // 模型文件就绪：清槽（下次识别按当前配置重建）+ 重启会话
+            if let Ok(mut guard) = slot.lock() {
+                *guard = None;
+            }
+            restart_voice_session_if_running(&app);
+        }
+        result
+    })
+    .await
+    .map_err(|e| format!("下载任务异常: {e}"))?
+}
+
+/// 录制一段声纹样本（固定 N 秒，16k 单声道 wav），返回 wav 路径。
+///
+/// **录音优先**：麦克风雨被语音会话 / KWS 监听 / ASR 监听 / 听写占用时**自动挂起**
+/// （照 `set_microphone` 的 stop 全家桶顺序，快照存 `SpeakerState.suspended`），
+/// 恢复由前端在注册/测试弹窗关闭时调 [`speaker_resume_mic`]（多段录音只挂一次）。
+/// 注意：语音会话恢复后会重置对话上下文（history 在会话实例内，无法迁移）。
+/// 时长 clamp 到 1~30 秒（`record_voice` 本身无上限）。
+#[tauri::command]
+async fn record_speaker_sample(
+    app: AppHandle,
+    state: State<'_, SpeakerState>,
+    seconds: u32,
+    device: Option<String>,
+) -> Result<String, String> {
+    let seconds = seconds.clamp(1, 30);
+    let suspended = state.suspended.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        // 录音优先：自动挂起占着麦克风的消费者（幂等；已在挂起态时跳过）
+        speaker_suspend_mic_impl(&app, &suspended)?;
+        zapmomo::audio::record_voice(seconds, device.as_deref()).map(|p| p.display().to_string())
+    })
+    .await
+    .map_err(|e| format!("录音任务异常: {e}"))?
+}
+
+/// 挂起与录音冲突的麦克风消费者（照 `set_microphone` 的 stop 顺序）。
+///
+/// 快照写入 `suspended`；已在挂起态时跳过（幂等，多段录音只挂一次）。
+/// 无任何消费者在跑时不产生快照（resume 空操作）。
+fn speaker_suspend_mic_impl(
+    app: &AppHandle,
+    suspended: &Mutex<Option<SuspendedMic>>,
+) -> Result<(), String> {
+    {
+        let guard = suspended
+            .lock()
+            .map_err(|_| "speaker lock poisoned".to_string())?;
+        if guard.is_some() {
+            return Ok(());
+        }
+    }
+    let listen = app.state::<ListenState>();
+    let asr_listen = app.state::<AsrListenState>();
+    let asr_dictate = app.state::<AsrDictateState>();
+    let voice = app.state::<VoiceSessionState>();
+    let snapshot = SuspendedMic {
+        voice: voice.is_running(),
+        kws: listen.is_listening(),
+        asr_listen: asr_listen.is_listening(),
+        dictate: asr_dictate.is_dictating(),
+    };
+    if !(snapshot.voice || snapshot.kws || snapshot.asr_listen || snapshot.dictate) {
+        return Ok(());
+    }
+    if snapshot.voice {
+        stop_voice_session_inner(voice.inner())?;
+    }
+    if snapshot.kws {
+        stop_listen_inner(listen.inner())?;
+    }
+    if snapshot.asr_listen {
+        stop_asr_listen_inner(asr_listen.inner())?;
+    }
+    if snapshot.dictate {
+        stop_asr_dictate_inner(asr_dictate.inner())?;
+    }
+    *suspended
+        .lock()
+        .map_err(|_| "speaker lock poisoned".to_string())? = Some(snapshot);
+    tracing::info!(
+        "[speaker] 录音挂起麦克风消费者: voice={} kws={} asr_listen={} dictate={}",
+        snapshot.voice,
+        snapshot.kws,
+        snapshot.asr_listen,
+        snapshot.dictate
+    );
+    Ok(())
+}
+
+/// 恢复挂起的麦克风消费者（按 suspend 快照逐个重启；无快照为幂等空操作）。
+///
+/// 重启顺序照 `set_microphone`：轻量监听先、语音会话最后（引擎加载最重）。
+/// **语音会话恢复会重置对话上下文**（history 在会话实例内，随 stop 丢弃）。
+fn speaker_resume_mic_impl(
+    app: &AppHandle,
+    suspended: &Mutex<Option<SuspendedMic>>,
+) -> Result<(), String> {
+    let Some(snapshot) = suspended
+        .lock()
+        .map_err(|_| "speaker lock poisoned".to_string())?
+        .take()
+    else {
+        return Ok(());
+    };
+    let settings = settings::load_settings()?.unwrap_or_default();
+    let mic = settings.microphone.clone();
+    if snapshot.kws {
+        let listen = app.state::<ListenState>();
+        let kw = settings
+            .kws
+            .as_ref()
+            .and_then(|k| k.custom_keywords.clone());
+        start_listen_impl(app.clone(), listen.inner(), mic.clone(), kw)?;
+    }
+    if snapshot.asr_listen {
+        let asr_listen = app.state::<AsrListenState>();
+        start_asr_listen_impl(app.clone(), asr_listen.inner(), mic.clone())?;
+    }
+    if snapshot.dictate {
+        let asr_dictate = app.state::<AsrDictateState>();
+        start_asr_dictate_impl(app.clone(), asr_dictate.inner(), mic.clone())?;
+    }
+    if snapshot.voice {
+        let voice = app.state::<VoiceSessionState>();
+        start_voice_session_impl(app.clone(), voice.inner())?;
+    }
+    tracing::info!(
+        "[speaker] 录音结束，恢复麦克风消费者: voice={} kws={} asr_listen={} dictate={}",
+        snapshot.voice,
+        snapshot.kws,
+        snapshot.asr_listen,
+        snapshot.dictate
+    );
+    Ok(())
+}
+
+/// 恢复录音期间挂起的麦克风消费者（注册/测试弹窗关闭时由前端调用；幂等空操作安全）。
+///
+/// 重启涉及引擎加载（数秒），放阻塞线程池执行避免卡 UI。
+#[tauri::command]
+async fn speaker_resume_mic(app: AppHandle, state: State<'_, SpeakerState>) -> Result<(), String> {
+    let suspended = state.suspended.clone();
+    tauri::async_runtime::spawn_blocking(move || speaker_resume_mic_impl(&app, &suspended))
+        .await
+        .map_err(|e| format!("恢复任务异常: {e}"))?
+}
+
+/// `speaker_enroll` 的成功响应。
+#[derive(Serialize)]
+struct SpeakerEnrollResult {
+    speaker_id: String,
+    sample_count: usize,
+    dim: i32,
+    embedding_ms: f64,
+}
+
+/// 临时录音删除守卫（纯函数）：仅当路径位于 TTS 输出目录且文件名形如
+/// `rec-<纯数字>.wav` 时才允许删。**绝不做目录 glob**——同目录还有用户在
+/// TTS「添加音色」弹窗里录完但尚未保存的参考音频。
+fn is_deletable_recorded_sample(path: &Path) -> bool {
+    let Ok(canonical) = path.canonicalize() else {
+        return false;
+    };
+    let Some(parent) = canonical.parent() else {
+        return false;
+    };
+    let Ok(tts_dir) = zapmomo::config::settings::get_tts_output_dir().canonicalize() else {
+        return false;
+    };
+    if parent != tts_dir {
+        return false;
+    }
+    let Some(name) = canonical.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    let Some(stem) = name
+        .strip_prefix("rec-")
+        .and_then(|s| s.strip_suffix(".wav"))
+    else {
+        return false;
+    };
+    !stem.is_empty() && stem.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// 取共享槽内的识别器（无则按当前配置构造并回填）。
+///
+/// 锁只护 Arc 读写，构造/推理均发生在锁外。调用方需保证模型已就绪
+/// （`SpeakerRecognizer::new` 会按 `auto_download` 隐式联网下载，命令层先拦截）。
+fn get_or_init_recognizer(
+    slot: &Arc<Mutex<Option<Arc<zapmomo::speaker::SpeakerRecognizer>>>>,
+    cfg: &zapmomo::speaker::config::ResolvedSpeakerConfig,
+) -> Result<Arc<zapmomo::speaker::SpeakerRecognizer>, String> {
+    let mut guard = slot
+        .lock()
+        .map_err(|_| "speaker lock poisoned".to_string())?;
+    if let Some(rec) = guard.as_ref() {
+        return Ok(rec.clone());
+    }
+    let rec = Arc::new(zapmomo::speaker::SpeakerRecognizer::new(cfg.clone())?);
+    *guard = Some(rec.clone());
+    Ok(rec)
+}
+
+/// 注册说话人：对每段 wav 提取 embedding 并写入档案（同名覆盖重建）。
+///
+/// `wav_paths` 支持录音命令产出的临时文件（成功后自动清理）与用户自选的任意
+/// wav；注册走共享引擎槽，运行中的语音会话立即可识别新说话人。
+#[tauri::command]
+async fn speaker_enroll(
+    state: State<'_, SpeakerState>,
+    speaker_id: String,
+    wav_paths: Vec<String>,
+) -> Result<SpeakerEnrollResult, String> {
+    if wav_paths.is_empty() {
+        return Err("请先录制或选择至少一段 wav 音频".to_string());
+    }
+    // 模型缺失时明确报错（不静默触发 27MB 联网下载，前端长时间无响应）
+    let cfg = speaker_resolved_cfg()?;
+    if !speaker_model_present(&cfg) {
+        return Err(format!(
+            "声纹模型不存在（{}）：请在「模型与能力 → 声纹识别」页下载模型",
+            cfg.model_dir.display()
+        ));
+    }
+    zapmomo::speaker::profiles::validate_speaker_id(&speaker_id)?;
+    for p in &wav_paths {
+        if p.contains('\0') {
+            return Err("音频路径包含非法字符".to_string());
+        }
+    }
+    let slot = state.recognizer.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let recognizer = get_or_init_recognizer(&slot, &cfg)?;
+        let mut samples = Vec::with_capacity(wav_paths.len());
+        for raw in &wav_paths {
+            let (samples_f32, rate) =
+                zapmomo::audio::read_wav_samples(Path::new(raw)).ok_or_else(|| {
+                    format!("读取 wav 失败: {raw}（请提供 16k 或常见采样率的单声道 wav）")
+                })?;
+            samples.push((samples_f32, rate as u32));
+        }
+        let summary = recognizer.enroll(&speaker_id, &samples)?;
+        // 清理本次录音产生的临时文件（只删 TTS 输出目录下 rec-<数字>.wav 形态的
+        // 精确路径；删除失败不阻断注册结果）
+        for raw in &wav_paths {
+            let path = Path::new(raw);
+            if is_deletable_recorded_sample(path) {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+        Ok(SpeakerEnrollResult {
+            speaker_id: summary.speaker_id,
+            sample_count: summary.sample_count,
+            dim: summary.dim,
+            embedding_ms: summary.embedding_ms,
+        })
+    })
+    .await
+    .map_err(|e| format!("注册任务异常: {e}"))?
+}
+
+/// 已注册说话人（GUI 列表；纯磁盘读取，不依赖模型/启用状态）。
+#[derive(Serialize)]
+struct SpeakerInfoDto {
+    speaker_id: String,
+    sample_count: usize,
+    model: String,
+    dim: usize,
+    updated_at: String,
+}
+
+/// 列出全部已注册说话人。
+#[tauri::command]
+fn list_speakers() -> Result<Vec<SpeakerInfoDto>, String> {
+    Ok(zapmomo::speaker::profiles::list()?
+        .into_iter()
+        .map(|p| SpeakerInfoDto {
+            speaker_id: p.speaker_id,
+            sample_count: p.samples.len(),
+            model: p.model,
+            dim: p.dim,
+            updated_at: p.updated_at,
+        })
+        .collect())
+}
+
+/// 删除说话人档案（磁盘 JSON + 共享槽内实例的内存索引，运行中会话即时生效）。
+#[tauri::command]
+fn remove_speaker(state: State<'_, SpeakerState>, speaker_id: String) -> Result<bool, String> {
+    zapmomo::speaker::profiles::validate_speaker_id(&speaker_id)?;
+    let deleted = zapmomo::speaker::profiles::delete(&speaker_id)?;
+    if deleted
+        && let Ok(guard) = state.recognizer.lock()
+        && let Some(rec) = guard.as_ref()
+    {
+        let _ = rec.remove_speaker(&speaker_id);
+    }
+    Ok(deleted)
+}
+
+/// `speaker_identify_wav` 的一行得分。
+#[derive(Serialize)]
+struct SpeakerScoreDto {
+    speaker_id: String,
+    score: f32,
+}
+
+/// 延迟统计（毫秒）。
+#[derive(Serialize)]
+struct SpeakerLatencyDto {
+    audio_duration_ms: f64,
+    embedding_ms: f64,
+    matching_ms: f64,
+    total_ms: f64,
+}
+
+/// `speaker_identify_wav` 结果（测试弹窗）。
+#[derive(Serialize)]
+struct SpeakerIdentifyResult {
+    matched: bool,
+    speaker_id: Option<String>,
+    score: Option<f32>,
+    threshold: f32,
+    /// 跳过原因（人类可读文案；未跳过为 `None`）
+    skipped: Option<String>,
+    scores: Vec<SpeakerScoreDto>,
+    latency: SpeakerLatencyDto,
+}
+
+/// 跳过原因的人类可读文案。
+fn skip_reason_text(reason: &zapmomo::speaker::SkipReason) -> String {
+    match reason {
+        zapmomo::speaker::SkipReason::TooShort {
+            duration_ms,
+            min_ms,
+        } => {
+            format!("语音太短（{duration_ms:.0}ms < 最少 {min_ms:.0}ms）")
+        }
+        zapmomo::speaker::SkipReason::NoRegisteredSpeakers => "尚未注册任何说话人".to_string(),
+    }
+}
+
+/// 对一段 wav 做声纹识别（1:N，测试弹窗用），返回分数表与延迟。
+#[tauri::command]
+async fn speaker_identify_wav(
+    state: State<'_, SpeakerState>,
+    wav_path: String,
+) -> Result<SpeakerIdentifyResult, String> {
+    if wav_path.contains('\0') {
+        return Err("音频路径包含非法字符".to_string());
+    }
+    let cfg = speaker_resolved_cfg()?;
+    if !speaker_model_present(&cfg) {
+        return Err(format!(
+            "声纹模型不存在（{}）：请在「模型与能力 → 声纹识别」页下载模型",
+            cfg.model_dir.display()
+        ));
+    }
+    let slot = state.recognizer.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let recognizer = get_or_init_recognizer(&slot, &cfg)?;
+        let (samples, rate) =
+            zapmomo::audio::read_wav_samples(Path::new(&wav_path)).ok_or_else(|| {
+                format!("读取 wav 失败: {wav_path}（请提供 16k 或常见采样率的单声道 wav）")
+            })?;
+        let id = recognizer.identify(&samples, rate as u32)?;
+        Ok(SpeakerIdentifyResult {
+            matched: id.matched,
+            speaker_id: id.speaker_id,
+            score: id.score,
+            threshold: id.threshold,
+            skipped: id.skipped.as_ref().map(skip_reason_text),
+            scores: id
+                .scores
+                .into_iter()
+                .map(|s| SpeakerScoreDto {
+                    speaker_id: s.speaker_id,
+                    score: s.score,
+                })
+                .collect(),
+            latency: SpeakerLatencyDto {
+                audio_duration_ms: id.latency.audio_duration_ms,
+                embedding_ms: id.latency.embedding_ms,
+                matching_ms: id.latency.matching_ms,
+                total_ms: id.latency.total_ms,
+            },
+        })
+    })
+    .await
+    .map_err(|e| format!("识别任务异常: {e}"))?
 }
 
 /// 开始实时监听唤醒词（command 与启动自动监听共用）。
@@ -1722,7 +2340,10 @@ fn make_voice_emit(app: AppHandle) -> Box<dyn Fn(VoiceEvent) + Send> {
             VoiceEvent::Started
             | VoiceEvent::BargeIn { .. }
             | VoiceEvent::Stopped { .. }
-            | VoiceEvent::FollowUp => {}
+            | VoiceEvent::FollowUp
+            // 声纹标签（[speaker].enabled 时出现）：第一阶段仅日志镜像（log_voice_event
+            // 已记录），前端暂不消费；后续做身份策略时在此发 `voice-session-speaker`
+            | VoiceEvent::Speaker { .. } => {}
             VoiceEvent::State { state } => {
                 // 镜像到宿主共享状态：dsh 空档插播据此判断当前是否可插播
                 if let Some(vs) = app.try_state::<VoiceSessionState>() {
@@ -1840,6 +2461,8 @@ fn start_voice_session_impl(app: AppHandle, state: &VoiceSessionState) -> Result
     running.store(true, Ordering::Relaxed);
     let emit = make_voice_emit(app.clone());
     let shared_llm_slot = llm_state.engine.clone();
+    // 声纹共享引擎槽：GUI 注册/识别与会话打标共用同一实例（注册即时生效）
+    let speaker_slot = app.state::<SpeakerState>().recognizer.clone();
     // TTS 热切换邮箱：宿主（set_current_model 写方）与会话各持一份 Arc
     let tts_swap_slot: zapmomo::voice::TtsSwapSlot = Arc::new(Mutex::new(None));
     *app.state::<VoiceSessionState>()
@@ -1860,6 +2483,7 @@ fn start_voice_session_impl(app: AppHandle, state: &VoiceSessionState) -> Result
             Some(shared_llm_slot),
             Some(tts_swap_slot),
             Some(text_rx),
+            Some(speaker_slot),
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -3211,15 +3835,15 @@ fn set_microphone(
 
 /// 前端展示用的 BongoCat 道具资源信息（非 BongoCat 模型为 `None`）。
 #[derive(Clone, Serialize)]
-struct PerformancePropsView {
+struct BongoCatPropsView {
     /// 键盘背景图绝对路径（`resources/background.png`）。
     background: Option<String>,
     /// 按键贴图清单（爪子按在某键上的预渲染图）。
-    keys: Vec<PerformanceKeyView>,
+    keys: Vec<BongoCatKeyView>,
 }
 
 #[derive(Clone, Serialize)]
-struct PerformanceKeyView {
+struct BongoCatKeyView {
     /// 键名（如 `KeyA`、`CapsLock`）。
     key: String,
     /// 贴图绝对路径。
@@ -3229,13 +3853,13 @@ struct PerformanceKeyView {
 }
 
 /// 把探测到的 BongoCat 道具资源转成前端可用的视图（绝对路径字符串）。
-fn props_view(props: &zapmomo::live2d::config::BongoCatProps) -> PerformancePropsView {
-    PerformancePropsView {
+fn props_view(props: &zapmomo::live2d::config::BongoCatProps) -> BongoCatPropsView {
+    BongoCatPropsView {
         background: props.background.as_ref().map(|p| p.display().to_string()),
         keys: props
             .keys
             .iter()
-            .map(|k| PerformanceKeyView {
+            .map(|k| BongoCatKeyView {
                 key: k.key.clone(),
                 path: k.path.display().to_string(),
                 hand: match k.hand {
@@ -3249,7 +3873,7 @@ fn props_view(props: &zapmomo::live2d::config::BongoCatProps) -> PerformanceProp
 }
 
 /// 探测 active 伙伴是否带 BongoCat 道具资源（相对模型清单所在目录）。
-fn detect_active_bongocat_props() -> Option<PerformancePropsView> {
+fn detect_active_bongocat_props() -> Option<BongoCatPropsView> {
     let lib = zapmomo::companion::load_library_fast().ok()?;
     let active = zapmomo::companion::active_model(&lib)?;
     let model_dir = Path::new(&active.model_file)
@@ -3274,7 +3898,7 @@ struct Live2dConfigInfo {
     drag_mode: Option<CompanionDragMode>,
     settings_path: String,
     /// BongoCat 道具资源（非 BongoCat 模型为 `null`）。
-    props: Option<PerformancePropsView>,
+    props: Option<BongoCatPropsView>,
 }
 
 /// 读取 Live2D 配置，并在模型目录存在时重新放行 asset 协议 scope。
@@ -3354,7 +3978,7 @@ struct Live2dModelInfo {
     model_file: Option<String>,
     format: Option<String>,
     /// BongoCat 道具资源（非 BongoCat 模型为 `null`）。
-    props: Option<PerformancePropsView>,
+    props: Option<BongoCatPropsView>,
     /// 该伙伴的私有缩放；`None` = 未单独配置，角色窗口沿用当前状态。
     window_scale: Option<f64>,
     /// 该伙伴的私有窗口位置（已做多屏可达校验，落屏外时降级为 `None` 沿用当前位置）。
@@ -3766,7 +4390,6 @@ async fn finish_import(
     let lib = zapmomo::companion::load_library_fast()?;
     let became_active = lib.active_model_id.as_deref() == Some(model.id.as_str());
     if became_active {
-        stop_performance_inner(&app);
         let active = zapmomo::companion::active_model(&lib);
         reconcile_active(&app, active)?;
         // 导入即当前伙伴 → 后台预合成欢迎语（唤醒免实时合成延迟）。
@@ -3889,7 +4512,6 @@ async fn preview_companion_voice(app: AppHandle, id: String) -> Result<Option<St
 /// 设置「当前使用」伙伴（Library 先持久化成功，再 reconcile 同步 settings 与桌宠）。
 #[tauri::command]
 async fn set_active_companion(app: AppHandle, id: String) -> Result<CompanionLibraryView, String> {
-    stop_performance_inner(&app);
     let lib = tauri::async_runtime::spawn_blocking(move || zapmomo::companion::set_active(&id))
         .await
         .map_err(|e| e.to_string())??;
@@ -4008,8 +4630,6 @@ async fn set_companion_welcome_text(
 /// 并 reconcile 同步桌宠（切换到新 active 或清屏）。
 #[tauri::command]
 async fn remove_companion(app: AppHandle, id: String) -> Result<CompanionLibraryView, String> {
-    // 删除的若是 active，先停表演（reconcile 清屏/切换前让 stopped 先发出）。
-    stop_performance_inner(&app);
     let lib = tauri::async_runtime::spawn_blocking(move || zapmomo::companion::remove(&id))
         .await
         .map_err(|e| e.to_string())??;
@@ -4459,167 +5079,8 @@ fn apply_companion_drag_mode(app: &AppHandle, mode: CompanionDragMode) -> Result
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// 表演（BongoCat 兼容模拟表演）运行时
-//
-// 事件流与 BongoCat `device-changed` 逐字节同构，仅事件由模拟 PerformanceSource
-// 产生——**绝不监听真实键鼠**。控制事件（performance-started/stopped）定向
-// `companion` 窗口，避免 60-120 msg/s 的鼠标事件灌进设置窗口。
-// ---------------------------------------------------------------------------
-
-/// 当前表演状态（`None` = 未表演）。static Mutex 供主线程菜单与异步命令共用。
-static PERFORMANCE: Mutex<Option<PerformanceState>> = Mutex::new(None);
-
 /// TTS 热切换写方代际（`set_current_model` 事务臂递增；连续切换防旧覆盖新 + 日志追溯）。
 static TTS_SWAP_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-struct PerformanceState {
-    /// 每个活动通道一个停止信号（Both 场景有两个 worker）。
-    stops: Vec<StopSignal>,
-    scene: PerformanceScene,
-}
-
-/// 主显示器物理像素活动区域（取不到时回退 1920×1080）。
-fn primary_monitor_rect(app: &AppHandle) -> Rect {
-    let fallback = Rect {
-        x: 0.0,
-        y: 0.0,
-        width: 1920.0,
-        height: 1080.0,
-    };
-    match app.primary_monitor() {
-        Ok(Some(m)) => {
-            let s = m.size();
-            let p = m.position();
-            Rect {
-                x: p.x as f64,
-                y: p.y as f64,
-                width: s.width as f64,
-                height: s.height as f64,
-            }
-        }
-        _ => fallback,
-    }
-}
-
-/// 停止当前表演（若有）并发出 `performance-stopped`；不做托盘重建（调用方负责）。
-fn stop_performance_inner(app: &AppHandle) {
-    let mut guard = PERFORMANCE.lock().unwrap();
-    if let Some(state) = guard.take() {
-        for stop in &state.stops {
-            stop.stop(); // 立即唤醒 worker；被打断的在途事件不发出
-        }
-        let _ = app.emit_to(
-            "companion",
-            "performance-stopped",
-            serde_json::json!({ "scene": state.scene.as_str() }),
-        );
-        tracing::info!("已停止表演：{}", state.scene.as_str());
-    }
-}
-
-/// 启动一个模拟器 worker 线程（发 `device-changed` 到 companion 窗口），
-/// 停止信号登记进 `stops`。Both 场景会调用两次（typing + mouse 各一个线程）。
-fn spawn_performance_worker(
-    mut source: Box<dyn PerformanceSource>,
-    app: &AppHandle,
-    stops: &mut Vec<StopSignal>,
-) {
-    let stop = StopSignal::new();
-    stops.push(stop.clone());
-    let emit_app = app.clone();
-    let mut rng = Rng::from_entropy();
-    std::thread::spawn(move || {
-        let mut emit = |ev: &DeviceEvent| {
-            let _ = emit_app.emit_to("companion", "device-changed", ev);
-        };
-        run_source(source.as_mut(), &mut rng, &stop, &mut emit);
-    });
-}
-
-/// 启动表演（供 command 与菜单事件共用）。
-fn start_performance_impl(app: &AppHandle, scene: PerformanceScene) -> Result<(), String> {
-    let props = detect_active_bongocat_props()
-        .ok_or_else(|| "当前伙伴不支持表演（需要 BongoCat 格式模型）".to_string())?;
-
-    // 锁内先停旧表演（旧 worker 静默退出、不再发 stopped，避免新旧线程清理竞态）。
-    let mut guard = PERFORMANCE.lock().unwrap();
-    if let Some(old) = guard.take() {
-        for stop in &old.stops {
-            stop.stop();
-        }
-    }
-
-    // 键池来自模型实际贴图键名（无贴图的键不会出现在事件流）。
-    let keys: Vec<String> = props.keys.iter().map(|k| k.key.clone()).collect();
-    let area = primary_monitor_rect(app);
-    let mut stops = Vec::new();
-
-    // 按场景启动一个或多个通道 worker（Both = 键鼠同动，两个线程并发）。
-    if scene.has_typing() {
-        spawn_performance_worker(
-            Box::new(TypingSimulator::new(keys.clone())),
-            app,
-            &mut stops,
-        );
-    }
-    if scene.has_mouse() {
-        spawn_performance_worker(Box::new(MouseSimulator::new(area)), app, &mut stops);
-    }
-
-    // 先发 started（消费者先于第一个 device 事件就绪）。带鼠标通道时下发 play_area。
-    let started_payload = if scene.has_mouse() {
-        serde_json::json!({
-            "scene": scene.as_str(),
-            "play_area": { "x": area.x, "y": area.y, "width": area.width, "height": area.height },
-        })
-    } else {
-        serde_json::json!({ "scene": scene.as_str() })
-    };
-    let _ = app.emit_to("companion", "performance-started", &started_payload);
-
-    *guard = Some(PerformanceState { stops, scene });
-    tracing::info!("已开始表演：{}", scene.as_str());
-    Ok(())
-}
-
-/// 开始表演（场景名 "typing" / "mouse"；供设置页/未来 AI 编排调用）。
-#[tauri::command]
-fn start_performance(app: AppHandle, scene: String) -> Result<(), String> {
-    let scene = match scene.as_str() {
-        "typing" => PerformanceScene::Typing,
-        "mouse" => PerformanceScene::Mouse,
-        "both" => PerformanceScene::Both,
-        other => return Err(format!("未知表演场景: {other}")),
-    };
-    start_performance_impl(&app, scene)?;
-    rebuild_tray_menu_threadsafe(&app);
-    Ok(())
-}
-
-/// 停止表演（幂等）。
-#[tauri::command]
-fn stop_performance(app: AppHandle) -> Result<(), String> {
-    stop_performance_inner(&app);
-    rebuild_tray_menu_threadsafe(&app);
-    Ok(())
-}
-
-/// 查询当前是否在表演及场景（dev HMR 重载后前端重同步用）。
-#[tauri::command]
-fn is_performing() -> Option<String> {
-    PERFORMANCE
-        .lock()
-        .unwrap()
-        .as_ref()
-        .map(|s| s.scene.as_str().to_string())
-}
-
-/// 主线程停止表演（handle_menu / 菜单切换伙伴 / 隐藏窗口用）。
-fn stop_performance_sync(app: &AppHandle) {
-    stop_performance_inner(app);
-    rebuild_tray_menu(app);
-}
 
 /// 读取持久化的角色窗口显示层级（缺省置顶）。
 fn current_companion_layer() -> CompanionWindowLayer {
@@ -4638,8 +5099,6 @@ fn current_companion_layer() -> CompanionWindowLayer {
 /// `validate_managed_model` 深校验是毫秒级小 IO（读 model3.json + 查文件存在性），
 /// 与 handle_menu 里现有同步 load/save settings 同量级。
 fn apply_active_companion(app: &AppHandle, id: &str) {
-    // 切换伙伴前先停表演（stopped 先于 model-changed 发出，同线程 emit 保序）。
-    stop_performance_inner(app);
     match zapmomo::companion::set_active(id) {
         Ok(lib) => {
             let active = zapmomo::companion::active_model(&lib);
@@ -4844,6 +5303,115 @@ fn companion_menu_entries(
             }
         })
         .collect()
+}
+
+/// 「状态切换（动作）」菜单项 id 前缀：`motion_<组下标>_<组内下标>`。
+///
+/// 用纯数字索引而非组名编码：组名是模型作者任意字符串（可含 `_` / 空格 / 非
+/// ASCII），编码进 id 会有解析歧义；构建与点击解析共用同一份 `list_active_motions`
+/// 结果，索引天然对齐。
+const MOTION_MENU_PREFIX: &str = "motion_";
+
+/// 「状态切换（形象）」菜单项 id 前缀：`sprite_<stem>`。
+///
+/// stem 是文件名任意串，与 `companion_set_` 同构地 `strip_prefix` 取全串。
+const SPRITE_MENU_PREFIX: &str = "sprite_";
+
+/// 把原生菜单项 id 解析为动作坐标（`motion_<组下标>_<组内下标>`）。
+///
+/// 其余命名空间（`scale_*` / `sprite_*` / 占位项等）返回 `None`。
+fn motion_id_from_menu_id(id: &str) -> Option<(usize, usize)> {
+    let rest = id.strip_prefix(MOTION_MENU_PREFIX)?;
+    let (gi, mi) = rest.split_once('_')?;
+    let group_idx = gi.parse::<usize>().ok()?;
+    let motion_idx = mi.parse::<usize>().ok()?;
+    Some((group_idx, motion_idx))
+}
+
+/// 把原生菜单项 id 解析为形象名（`sprite_<stem>` → `<stem>`）。
+///
+/// stem 可含 `_`，因此取前缀后的整个剩余串；空后缀与其余命名空间返回 `None`。
+fn sprite_name_from_menu_id(id: &str) -> Option<&str> {
+    id.strip_prefix(SPRITE_MENU_PREFIX)
+        .filter(|rest| !rest.is_empty())
+}
+
+/// 「状态切换」菜单项描述（纯数据，便于单测；由构建函数转成 MenuItem）。
+struct StatusMenuEntry {
+    id: String,
+    label: String,
+    /// 占位项（空列表提示）禁用。
+    enabled: bool,
+}
+
+/// 由动作目录生成「状态切换」菜单项描述（不触碰菜单 API，纯函数）。
+///
+/// 菜单 id 用纯数字索引（见 [`MOTION_MENU_PREFIX`]）；存在跨组同名动作时在
+/// label 后附组名消歧（`wave (TapBody)`）。空目录返回单个禁用占位项。
+fn motion_status_entries(
+    catalog: &[zapmomo::live2d::config::MotionGroupInfo],
+) -> Vec<StatusMenuEntry> {
+    if catalog.is_empty() {
+        return vec![StatusMenuEntry {
+            id: "no_status".to_string(),
+            label: "（无可用动作）".to_string(),
+            enabled: false,
+        }];
+    }
+    let mut seen = std::collections::HashSet::new();
+    let has_duplicate = catalog
+        .iter()
+        .flat_map(|g| g.motions.iter().map(|m| m.name.as_str()))
+        .any(|name| !seen.insert(name));
+    let mut entries = Vec::new();
+    for (gi, group) in catalog.iter().enumerate() {
+        for (mi, motion) in group.motions.iter().enumerate() {
+            let label = if has_duplicate {
+                format!("{} ({})", motion.name, group.group)
+            } else {
+                motion.name.clone()
+            };
+            entries.push(StatusMenuEntry {
+                id: format!("{MOTION_MENU_PREFIX}{gi}_{mi}"),
+                label,
+                enabled: true,
+            });
+        }
+    }
+    entries
+}
+
+/// 由形象列表生成「状态切换」菜单项描述（不触碰菜单 API，纯函数）。
+///
+/// 追加「默认立绘」项（`sprite_default`，恢复 character.png）。空列表返回单个
+/// 禁用占位项。
+fn sprite_status_entries(
+    sprites: &[zapmomo::companion_sprites::SpriteInfo],
+) -> Vec<StatusMenuEntry> {
+    if sprites.is_empty() {
+        return vec![StatusMenuEntry {
+            id: "no_status".to_string(),
+            label: "（无可用形象）".to_string(),
+            enabled: false,
+        }];
+    }
+    let mut entries: Vec<StatusMenuEntry> = sprites
+        .iter()
+        .map(|s| StatusMenuEntry {
+            id: format!("{SPRITE_MENU_PREFIX}{}", s.name),
+            label: s.name.clone(),
+            enabled: true,
+        })
+        .collect();
+    entries.push(StatusMenuEntry {
+        id: format!(
+            "{SPRITE_MENU_PREFIX}{}",
+            zapmomo::companion_sprites::DEFAULT_SPRITE_NAME
+        ),
+        label: "默认立绘".to_string(),
+        enabled: true,
+    });
+    entries
 }
 
 /// 设置并持久化角色窗口缩放比例（1.0 = 100%）。
@@ -5101,29 +5669,6 @@ fn handle_menu(app: &AppHandle, id: &str) {
         "disable_autostart" => {
             let _ = apply_autostart(app, false);
         }
-        // 表演动作（模拟键鼠，与真实输入无关）。
-        "perform_typing" => {
-            if let Err(e) = start_performance_impl(app, PerformanceScene::Typing) {
-                tracing::warn!("启动敲键盘表演失败: {e}");
-            } else {
-                rebuild_tray_menu(app);
-            }
-        }
-        "perform_mouse" => {
-            if let Err(e) = start_performance_impl(app, PerformanceScene::Mouse) {
-                tracing::warn!("启动玩鼠标表演失败: {e}");
-            } else {
-                rebuild_tray_menu(app);
-            }
-        }
-        "perform_both" => {
-            if let Err(e) = start_performance_impl(app, PerformanceScene::Both) {
-                tracing::warn!("启动键鼠同动表演失败: {e}");
-            } else {
-                rebuild_tray_menu(app);
-            }
-        }
-        "perform_stop" => stop_performance_sync(app),
         _ => {
             if let Some(scale) = scale_from_id(id) {
                 let _ = apply_companion_scale(app, scale);
@@ -5131,6 +5676,10 @@ fn handle_menu(app: &AppHandle, id: &str) {
                 let _ = apply_companion_opacity(app, opacity);
             } else if let Some(layer) = layer_from_id(id) {
                 let _ = apply_companion_layer(app, layer);
+            } else if let Some((group_idx, motion_idx)) = motion_id_from_menu_id(id) {
+                handle_motion_menu(app, group_idx, motion_idx);
+            } else if let Some(name) = sprite_name_from_menu_id(id) {
+                handle_sprite_menu(name);
             } else if let Some(companion_id) = companion_id_from_menu_id(id) {
                 apply_active_companion(app, companion_id);
             }
@@ -5138,47 +5687,68 @@ fn handle_menu(app: &AppHandle, id: &str) {
     }
 }
 
-/// 当前 active 伙伴是否为 BongoCat 格式（探测式，毫秒级）。
-fn current_companion_is_bongocat() -> bool {
-    detect_active_bongocat_props().is_some()
-}
-
-/// 构建「表演」子菜单（敲键盘 / 玩鼠标 / 键鼠同动 / 停止表演）。
+/// 菜单点击动作项：按 (组下标, 组内下标) 重查当前动作目录取回组名后下发播放事件。
 ///
-/// 非 BongoCat 伙伴或表演进行中时前三项禁用；未表演时 stop 禁用。
-/// 右键菜单每次弹出重建，勾选/可用态天然最新；托盘菜单需在 start/stop 后重建。
-fn build_performance_submenu(app: &AppHandle) -> tauri::Result<Submenu<tauri::Wry>> {
-    let bongo = current_companion_is_bongocat();
-    let performing = PERFORMANCE.lock().unwrap().is_some();
-    let typing = MenuItem::with_id(
-        app,
-        "perform_typing",
-        "表演：敲键盘",
-        bongo && !performing,
-        None::<&str>,
-    )?;
-    let mouse = MenuItem::with_id(
-        app,
-        "perform_mouse",
-        "表演：玩鼠标",
-        bongo && !performing,
-        None::<&str>,
-    )?;
-    let both = MenuItem::with_id(
-        app,
-        "perform_both",
-        "表演：键鼠同动",
-        bongo && !performing,
-        None::<&str>,
-    )?;
-    let stop = MenuItem::with_id(app, "perform_stop", "停止表演", performing, None::<&str>)?;
-    Submenu::with_items(app, "表演", true, &[&typing, &mouse, &both, &stop])
+/// 重查而非信任菜单快照：菜单弹出与点击之间伙伴可能已切换，重查同一份
+/// `list_active_motions` 取不到（索引越界）就静默忽略，天然一致。
+fn handle_motion_menu(app: &AppHandle, group_idx: usize, motion_idx: usize) {
+    let catalog = zapmomo::companion::list_active_motions();
+    let Some(group) = catalog.get(group_idx) else {
+        return;
+    };
+    if group.motions.get(motion_idx).is_none() {
+        return;
+    }
+    let payload = serde_json::json!({ "group": group.group, "index": motion_idx });
+    if let Err(e) = app.emit_to("companion", "companion-play-motion", payload) {
+        tracing::warn!("下发动作播放事件失败: {e}");
+    }
 }
 
-/// 构建角色窗口的右键菜单（切换伙伴/表演/窗口尺寸/透明度/显示层级子菜单 + 打开设置 / 隐藏角色 / 重启 / 退出）。
+/// 菜单点击形象项：复用 LLM 工具同一套校验与通知链（单一写点），失败只记日志。
+fn handle_sprite_menu(name: &str) {
+    if let Err(e) = zapmomo::companion_sprites::apply_menu_switch(name) {
+        tracing::warn!("切换形象失败: {e}");
+    }
+}
+
+/// 构建「状态切换」子菜单：Live2D 伙伴列动作、角色包伙伴列 sprites 形象。
+///
+/// GIF 单文件伙伴 / 无 active 时返回 `None`（调用方跳过挂载，不显示空菜单）。
+/// 右键菜单每次弹出重建，列表天然反映磁盘最新状态；托盘菜单在 set_active 等
+/// 事务后由调用方重建。
+fn build_status_submenu(app: &AppHandle) -> tauri::Result<Option<Submenu<tauri::Wry>>> {
+    let entries = match current_active_companion_format().as_deref() {
+        // 角色包：sprites/ 图片 stem 即状态名（png/gif/webp）。
+        Some(zapmomo::companion::CHARACTER_FORMAT) => {
+            sprite_status_entries(&zapmomo::companion_sprites::list_active_sprites())
+        }
+        // GIF 单文件 / 无 active：无状态可切。
+        None | Some(zapmomo::companion::GIF_FORMAT) => return Ok(None),
+        // 其余 format 均为 Live2D（cubism3+）：动作目录即状态列表。
+        Some(_) => motion_status_entries(&zapmomo::companion::list_active_motions()),
+    };
+    let items: Vec<MenuItem<tauri::Wry>> = entries
+        .iter()
+        .map(|e| MenuItem::with_id(app, &e.id, &e.label, e.enabled, None::<&str>))
+        .collect::<tauri::Result<_>>()?;
+    let refs: Vec<&dyn IsMenuItem<tauri::Wry>> = items
+        .iter()
+        .map(|m| m as &dyn IsMenuItem<tauri::Wry>)
+        .collect();
+    Submenu::with_items(app, "状态切换", true, &refs).map(Some)
+}
+
+/// 当前 active 伙伴的 format（无 active → None）。
+fn current_active_companion_format() -> Option<String> {
+    let lib = zapmomo::companion::load_library_fast().ok()?;
+    zapmomo::companion::active_model(&lib).map(|m| m.format.clone())
+}
+
+/// 构建角色窗口的右键菜单（切换伙伴/状态切换/窗口尺寸/透明度/显示层级子菜单 + 打开设置 / 隐藏角色 / 重启 / 退出）。
 fn build_companion_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let companion_submenu = build_companion_switch_submenu(app)?;
-    let performance_submenu = build_performance_submenu(app)?;
+    let status_submenu = build_status_submenu(app)?;
     let (scale_submenu, opacity_submenu) = build_metric_submenus(app)?;
     let layer_submenu = build_layer_submenu(app)?;
     let click_through = build_click_through_item(app)?;
@@ -5189,33 +5759,33 @@ fn build_companion_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let hide = MenuItem::with_id(app, "hide_companion", "隐藏角色", true, None::<&str>)?;
     let restart = MenuItem::with_id(app, "restart", "重启", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-    Menu::with_items(
-        app,
-        &[
-            &companion_submenu,
-            &performance_submenu,
-            &scale_submenu,
-            &opacity_submenu,
-            &layer_submenu,
-            &click_through,
-            &smart_click_through,
-            &locked,
-            &chatbox,
-            &open_settings,
-            &hide,
-            &restart,
-            &quit,
-        ],
-    )
+    let mut items: Vec<&dyn IsMenuItem<tauri::Wry>> = vec![&companion_submenu];
+    if let Some(status) = &status_submenu {
+        items.push(status);
+    }
+    items.extend([
+        &scale_submenu as &dyn IsMenuItem<tauri::Wry>,
+        &opacity_submenu as &dyn IsMenuItem<tauri::Wry>,
+        &layer_submenu as &dyn IsMenuItem<tauri::Wry>,
+        &click_through as &dyn IsMenuItem<tauri::Wry>,
+        &smart_click_through as &dyn IsMenuItem<tauri::Wry>,
+        &locked as &dyn IsMenuItem<tauri::Wry>,
+        &chatbox as &dyn IsMenuItem<tauri::Wry>,
+        &open_settings as &dyn IsMenuItem<tauri::Wry>,
+        &hide as &dyn IsMenuItem<tauri::Wry>,
+        &restart as &dyn IsMenuItem<tauri::Wry>,
+        &quit as &dyn IsMenuItem<tauri::Wry>,
+    ]);
+    Menu::with_items(app, &items)
 }
 
 /// 托盘 id（档位变化后 `tray_by_id` 定位托盘并重建菜单）。
 const TRAY_ID: &str = "zapmomo-tray";
 
-/// 构建托盘菜单：显示/隐藏角色、切换伙伴、窗口尺寸/透明度/显示层级、打开设置、重启、退出。
+/// 构建托盘菜单：显示/隐藏角色、切换伙伴、状态切换、窗口尺寸/透明度/显示层级、打开设置、重启、退出。
 fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let companion_submenu = build_companion_switch_submenu(app)?;
-    let performance_submenu = build_performance_submenu(app)?;
+    let status_submenu = build_status_submenu(app)?;
     let (tray_scale, tray_opacity) = build_metric_submenus(app)?;
     let tray_layer = build_layer_submenu(app)?;
     let click_through = build_click_through_item(app)?;
@@ -5228,25 +5798,24 @@ fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let open_settings = MenuItem::with_id(app, "open_settings", "打开设置", true, None::<&str>)?;
     let restart = MenuItem::with_id(app, "restart", "重启", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-    Menu::with_items(
-        app,
-        &[
-            &toggle_companion,
-            &companion_submenu,
-            &performance_submenu,
-            &tray_scale,
-            &tray_opacity,
-            &tray_layer,
-            &click_through,
-            &smart_click_through,
-            &locked,
-            &chatbox,
-            &autostart,
-            &open_settings,
-            &restart,
-            &quit,
-        ],
-    )
+    let mut items: Vec<&dyn IsMenuItem<tauri::Wry>> = vec![&toggle_companion, &companion_submenu];
+    if let Some(status) = &status_submenu {
+        items.push(status);
+    }
+    items.extend([
+        &tray_scale as &dyn IsMenuItem<tauri::Wry>,
+        &tray_opacity as &dyn IsMenuItem<tauri::Wry>,
+        &tray_layer as &dyn IsMenuItem<tauri::Wry>,
+        &click_through as &dyn IsMenuItem<tauri::Wry>,
+        &smart_click_through as &dyn IsMenuItem<tauri::Wry>,
+        &locked as &dyn IsMenuItem<tauri::Wry>,
+        &chatbox as &dyn IsMenuItem<tauri::Wry>,
+        &autostart as &dyn IsMenuItem<tauri::Wry>,
+        &open_settings as &dyn IsMenuItem<tauri::Wry>,
+        &restart as &dyn IsMenuItem<tauri::Wry>,
+        &quit as &dyn IsMenuItem<tauri::Wry>,
+    ]);
+    Menu::with_items(app, &items)
 }
 
 /// 档位（尺寸/透明度）变化后重建托盘菜单，刷新勾选态。
@@ -5593,7 +6162,6 @@ fn toggle_companion_window(app: &AppHandle) {
         return;
     };
     if window.is_visible().unwrap_or(true) {
-        stop_performance_sync(app);
         let _ = window.hide();
         set_chatbox_visible(app, false, false);
     } else {
@@ -5795,9 +6363,8 @@ fn clear_shortcut(app: AppHandle, action: String) -> Result<(), String> {
     Ok(())
 }
 
-/// 隐藏角色窗口（隐藏时停表演，防幽灵表演态）。
+/// 隐藏角色窗口。
 fn hide_companion_window(app: &AppHandle) {
-    stop_performance_sync(app);
     if let Some(window) = app.get_webview_window("companion") {
         let _ = window.hide();
     }
@@ -6607,6 +7174,7 @@ pub fn run() {
         .manage(DshBridgeState::new())
         .manage(DshInstallState::default())
         .manage(ModelLibraryState::default())
+        .manage(SpeakerState::new())
         .manage(StorageMigrateState::default())
         .invoke_handler(tauri::generate_handler![
             get_app_info,
@@ -6679,6 +7247,16 @@ pub fn run() {
             set_data_dir,
             migrate_storage,
             cancel_storage_migration,
+            get_speaker_config,
+            set_speaker_enabled,
+            set_speaker_params,
+            download_speaker_model,
+            record_speaker_sample,
+            speaker_enroll,
+            list_speakers,
+            remove_speaker,
+            speaker_identify_wav,
+            speaker_resume_mic,
             open_storage_dir,
             clear_conversation_records,
             get_live2d_config,
@@ -6711,9 +7289,6 @@ pub fn run() {
             set_companion_locked,
             set_companion_drag_mode,
             show_companion_menu,
-            start_performance,
-            stop_performance,
-            is_performing,
             get_hide_dock_icon,
             set_hide_dock_icon,
             get_autostart,
@@ -6933,7 +7508,8 @@ pub fn run() {
             // 不销毁窗口对象，穿透状态跨显隐由轮询与 push 路径维护）。
             refresh_companion_pointer_policy(app.handle());
             sync_companion_ignore_cursor_events(app.handle());
-            // 智能穿透轮询线程：按光标位置动态切换穿透（SMART_CLICK_THROUGH_DESIGN.md）。
+            // 智能穿透轮询线程：按光标位置动态切换穿透
+            // （docs/plans/2026-08-28-companion-smart-click-through-design.md）。
             init_companion_pointer_geometry(app.handle());
             start_companion_pointer_watcher(app.handle().clone());
             // 位置锁定无需建窗时后端应用：拦截点在前端 CompanionRoot 的 mousedown，
@@ -7317,6 +7893,87 @@ mod companion_click_through_tests {
 }
 
 #[cfg(test)]
+mod speaker_params_tests {
+    use super::{SpeakerParamsPatch, is_deletable_recorded_sample};
+    use std::path::Path;
+    use zapmomo::config::settings::SpeakerSettings;
+
+    #[test]
+    fn test_apply_to_empty_patch_keeps_defaults() {
+        let mut settings = SpeakerSettings::default();
+        SpeakerParamsPatch::default()
+            .apply_to(&mut settings)
+            .unwrap();
+        assert_eq!(settings, SpeakerSettings::default());
+    }
+
+    #[test]
+    fn test_apply_to_writes_fields() {
+        let mut settings = SpeakerSettings::default();
+        SpeakerParamsPatch {
+            threshold: Some(0.75),
+            min_audio_duration_secs: Some(0.5),
+            num_threads: Some(4),
+            provider: Some("coreml".to_string()),
+            debug: Some(true),
+        }
+        .apply_to(&mut settings)
+        .unwrap();
+        assert_eq!(settings.threshold, Some(0.75));
+        assert_eq!(settings.min_audio_duration_secs, Some(0.5));
+        assert_eq!(settings.num_threads, Some(4));
+        assert_eq!(settings.provider.as_deref(), Some("coreml"));
+        assert_eq!(settings.debug, Some(true));
+    }
+
+    #[test]
+    fn test_apply_to_rejects_out_of_range() {
+        let cases = [
+            SpeakerParamsPatch {
+                threshold: Some(1.2),
+                ..Default::default()
+            },
+            SpeakerParamsPatch {
+                threshold: Some(-0.1),
+                ..Default::default()
+            },
+            SpeakerParamsPatch {
+                min_audio_duration_secs: Some(0.05),
+                ..Default::default()
+            },
+            SpeakerParamsPatch {
+                min_audio_duration_secs: Some(6.0),
+                ..Default::default()
+            },
+            SpeakerParamsPatch {
+                num_threads: Some(0),
+                ..Default::default()
+            },
+            SpeakerParamsPatch {
+                provider: Some("tensorrt".to_string()),
+                ..Default::default()
+            },
+        ];
+        for patch in cases {
+            let mut settings = SpeakerSettings::default();
+            assert!(patch.apply_to(&mut settings).is_err(), "应拒绝 {patch:?}");
+            // 整体校验：出错时不部分修改
+            assert_eq!(settings, SpeakerSettings::default());
+        }
+    }
+
+    #[test]
+    fn test_deletable_recorded_sample_rejects_missing_and_foreign_paths() {
+        // 不存在的路径：canonicalize 失败 → 不可删
+        assert!(!is_deletable_recorded_sample(Path::new(
+            "/nonexistent/zapmomo/rec-123.wav"
+        )));
+        // 非 TTS 输出目录：即使名字匹配也不可删（用户自选文件绝不能删）
+        assert!(!is_deletable_recorded_sample(Path::new("/tmp/rec-123.wav")));
+    }
+}
+
+#[cfg(test)]
 mod companion_locked_tests {
     use super::resolve_locked;
     use zapmomo::config::settings::Live2dSettings;
@@ -7564,6 +8221,119 @@ mod companion_menu_tests {
         assert_eq!(entries[0].label, "mochi");
         assert!(!entries[0].checked);
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod status_menu_tests {
+    use super::{
+        motion_id_from_menu_id, motion_status_entries, sprite_name_from_menu_id,
+        sprite_status_entries,
+    };
+    use zapmomo::companion_sprites::SpriteInfo;
+    use zapmomo::live2d::config::{MotionGroupInfo, MotionInfo};
+
+    fn group(name: &str, motions: &[&str]) -> MotionGroupInfo {
+        MotionGroupInfo {
+            group: name.to_string(),
+            motions: motions
+                .iter()
+                .map(|m| MotionInfo {
+                    name: m.to_string(),
+                })
+                .collect(),
+        }
+    }
+
+    fn sprite(name: &str) -> SpriteInfo {
+        SpriteInfo {
+            name: name.to_string(),
+            path: std::path::PathBuf::from(format!("/sprites/{name}.png")),
+        }
+    }
+
+    #[test]
+    fn test_motion_id_from_menu_id_parses_indices() {
+        assert_eq!(motion_id_from_menu_id("motion_0_0"), Some((0, 0)));
+        assert_eq!(motion_id_from_menu_id("motion_12_3"), Some((12, 3)));
+        // 跨命名空间负例
+        assert_eq!(motion_id_from_menu_id("scale_50"), None);
+        assert_eq!(motion_id_from_menu_id("sprite_happy"), None);
+        assert_eq!(motion_id_from_menu_id("no_status"), None);
+        // 缺段 / 非数字
+        assert_eq!(motion_id_from_menu_id("motion_"), None);
+        assert_eq!(motion_id_from_menu_id("motion_1"), None);
+        assert_eq!(motion_id_from_menu_id("motion_1_"), None);
+        assert_eq!(motion_id_from_menu_id("motion_a_b"), None);
+        assert_eq!(motion_id_from_menu_id("motion_-1_0"), None);
+    }
+
+    #[test]
+    fn test_sprite_name_from_menu_id_takes_full_rest() {
+        assert_eq!(sprite_name_from_menu_id("sprite_happy"), Some("happy"));
+        // stem 可含下划线 / 非 ASCII：取前缀后的整个剩余串
+        assert_eq!(
+            sprite_name_from_menu_id("sprite_站立_姿态"),
+            Some("站立_姿态")
+        );
+        assert_eq!(sprite_name_from_menu_id("sprite_default"), Some("default"));
+        // 空后缀与其余命名空间
+        assert_eq!(sprite_name_from_menu_id("sprite_"), None);
+        assert_eq!(sprite_name_from_menu_id("motion_0_0"), None);
+        assert_eq!(sprite_name_from_menu_id("open_settings"), None);
+    }
+
+    #[test]
+    fn test_motion_status_entries_numeric_ids_and_empty_placeholder() {
+        let catalog = vec![group("Idle", &["i"]), group("Tap", &["a", "b"])];
+        let entries = motion_status_entries(&catalog);
+        assert_eq!(entries.len(), 3);
+        // 纯数字索引 id，与目录枚举顺序对齐
+        assert_eq!(entries[0].id, "motion_0_0");
+        assert_eq!(entries[1].id, "motion_1_0");
+        assert_eq!(entries[2].id, "motion_1_1");
+        assert!(entries.iter().all(|e| e.enabled));
+
+        // 空目录 → 单个禁用占位项
+        let empty = motion_status_entries(&[]);
+        assert_eq!(empty.len(), 1);
+        assert_eq!(empty[0].id, "no_status");
+        assert!(!empty[0].enabled);
+    }
+
+    #[test]
+    fn test_motion_status_entries_disambiguates_duplicate_names() {
+        let catalog = vec![group("Idle", &["wave"]), group("TapBody", &["wave", "nod"])];
+        let entries = motion_status_entries(&catalog);
+        assert_eq!(entries[0].label, "wave (Idle)", "重名时附组名消歧");
+        assert_eq!(entries[1].label, "wave (TapBody)");
+        assert_eq!(
+            entries[2].label, "nod (TapBody)",
+            "存在重名时全部加后缀，风格统一"
+        );
+
+        // 全部唯一时不加组名后缀
+        let unique = motion_status_entries(&[group("Idle", &["i"]), group("Tap", &["a"])]);
+        assert_eq!(unique[0].label, "i");
+        assert_eq!(unique[1].label, "a");
+    }
+
+    #[test]
+    fn test_sprite_status_entries_appends_default_and_empty_placeholder() {
+        let entries = sprite_status_entries(&[sprite("angry"), sprite("happy")]);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].id, "sprite_angry");
+        assert_eq!(entries[1].id, "sprite_happy");
+        assert_eq!(entries[2].id, "sprite_default");
+        assert_eq!(entries[2].label, "默认立绘");
+        assert!(entries.iter().all(|e| e.enabled));
+
+        // 空列表 → 单个禁用占位项
+        let empty = sprite_status_entries(&[]);
+        assert_eq!(empty.len(), 1);
+        assert_eq!(empty[0].id, "no_status");
+        assert_eq!(empty[0].label, "（无可用形象）");
+        assert!(!empty[0].enabled);
     }
 }
 

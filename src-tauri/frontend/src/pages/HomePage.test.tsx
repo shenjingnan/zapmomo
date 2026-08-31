@@ -142,12 +142,26 @@ function makeVoice(o?: { running?: boolean; phase?: VoiceSessionPhase; error?: s
   };
 }
 
+function makeSpeaker(o?: { error?: string | null; modelPresent?: boolean; enabled?: boolean }) {
+  return {
+    config: {
+      config: {
+        enabled: o?.enabled ?? false,
+        model_present: o?.modelPresent ?? true,
+      },
+      error: o?.error ?? null,
+      refresh: vi.fn(),
+    },
+  };
+}
+
 function makeRuntime(
   overrides?: Partial<{
     kws: ReturnType<typeof makeKws>;
     asr: ReturnType<typeof makeAsr>;
     llm: ReturnType<typeof makeLlm>;
     tts: ReturnType<typeof makeTts>;
+    speaker: ReturnType<typeof makeSpeaker>;
     voice: ReturnType<typeof makeVoice>;
   }>,
 ): RuntimeState {
@@ -156,6 +170,7 @@ function makeRuntime(
     asr: overrides?.asr ?? makeAsr(),
     llm: overrides?.llm ?? makeLlm(),
     tts: overrides?.tts ?? makeTts(),
+    speaker: overrides?.speaker ?? makeSpeaker(),
     voice: overrides?.voice ?? makeVoice(),
   } as unknown as RuntimeState;
 }
@@ -284,6 +299,8 @@ describe("HomePage 概览", () => {
     state.runtime = makeRuntime({
       kws: makeKws({ enabled: false, modelsPresent: true }),
       tts: makeTts({ modelsPresent: true, enabled: false }),
+      // 声纹默认未启用：会与断言的「未启用」文案撞车，这里显式启用
+      speaker: makeSpeaker({ enabled: true, modelPresent: true }),
     });
     renderHome();
 
@@ -303,7 +320,11 @@ describe("HomePage 概览", () => {
 
   it("ASR：模型在但未启用 → 未启用", async () => {
     library = { models: [MODEL_A], active_model_id: MODEL_A.id };
-    state.runtime = makeRuntime({ asr: makeAsr({ enabled: false, modelsPresent: true }) });
+    state.runtime = makeRuntime({
+      asr: makeAsr({ enabled: false, modelsPresent: true }),
+      // 声纹默认未启用：会与断言的「未启用」文案撞车，这里显式启用
+      speaker: makeSpeaker({ enabled: true, modelPresent: true }),
+    });
     renderHome();
 
     const capabilities = await screen.findByLabelText("AI 能力");

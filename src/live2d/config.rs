@@ -347,6 +347,78 @@ fn resolve_in(base: &Path, rel: &str) -> Result<PathBuf, String> {
     Ok(base.join(rel))
 }
 
+/// 一个可播放动作（菜单展示名）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MotionInfo {
+    /// 展示名：File basename 去掉 `.motion3.json`（与前端 previewManager 口径一致）。
+    pub name: String,
+}
+
+/// 一个动作组（model3.json `FileReferences.Motions` 的一个键）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MotionGroupInfo {
+    /// 组名（如 `Idle` / `TapBody` / `Extra`）。
+    pub group: String,
+    /// 组内动作；**数组位置即前端 `motionManager` 的播放下标**，不可重排/过滤。
+    pub motions: Vec<MotionInfo>,
+}
+
+/// 动作展示名：File basename 去掉 `.motion3.json` 扩展。
+fn motion_display_name(file: &str) -> String {
+    let name = file.rsplit(['/', '\\']).next().unwrap_or(file);
+    name.strip_suffix(".motion3.json")
+        .unwrap_or(name)
+        .to_string()
+}
+
+/// 解析模型清单的可播放动作目录（`FileReferences.Motions`）。
+///
+/// 供右键菜单「状态切换」列出动作：播放由前端按 (组名, 组内下标) 调
+/// `motionManager.startMotion`，因此这里**不需要**把 File 解析成绝对路径，
+/// 但下标必须与清单数组逐位对齐（缺 `File` 的项用占位名保位置，前端播放
+/// 时自然失败，与清单本身的病态一致）。
+///
+/// - 缺 `Motions` 键 → `Ok(vec![])`（可选资源，非错误）；
+/// - 空组 / 非数组的组值跳过（构建菜单与点击解析共用本结果，自洽）；
+/// - 组间顺序为清单 JSON 的键序（serde_json 默认按字母序）。
+pub fn parse_motion_catalog(model_file: &Path) -> Result<Vec<MotionGroupInfo>, String> {
+    let content =
+        std::fs::read_to_string(model_file).map_err(|e| format!("读取模型清单失败: {e}"))?;
+    let json: serde_json::Value =
+        serde_json::from_str(&content).map_err(|e| format!("模型清单 JSON 解析失败: {e}"))?;
+    let Some(groups) = json
+        .get("FileReferences")
+        .and_then(|refs| refs.get("Motions"))
+        .and_then(|m| m.as_object())
+    else {
+        return Ok(Vec::new());
+    };
+    let mut catalog = Vec::new();
+    for (group, defs) in groups {
+        let Some(defs) = defs.as_array() else {
+            continue;
+        };
+        let motions: Vec<MotionInfo> = defs
+            .iter()
+            .map(|d| MotionInfo {
+                name: d
+                    .get("File")
+                    .and_then(|f| f.as_str())
+                    .map(motion_display_name)
+                    .unwrap_or_else(|| "（未命名）".to_string()),
+            })
+            .collect();
+        if motions.is_empty() {
+            continue;
+        }
+        catalog.push(MotionGroupInfo {
+            group: group.clone(),
+            motions,
+        });
+    }
+    Ok(catalog)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -712,5 +784,115 @@ mod tests {
             "hand 应序列化为 snake_case: {s}"
         );
         assert!(s.contains(r#""key":"KeyA""#), "key 字段: {s}");
+    }
+
+    /// 写一个带 Motions 清单的模型文件，返回清单路径。
+    fn make_model_with_motions(dir: &Path, manifest: &str, motions: &str) -> PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        let path = dir.join(manifest);
+        std::fs::write(
+            &path,
+            format!(r#"{{ "FileReferences": {{ "Motions": {motions} }} }}"#),
+        )
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn test_parse_motion_catalog_groups_and_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = make_model_with_motions(
+            dir.path(),
+            "hi.model3.json",
+            r#"{
+                "Idle": [{ "File": "motions/idle_01.motion3.json" }],
+                "TapBody": [
+                    { "File": "motions/wave.motion3.json" },
+                    { "File": "motions\\win\\wave.motion3.json" }
+                ]
+            }"#,
+        );
+        let catalog = parse_motion_catalog(&manifest).unwrap();
+        assert_eq!(catalog.len(), 2, "两个非空组");
+        let idle = catalog.iter().find(|g| g.group == "Idle").unwrap();
+        assert_eq!(idle.motions.len(), 1);
+        assert_eq!(idle.motions[0].name, "idle_01");
+        let tap = catalog.iter().find(|g| g.group == "TapBody").unwrap();
+        assert_eq!(
+            tap.motions[1].name, "wave",
+            "Windows 反斜杠分隔 + 空格路径同样取 basename 去扩展"
+        );
+    }
+
+    #[test]
+    fn test_parse_motion_catalog_keeps_index_alignment() {
+        // 缺 File 的项用占位名保位置：下标必须与清单数组逐位对齐（播放按 index）。
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = make_model_with_motions(
+            dir.path(),
+            "hi.model3.json",
+            r#"{ "G": [{ "File": "a.motion3.json" }, {}, { "Sound": "x.wav" }] }"#,
+        );
+        let catalog = parse_motion_catalog(&manifest).unwrap();
+        let g = &catalog[0];
+        assert_eq!(g.motions.len(), 3, "缺 File 的项不剔除，保下标对齐");
+        assert_eq!(g.motions[0].name, "a");
+        assert_eq!(g.motions[1].name, "（未命名）");
+        assert_eq!(g.motions[2].name, "（未命名）");
+    }
+
+    #[test]
+    fn test_parse_motion_catalog_skips_empty_and_invalid_groups() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = make_model_with_motions(
+            dir.path(),
+            "hi.model3.json",
+            r#"{ "Empty": [], "NotArray": 3, "Ok": [{ "File": "m.motion3.json" }] }"#,
+        );
+        let catalog = parse_motion_catalog(&manifest).unwrap();
+        assert_eq!(catalog.len(), 1, "空组与非数组组跳过");
+        assert_eq!(catalog[0].group, "Ok");
+    }
+
+    #[test]
+    fn test_parse_motion_catalog_missing_motions_key_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path()).unwrap();
+        let manifest = dir.path().join("hi.model3.json");
+        std::fs::write(&manifest, r#"{ "FileReferences": { "Moc": "a.moc3" } }"#).unwrap();
+        assert!(parse_motion_catalog(&manifest).unwrap().is_empty());
+
+        // 完全空对象同样为空（可选资源语义）
+        let bare = dir.path().join("bare.model3.json");
+        std::fs::write(&bare, "{}").unwrap();
+        assert!(parse_motion_catalog(&bare).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_parse_motion_catalog_malformed_json_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path()).unwrap();
+        let manifest = dir.path().join("bad.model3.json");
+        std::fs::write(&manifest, "not json at all").unwrap();
+        let err = parse_motion_catalog(&manifest).unwrap_err();
+        assert!(err.contains("解析"), "{err}");
+    }
+
+    #[test]
+    fn test_parse_motion_catalog_missing_file_errors() {
+        let err = parse_motion_catalog(Path::new("/nonexistent/a.model3.json")).unwrap_err();
+        assert!(err.contains("读取"), "{err}");
+    }
+
+    #[test]
+    fn test_parse_motion_catalog_chinese_display_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = make_model_with_motions(
+            dir.path(),
+            "hi.model3.json",
+            r#"{ "Extra": [{ "File": "motions/跳舞.motion3.json" }] }"#,
+        );
+        let catalog = parse_motion_catalog(&manifest).unwrap();
+        assert_eq!(catalog[0].motions[0].name, "跳舞");
     }
 }

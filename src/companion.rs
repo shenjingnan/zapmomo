@@ -423,6 +423,32 @@ fn validate_managed(model: &CompanionModel) -> Result<(), String> {
     }
 }
 
+/// 枚举 active Live2D 伙伴的可播放动作目录（供右键菜单「状态切换」）。
+///
+/// 与 [`crate::companion_sprites::list_active_sprites`] 对称的探测式读取：
+/// 非 Live2D 伙伴（GIF / 角色包）、无 active、清单读取或解析失败一律返回空，
+/// 由调用方（菜单）显示「无可用动作」。组内下标即前端播放下标
+/// （见 [`live2d_cfg::parse_motion_catalog`]）。
+pub fn list_active_motions() -> Vec<live2d_cfg::MotionGroupInfo> {
+    let lib = match load_library_fast() {
+        Ok(lib) => lib,
+        Err(e) => {
+            tracing::warn!("读取伙伴库失败（跳过动作枚举）: {e}");
+            return Vec::new();
+        }
+    };
+    let Some(model) = active_model(&lib) else {
+        return Vec::new();
+    };
+    if is_gif(model) || is_character(model) {
+        return Vec::new();
+    }
+    live2d_cfg::parse_motion_catalog(Path::new(&model.model_file)).unwrap_or_else(|e| {
+        tracing::warn!("解析模型动作目录失败: {e}");
+        Vec::new()
+    })
+}
+
 /// 校正 active：指向缺失/无效模型时落到第一个有效伙伴或 `None`；返回是否变更。
 ///
 /// 有效判定使用轻量资源校验（`validate_managed`，只查元数据/存在性）。
@@ -1997,6 +2023,68 @@ mod tests {
     /// 解析 model3.json 为 Value（测试辅助）。
     fn read_manifest(model_file: &Path) -> serde_json::Value {
         serde_json::from_str(&std::fs::read_to_string(model_file).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn test_list_active_motions_lists_live2d_groups() {
+        run_with_temp_home(|home| {
+            let src = home.join("m");
+            make_valid_model(&src, "m.model3.json");
+            std::fs::write(
+                src.join("m.model3.json"),
+                r#"{"FileReferences":{"Moc":"model.moc3","Textures":["textures/texture_00.png"],"Motions":{"Tap":[{"File":"a.motion3.json"},{"File":"b.motion3.json"}],"Idle":[{"File":"motions/i.motion3.json"}]}}}"#,
+            )
+            .unwrap();
+            let (model, _) = import_from_dir(&src).unwrap();
+            set_active(&model.id).unwrap();
+
+            let catalog = list_active_motions();
+            assert_eq!(catalog.len(), 2, "两个非空组");
+            assert_eq!(catalog[0].group, "Idle", "serde_json 键序（字母序）");
+            assert_eq!(catalog[0].motions[0].name, "i");
+            assert_eq!(catalog[1].group, "Tap");
+            assert_eq!(
+                catalog[1].motions.len(),
+                2,
+                "组内顺序 = 清单数组顺序（播放下标）"
+            );
+        });
+    }
+
+    #[test]
+    fn test_list_active_motions_empty_for_non_live2d_and_no_active() {
+        run_with_temp_home(|home| {
+            // 无 active
+            assert!(list_active_motions().is_empty());
+
+            // 角色包
+            let src = home.join("f");
+            std::fs::create_dir_all(&src).unwrap();
+            std::fs::write(src.join("character.md"), "# 芙宁娜\n").unwrap();
+            std::fs::write(src.join("character.png"), b"\x89PNG\r\n\x1a\n fake").unwrap();
+            let (character, _) = import_character_from_dir(&src).unwrap();
+            set_active(&character.id).unwrap();
+            assert!(list_active_motions().is_empty(), "角色包无动作目录");
+
+            // GIF 单文件
+            let gif = home.join("舞.gif");
+            make_valid_gif(&gif);
+            let (gif_model, _) = import_gif_from_file(&gif).unwrap();
+            set_active(&gif_model.id).unwrap();
+            assert!(list_active_motions().is_empty(), "GIF 伙伴无动作目录");
+        });
+    }
+
+    #[test]
+    fn test_list_active_motions_broken_manifest_is_empty_not_panic() {
+        run_with_temp_home(|home| {
+            let src = home.join("m");
+            make_valid_model(&src, "m.model3.json");
+            let (model, _) = import_from_dir(&src).unwrap();
+            set_active(&model.id).unwrap();
+            std::fs::write(Path::new(&model.model_file), "not json").unwrap();
+            assert!(list_active_motions().is_empty(), "畸形清单降级为空");
+        });
     }
 
     #[test]

@@ -2,17 +2,10 @@ import { getCurrentWindow, LogicalPosition, LogicalSize } from "@tauri-apps/api/
 import type { Live2DModel } from "pixi-live2d-display/cubism4";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { GifStage } from "@/components/gif/GifStage";
-import {
-  Live2dStage,
-  type Live2dStageHandle,
-  type ModelLayout,
-} from "@/components/live2d/Live2dStage";
+import { Live2dStage, type ModelLayout } from "@/components/live2d/Live2dStage";
 import { computeModelHitRects } from "@/components/live2d/modelLayout";
 import { PropsLayer } from "@/components/performance/PropsLayer";
-import { usePerformance } from "@/components/performance/usePerformance";
-import { VoiceStatusDot } from "@/components/voice/VoiceStatusDot";
 import { useLive2dConfig } from "@/hooks/useLive2dConfig";
-import { useVoiceSession } from "@/hooks/useVoiceSession";
 import { isStaticImageFormat } from "@/lib/companionFormat";
 import { gifContainRect, HIT_REGION_DEBOUNCE_MS, toWindowRects } from "@/lib/companionHitRegion";
 import { pickMotionGroup } from "@/lib/dshMotion";
@@ -22,6 +15,7 @@ import {
   onCompanionLayerChanged,
   onCompanionLockedChanged,
   onCompanionOpacityChanged,
+  onCompanionPlayMotion,
   onCompanionScaleChanged,
   onCompanionSpriteChanged,
   onDshSpeak,
@@ -63,7 +57,7 @@ const BUBBLE_STRIP = 72;
  * - 启动时读 `get_live2d_config` 恢复持久化的模型、缩放比例与透明度；
  * - 订阅 `live2d-model-changed` / `companion-scale-changed` / `companion-opacity-changed`，
  *   设置窗口切换模型、缩放或调透明度时即时同步（透明度由包裹模型的 wrapper div 的
- *   `style.opacity` 应用，语音状态点不受影响）；
+ *   `style.opacity` 应用）；
  * - 窗口尺寸由「基准高度 × scale + 顶部气泡预留条」派生（宽度按模型宽高比，不含预留条），
  *   缩放入口为设置面板、cmd/ctrl+滚轮与原生右键菜单（后端弹原生菜单，不受小窗口裁剪）；
  * - 按住左键拖动移动窗口（位置锁定时禁止；修饰键模式下需按住 cmd/ctrl）；右键弹出原生上下文菜单。
@@ -71,8 +65,6 @@ const BUBBLE_STRIP = 72;
 export function CompanionRoot() {
   const containerRef = useRef<HTMLDivElement>(null);
   const { config } = useLive2dConfig();
-  // 桌宠窗口无 RuntimeContext：hook 自包含，与设置窗口订阅同一批后端 voice 事件。
-  const voice = useVoiceSession();
   // 展示目标（静态图像伙伴（GIF/角色包立绘）渲染 GifStage，Live2D 伙伴渲染 Live2dStage；url null = 清屏）。
   const [stage, setStage] = useState<{ url: string | null; isGif: boolean }>({
     url: null,
@@ -95,11 +87,9 @@ export function CompanionRoot() {
   // 拖拽模式：modifier = 需按住 cmd/ctrl 才能拖动（缺省 direct = 直接拖动）。
   const [dragMode, setDragMode] = useState<CompanionDragMode>("direct");
   const [size, setSize] = useState({ width: INITIAL_WIDTH, height: BASE_HEIGHT + BUBBLE_STRIP });
-  // 表演（BongoCat 兼容模拟键鼠）：道具资源、模型布局与引擎。
-  const stageRef = useRef<Live2dStageHandle | null>(null);
+  // BongoCat 道具资源（键盘背景静态展示；模拟键鼠表演已下线）。
   const [props, setProps] = useState<PerformancePropsInfo | null>(null);
   const [modelLayout, setModelLayout] = useState<ModelLayout | null>(null);
-  const { pressedKeys } = usePerformance(props, stageRef);
 
   // Live2D 模型句柄：dsh 事件触发动作用（模型缺对应组时静默跳过）。
   const modelRef = useRef<Live2DModel | null>(null);
@@ -310,7 +300,7 @@ export function CompanionRoot() {
     };
   }, []);
 
-  // 设置面板切显示层级时同步（置底：隐藏状态点、关闭交互；置顶：恢复）。
+  // 设置面板切显示层级时同步（置底：关闭交互、纯背景装饰；置顶：恢复）。
   useEffect(() => {
     const unlisten = onCompanionLayerChanged((l) => {
       setLayer(l);
@@ -392,6 +382,20 @@ export function CompanionRoot() {
     };
   }, []);
 
+  // 右键菜单「状态切换（动作）」：指定组内下标播放一次，播完自动回待机 idle。
+  useEffect(() => {
+    const unlisten = onCompanionPlayMotion(({ group, index }) => {
+      const model = modelRef.current;
+      if (!model) return;
+      if (!model.internalModel.motionManager) return;
+      // FORCE 优先级（3）：同 dsh 联动语义，打断 idle/在播动作。
+      void model.internalModel.motionManager.startMotion(group, index, 3);
+    });
+    return () => {
+      void unlisten.then((fn) => fn());
+    };
+  }, []);
+
   // 监听窗口移动：拖动停止（debounce）后把逻辑像素坐标写回 settings，供下次启动恢复。
   useEffect(() => {
     const win = getCurrentWindow();
@@ -414,7 +418,8 @@ export function CompanionRoot() {
   }, []);
 
   // 智能穿透：把「角色画面」换算成窗口内逻辑像素矩形集上报后端（150ms 去抖），
-  // Rust 轮询全局光标点查后动态切换穿透（SMART_CLICK_THROUGH_DESIGN.md）。
+  // Rust 轮询全局光标点查后动态切换穿透
+  // （docs/plans/2026-08-28-companion-smart-click-through-design.md）。
   // - 曾加载后清屏（url null）→ 上报空数组（明确穿透）；
   // - GIF/立绘 → object-contain 实际显示区（letterbox 空白不挡点击）；
   // - Live2D → 逐 drawable 可见包围盒；模型或布局未就绪时不上报，
@@ -505,7 +510,7 @@ export function CompanionRoot() {
         void api.showCompanionMenu({ x: e.clientX, y: e.clientY });
       }}
     >
-      {/* 透明度只作用于模型本身，语音状态点保持不透明 */}
+      {/* 透明度只作用于模型本身 */}
       <div style={{ opacity }}>
         {/* 顶部预留 BUBBLE_STRIP 给事件 deck；内层 relative 让 PropsLayer 的画布
             坐标映射（absolute left/top = layout.x/y）锚定到下移后的舞台原点。 */}
@@ -519,7 +524,6 @@ export function CompanionRoot() {
             />
           ) : (
             <Live2dStage
-              ref={stageRef}
               modelUrl={stage.url}
               width={size.width}
               height={size.height - BUBBLE_STRIP}
@@ -531,21 +535,15 @@ export function CompanionRoot() {
               }}
             />
           )}
-          {/* BongoCat 道具层：键盘背景 + 爪子按键贴图（仅 BongoCat 伙伴有 props） */}
+          {/* BongoCat 道具层：键盘背景静态展示（模拟键鼠表演已下线，无按键贴图） */}
           <PropsLayer
             layout={modelLayout}
             backgroundUrl={props?.background ? toAssetUrl(props.background) : null}
-            pressedKeys={pressedKeys}
+            pressedKeys={[]}
           />
         </div>
       </div>
       {/* dsh 播报与对话回复统一由独立 bubble 窗口渲染（components/bubble/BubbleRoot，唯一聊天气泡） */}
-      {/* 置底为纯背景装饰，不显示语音状态点 */}
-      {layer === "front" && (
-        <span className="absolute right-2 top-2">
-          <VoiceStatusDot phase={voice.phase} running={voice.running} />
-        </span>
-      )}
     </div>
   );
 }

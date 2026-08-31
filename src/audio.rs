@@ -272,6 +272,15 @@ pub fn read_wav_mono(path: &Path) -> Result<(Vec<f32>, u32), String> {
     Ok((mono, spec.sample_rate))
 }
 
+/// 读取 wav 文件为（mono f32 样本, 采样率）。
+///
+/// 文件不存在 / 非 RIFF / 编码不支持一律返回 `None`（上游 sherpa `Wave::read`
+/// 不区分失败原因）；采样率不做归一，由调用方按需重采样。
+pub fn read_wav_samples(path: &Path) -> Option<(Vec<f32>, i32)> {
+    let wave = sherpa_onnx::Wave::read(&path.to_string_lossy())?;
+    Some((wave.samples().to_vec(), wave.sample_rate()))
+}
+
 fn mic_permission_hint() -> String {
     "未找到默认麦克风。\n  macOS 请在「系统设置 → 隐私与安全性 → 麦克风」中授权当前终端 App，然后重试。\n  可用 `kws list-devices` 查看设备，`kws run --device <名称>` 指定设备。"
         .to_string()

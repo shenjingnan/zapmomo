@@ -100,6 +100,7 @@ cargo tarpaulin                     # 生成覆盖率报告
 │   │   ├── token.rs     # 汉字 → ppinyin token 转换
 │   │   └── reaction.rs  # Reaction 可插拔反应（控制台 / GUI / 测试）
 │   ├── audio.rs         # cpal 麦克风采集 + 重采样
+│   ├── speaker/         # 声纹识别（CAM++ embedding：注册/验证/识别 + JSON 档案）
 │   ├── logging.rs       # tracing 双层日志
 │   └── datetime.rs      # 日期时间工具
 ├── models/              # 模型资产（本体不入库，按清单下载）

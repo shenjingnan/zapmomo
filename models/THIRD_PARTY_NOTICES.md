@@ -81,6 +81,15 @@
 - **sha256**: 0.6B `771420bd20ff5f35407b4fa9cf9c5461e153800d3d772ef51c9febc0a520855d` /
   1.7B `b55e06c7890d43c208d15aed8b4ed3f18215f295e47d5960e061b15bff338ab0`
 
+## 3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx（声纹识别）
+
+- **用途**: 声纹 speaker embedding 提取（说话人注册 / 验证 / 识别，CAM++ 中文 16k，
+  192 维），仅用于区分说话人，不作为安全认证
+- **来源**: https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx
+- **发布方**: k2-fsa（sherpa-onnx 项目；模型源自阿里 3D-Speaker / ModelScope iic）
+- **许可证**: Apache-2.0（依据 3D-Speaker 训练仓库与 ModelScope 模型页标注；如需商用请以官方模型发布页的许可说明为准）
+- **sha256**: `f682b514c05d947ee3fa91cd6ec6c5c7543479a128373fa29b1faedccd21fd11`
+
 ## audiocpp_server（audio.cpp 引擎二进制，随安装包分发）
 
 - **用途**: TTS 第二推理后端（ggml 系 audio.cpp 的 HTTP server sidecar，裁剪构建
