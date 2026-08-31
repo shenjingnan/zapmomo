@@ -4,7 +4,6 @@ import { DeviceSelect } from "@/components/DeviceSelect";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
 import { useRuntime } from "@/providers/RuntimeContext";
 import { isDefaultKwsModelDir, modelNameFromDir } from "./kwsMeta";
@@ -17,15 +16,17 @@ interface KwsBasicConfigProps {
 
 /**
  * 基础配置（macOS 设置行）：
- * 当前模型（名称 + 就绪/未下载 Badge + 切换模型 + 可展开完整路径）/ 麦克风来源 /
- * 自定义唤醒词 + 底部「下载模型 / 选择模型 / 测试唤醒词」操作按钮。
+ * 当前模型（名称 + 就绪/未下载 Badge + 切换模型 + 可展开完整路径）/ 麦克风来源 +
+ * 底部「下载模型 / 选择模型 / 测试唤醒词」操作按钮。
+ *
+ * 全局自定义唤醒词输入已移除：唤醒词由伙伴在「伙伴」页按角色设置
+ * （角色词压过全局词，见 `companion::resolve_wake_word`）；`[kws].custom_keywords`
+ * 保留为无伙伴接管时的回退（存量配置继续生效，仅无 UI 入口）。
  */
 export function KwsBasicConfig({ onTestOpen, onSwitchOpen }: KwsBasicConfigProps) {
   const {
     kws,
     devices: { error: devicesError },
-    sessionKeywords,
-    setSessionKeywords,
   } = useRuntime();
   const { config, error } = kws.config;
   const { downloading, progress, error: downloadError, download } = kws.download;
@@ -136,29 +137,6 @@ export function KwsBasicConfig({ onTestOpen, onSwitchOpen }: KwsBasicConfigProps
             <dd className="mt-0.5 text-xs text-text-muted">用于检测唤醒词的麦克风输入源</dd>
           </div>
           <DeviceSelect />
-        </div>
-        <div className="flex items-center justify-between gap-3.5 px-3.5 py-2.5">
-          <div className="min-w-0">
-            <dt className="text-sm text-text-primary">自定义唤醒词</dt>
-            <dd className="mt-0.5 text-xs text-text-muted">
-              提供后将仅监听这些关键词（会话级），留空使用模型内置关键词。
-              {config?.active_wake_word != null && (
-                <>
-                  当前唤醒词由伙伴「接管」（
-                  {config.active_wake_word}
-                  ），此处的词仅在无伙伴接管时生效。
-                </>
-              )}
-            </dd>
-          </div>
-          <Input
-            className="w-64 shrink-0"
-            value={sessionKeywords}
-            onChange={(e) => setSessionKeywords(e.target.value)}
-            placeholder="多个用 / 分隔"
-            aria-label="自定义唤醒词"
-            disabled={kws.listening.isListening || kws.listening.pending}
-          />
         </div>
       </dl>
 

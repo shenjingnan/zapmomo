@@ -233,7 +233,7 @@ describe("KwsPage（唤醒词配置）", () => {
     expect(screen.getByRole("button", { name: "测试唤醒词" })).toBeEnabled();
   });
 
-  it("顶部开关 ON 携带麦克风与自定义唤醒词调用 start_listen 并持久化 enabled", async () => {
+  it("顶部开关 ON 携带麦克风调用 start_listen 并持久化 enabled", async () => {
     kwsConfig = { ...kwsConfig, models_present: true };
     const user = userEvent.setup();
     renderKwsPage();
@@ -242,8 +242,6 @@ describe("KwsPage（唤醒词配置）", () => {
     // 选择麦克风
     await user.click(screen.getByRole("combobox", { name: "麦克风来源" }));
     await user.click(await screen.findByRole("option", { name: "内置麦克风" }));
-    // 输入自定义唤醒词
-    await user.type(screen.getByRole("textbox", { name: "自定义唤醒词" }), "你好小智");
 
     await user.click(screen.getByRole("switch", { name: "唤醒词监听开关" }));
 
@@ -251,9 +249,10 @@ describe("KwsPage（唤醒词配置）", () => {
       expect(invokeMock).toHaveBeenCalledWith("set_kws_enabled", { enabled: true });
     });
     await waitFor(() => {
+      // 全局自定义唤醒词输入已移除（唤醒词由伙伴页按角色设置），此处始终传 null
       expect(invokeMock).toHaveBeenCalledWith("start_listen", {
         device: "内置麦克风",
-        keywords: "你好小智",
+        keywords: null,
       });
     });
   });
@@ -294,42 +293,6 @@ describe("KwsPage（唤醒词配置）", () => {
     await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith("set_kws_enabled", { enabled: false });
     });
-  });
-
-  it("输入自定义唤醒词：防抖后持久化到后端", async () => {
-    kwsConfig = { ...kwsConfig, models_present: true };
-    const user = userEvent.setup();
-    renderKwsPage();
-    await screen.findByText("未启用");
-
-    await user.type(screen.getByRole("textbox", { name: "自定义唤醒词" }), "你好小智");
-
-    await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("set_kws_custom_keywords", {
-        keywords: "你好小智",
-      });
-    });
-  });
-
-  it("从后端回填持久化的自定义唤醒词", async () => {
-    kwsConfig = { ...kwsConfig, custom_keywords: "你好小智", models_present: true };
-    renderKwsPage();
-    expect(await screen.findByDisplayValue("你好小智")).toBeInTheDocument();
-  });
-
-  it("中文唤醒词：输入框为默认 placeholder，无兼容性警示", async () => {
-    kwsConfig = {
-      ...kwsConfig,
-      custom_keywords: "你好小智",
-      models_present: true,
-    };
-    renderKwsPage();
-    expect(await screen.findByDisplayValue("你好小智")).toBeInTheDocument();
-    expect(screen.queryByText(/仅支持英文唤醒词/)).not.toBeInTheDocument();
-    expect(screen.getByRole("textbox", { name: "自定义唤醒词" })).toHaveAttribute(
-      "placeholder",
-      "多个用 / 分隔",
-    );
   });
 
   it("start/stop 在途（pending）时顶部开关禁用，完成后恢复", async () => {
@@ -373,22 +336,6 @@ describe("KwsPage（唤醒词配置）", () => {
       const calls = invokeMock.mock.calls.filter((c) => c[0] === "list_devices");
       expect(calls.length).toBeGreaterThanOrEqual(2);
     });
-  });
-
-  it("自定义唤醒词在页面切换后保留（sessionKeywords 提升到路由外层）", async () => {
-    kwsConfig = { ...kwsConfig, models_present: true };
-    const user = userEvent.setup();
-    renderKwsPage();
-    const input = await screen.findByRole("textbox", { name: "自定义唤醒词" });
-    await user.type(input, "你好小智");
-
-    // 切到概览页
-    await user.click(screen.getByRole("link", { name: /模型与能力/ }));
-    expect(await screen.findByText("模型摘要")).toBeInTheDocument();
-
-    // 切回 KWS 页：输入值仍在
-    await user.click(screen.getByRole("link", { name: "配置唤醒词（KWS）" }));
-    expect(await screen.findByRole("textbox", { name: "自定义唤醒词" })).toHaveValue("你好小智");
   });
 
   it("测试对话框：打开自动开始监听、结果实时追加、关闭自动停止", async () => {
