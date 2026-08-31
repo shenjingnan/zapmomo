@@ -18,12 +18,14 @@ use std::sync::mpsc::Sender;
 use serde::Serialize;
 
 /// 形象目录名（托管目录内约定，不入库、不参与导入校验）。
-const SPRITES_DIR: &str = "sprites";
+/// `pub(crate)`：角色包导出白名单（`companion_share`）复用同一目录约定。
+pub(crate) const SPRITES_DIR: &str = "sprites";
 /// 恢复默认立绘的保留名。
 pub const DEFAULT_SPRITE_NAME: &str = "default";
 
 /// 支持的图片扩展名（小写）；stem 冲突按数组顺序取优先。
-const SPRITE_EXTS: &[&str] = &["png", "gif", "webp"];
+/// `pub(crate)`：角色包导出白名单（`companion_share`）复用同一扩展名约定。
+pub(crate) const SPRITE_EXTS: &[&str] = &["png", "gif", "webp"];
 
 /// 形象切换事件载荷（src-tauri 侧转发为 `companion-sprite-changed`）。
 #[derive(Debug, Clone, PartialEq, Serialize)]

@@ -4,6 +4,7 @@
 //! - `"cubism3"`：Live2D 模型目录（`.model3.json` 清单）
 //! - `"gif"`：GIF 动图文件
 //! - `"character"`：角色包目录（`character.md` 人设 + `character.png` 立绘 +
+//!   可选 `character.json` 声明（`CompanionManifest`，作者预设随包流通）+
 //!   可选 `voice/reference.wav` + `voice/reference.txt` 音色克隆参考）
 //!
 //! 音色（任意 format 均可拥有，见 `companion_voice_in` 三级解析）：
@@ -45,6 +46,14 @@ const EXTRA_MOTION_GROUP: &str = "Extra";
 /// 存量伙伴补注册迁移标记（写入 `completed_migrations` 闸门，防重复执行）。
 const MOTION_REGISTRATION_MIGRATION: &str = "motion-registration-v1";
 
+/// 角色默认欢迎语文案：唤醒词喊的是角色名，欢迎语回报名字形成身份闭环。
+/// `{name}` 占位符由 `effective_welcome_text` 展开。
+pub const DEFAULT_WELCOME_TEMPLATE: &str = "你好，我是{name}。";
+/// 自定义唤醒词长度上限（chars 计数，对齐 `MAX_NAME_CHARS` 风格）。
+pub const MAX_WAKE_WORD_CHARS: usize = 20;
+/// 自定义欢迎语长度上限（chars 计数）。
+pub const MAX_WELCOME_CHARS: usize = 200;
+
 /// 串行化 Library 的读改写与 commit 决策。**不得跨大型目录复制/删除持有。**
 static COMPANION_LOCK: Mutex<()> = Mutex::new(());
 
@@ -78,6 +87,14 @@ pub struct CompanionModel {
     /// （`settings.toml [live2d]`）与当前窗口状态。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layout: Option<CompanionLayout>,
+    /// 自定义唤醒词（原始字符串，非 token）；`None` = 跟随 `name`（rename 自动跟随）。
+    /// 生效经 `resolve_wake_word`（编码失败回退全局链），存储侧不做格式约束。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wake_word: Option<String>,
+    /// 自定义欢迎语文本；`None` = 按 `DEFAULT_WELCOME_TEMPLATE` 按 name 展开。
+    /// 预合成音频的新鲜度由 `companion_welcome` 指纹判定，此处只存文本。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub welcome_text: Option<String>,
 }
 
 /// 伙伴私有窗口布局（尺寸/位置）。
@@ -240,11 +257,57 @@ pub fn is_character(model: &CompanionModel) -> bool {
 }
 
 // 角色包约定文件名（托管目录内按约定探测，不入库）。
-const CHARACTER_MD: &str = "character.md";
-const CHARACTER_PNG: &str = "character.png";
-const VOICE_DIR: &str = "voice";
-const REFERENCE_WAV: &str = "reference.wav";
-const REFERENCE_TXT: &str = "reference.txt";
+/// `pub(crate)`：角色包导出/导入白名单（`companion_share`）复用同一组文件名约定。
+pub(crate) const CHARACTER_MD: &str = "character.md";
+pub(crate) const CHARACTER_PNG: &str = "character.png";
+pub(crate) const CHARACTER_JSON: &str = "character.json";
+pub(crate) const VOICE_DIR: &str = "voice";
+pub(crate) const REFERENCE_WAV: &str = "reference.wav";
+pub(crate) const REFERENCE_TXT: &str = "reference.txt";
+/// 作者原版音色备份（`upload_companion_voice` 首次覆盖前生成；恢复后删除）。
+/// 刻意不进 companion_share 的导出/解压白名单（两处均为精确名匹配）：
+/// 备份是本机恢复用的私有资产，不随包流通，收到的分享包里也不该有它。
+pub(crate) const REFERENCE_ORIGINAL_WAV: &str = "reference.original.wav";
+pub(crate) const REFERENCE_ORIGINAL_TXT: &str = "reference.original.txt";
+
+/// 角色包声明文件（与 `character.md` / `character.png` 三件套，全字段可选）。
+///
+/// 作者预设随包流通的 **A 层**：任何人导入同一角色包，角色名/预设唤醒词/预设
+/// 欢迎语一致（不再依赖「猜 character.md 的 H1」这类启发式）。导入时
+/// `wake_word` / `welcome_text` **预填**进 library.json 条目作为初始值（导入者
+/// 随后可自行覆盖，覆盖值存 B 层 library.json，不回写包）；无此文件走推导兜底
+/// （C 层），存量角色包不受影响。存在但解析失败 → **导入报错**：声明文件是
+/// 格式约定，静默忽略会让作者的预设无声失效。
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct CompanionManifest {
+    pub version: Option<u32>,
+    pub name: Option<String>,
+    pub wake_word: Option<String>,
+    pub welcome_text: Option<String>,
+}
+
+impl CompanionManifest {
+    /// 读取角色包目录内的声明文件（可选文件；不存在 → 空清单）。
+    pub fn read(dir: &Path) -> Result<Self, String> {
+        let content = match std::fs::read_to_string(dir.join(CHARACTER_JSON)) {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(e) => return Err(format!("读取角色包 {CHARACTER_JSON} 失败: {e}")),
+        };
+        serde_json::from_str(&content).map_err(|e| format!("角色包 {CHARACTER_JSON} 格式错误: {e}"))
+    }
+
+    /// 预填字段统一清洗：trim；空白归 `None`（宽松，不做长度硬校验——生效侧
+    /// 编码失败会自动回退并提示，不应让作者写的预设卡住导入）。
+    /// `pub(crate)`：导出合成 character.json（`companion_share`）复用同一清洗规则。
+    pub(crate) fn preset(field: &Option<String>) -> Option<String> {
+        field
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    }
+}
 
 /// 校验托管 GIF 伙伴：文件存在且带合法 GIF 文件头（GIF87a/GIF89a）。
 ///
@@ -278,7 +341,11 @@ pub fn validate_png_file(file: &Path) -> Result<(), String> {
 }
 
 /// 校验 wav 文件头（RIFF/WAVE，前 12 字节）。
-fn validate_wav_header(file: &Path) -> Result<(), String> {
+/// 轻量 wav 头校验（RIFF + WAVE，12 字节）。
+///
+/// `pub(crate)`：音色上传链在重量级解码（`audio::read_wav_mono`）之前做早期
+/// 干净报错复用本函数。
+pub(crate) fn validate_wav_header(file: &Path) -> Result<(), String> {
     use std::io::Read;
     let mut f = std::fs::File::open(file).map_err(|e| format!("参考音频不存在或无法读取: {e}"))?;
     let mut magic = [0u8; 12];
@@ -292,10 +359,13 @@ fn validate_wav_header(file: &Path) -> Result<(), String> {
 
 /// 校验角色包目录结构（导入时深校验 + set_active/sanitize 轻量校验共用）。
 ///
-/// 规则：`character.md` 存在且非空；`character.png` 为合法 PNG；`voice/` 可选，
-/// 存在时 `reference.wav` 与 `reference.txt` 必须成对（缺其一报错）。均为读文件头/
-/// 小文件级操作，与 GIF 魔数校验同量级。
+/// 规则：`character.md` 存在且非空；`character.png` 为合法 PNG；`character.json`
+/// 可选、存在则必须为合法声明；`voice/` 可选，存在时 `reference.wav` 与
+/// `reference.txt` 必须成对（缺其一报错）。均为读文件头/小文件级操作，与 GIF
+/// 魔数校验同量级。
 pub fn validate_character_pack(dir: &Path) -> Result<(), String> {
+    // 声明文件可选，但写错了必须报错（静默忽略会让作者预设无声失效）。
+    CompanionManifest::read(dir)?;
     let md = dir.join(CHARACTER_MD);
     let content = std::fs::read_to_string(&md)
         .map_err(|e| format!("角色包缺少可读的 character.md 人设文件: {e}"))?;
@@ -461,6 +531,8 @@ struct PreparedImport {
     model_file_rel: PathBuf,
     format: String,
     imported_at: String,
+    /// 角色包声明（作者预设）。Live2D/GIF 路径为空清单（全 `None`）。
+    manifest: CompanionManifest,
 }
 
 /// RAII：退出作用域时清理残留临时目录（rename 成功后该路径已不存在，remove 为 no-op）。
@@ -647,6 +719,7 @@ fn prepare_import(source: &Path) -> Result<Prepared, String> {
         model_file_rel,
         format: format.to_str().to_string(),
         imported_at: now_rfc3339(),
+        manifest: CompanionManifest::default(),
     }))
 }
 
@@ -679,6 +752,10 @@ fn commit_import(prepared: PreparedImport) -> Result<(CompanionModel, bool), Str
         imported_at: prepared.imported_at.clone(),
         voice_id: None,
         layout: None,
+        // 作者预设预填（角色包声明；Live2D/GIF 清单为空 → None）。只清洗不查长度：
+        // 生效侧编码失败自动回退并提示，不应让预设卡住导入。
+        wake_word: CompanionManifest::preset(&prepared.manifest.wake_word),
+        welcome_text: CompanionManifest::preset(&prepared.manifest.welcome_text),
     };
 
     {
@@ -778,6 +855,7 @@ pub fn import_gif_from_file(source: &Path) -> Result<(CompanionModel, bool), Str
         model_file_rel: PathBuf::from(&file_name),
         format: GIF_FORMAT.to_string(),
         imported_at: now_rfc3339(),
+        manifest: CompanionManifest::default(),
     })
 }
 
@@ -797,11 +875,17 @@ pub fn import_source(source: &Path) -> Result<(CompanionModel, bool), String> {
 // 角色包（character.md + character.png + 可选 voice/）
 // ===========================================================================
 
-/// 从 character.md 提取角色名：第一个 `# ` 开头的 H1 行。
+/// 按 chars 计数截断到 `MAX_NAME_CHARS`（与 `rename` 校验一致）。
+fn truncate_name(s: &str) -> String {
+    s.chars().take(MAX_NAME_CHARS).collect()
+}
+
+/// 从 character.md 提取角色名：第一个 `# ` 开头的 H1 行（启发式兜底，C 层）。
 ///
 /// 缺失/为空时回退 `fallback`（导入目录 basename）；超 `MAX_NAME_CHARS` 截断
 /// （chars 计数，与 `rename` 校验一致）。文件不可读时同样回退（内容校验由
-/// `validate_character_pack` 在托管副本上兜底）。
+/// `validate_character_pack` 在托管副本上兜底）。正式约定见 `CompanionManifest`
+/// （character.json 的 `name` 字段优先于本函数）。
 fn extract_character_name(character_md: &Path, fallback: &str) -> String {
     let fallback = if fallback.is_empty() {
         "未命名角色"
@@ -819,7 +903,7 @@ fn extract_character_name(character_md: &Path, fallback: &str) -> String {
     let Some(name) = name else {
         return fallback.to_string();
     };
-    let truncated: String = name.chars().take(MAX_NAME_CHARS).collect();
+    let truncated = truncate_name(name);
     if truncated.is_empty() {
         fallback.to_string()
     } else {
@@ -832,7 +916,8 @@ fn extract_character_name(character_md: &Path, fallback: &str) -> String {
 /// 单声道文件不动（返回 false）。采样率原样保留：采样率归一由合成时
 /// `tts::normalize_reference` 负责；声道是它的盲区——sherpa `Wave::read` 只接受
 /// 单声道，多声道直接读取失败，因此必须在导入侧解决。
-fn convert_reference_to_mono(wav: &Path) -> Result<bool, String> {
+/// `pub(crate)`：音色上传链对暂存 wav 做同样的单声道改写（`upload_companion_voice`）。
+pub(crate) fn convert_reference_to_mono(wav: &Path) -> Result<bool, String> {
     let mut reader = hound::WavReader::open(wav)
         .map_err(|e| format!("无法解码参考音频（{}）: {e}", wav.display()))?;
     let spec = reader.spec();
@@ -893,12 +978,176 @@ fn convert_reference_to_mono(wav: &Path) -> Result<bool, String> {
     match std::fs::rename(&tmp, wav) {
         Ok(()) => Ok(true),
         Err(_) => {
-            // Windows：rename 无法覆盖已存在目标，先移除再重试。
-            std::fs::remove_file(wav).map_err(|e| format!("移除原参考音频失败: {e}"))?;
-            std::fs::rename(&tmp, wav).map_err(|e| format!("替换参考音频失败: {e}"))?;
+            rename_replace(&tmp, wav)?;
             Ok(true)
         }
     }
+}
+
+/// rename 落位，Windows 上 rename 无法覆盖已存在目标 → 先移除再重试。
+///
+/// 从 `convert_reference_to_mono` 抽出，音色上传/恢复落位共用。
+fn rename_replace(from: &Path, to: &Path) -> Result<(), String> {
+    if std::fs::rename(from, to).is_ok() {
+        return Ok(());
+    }
+    std::fs::remove_file(to).map_err(|e| format!("移除旧文件失败（{}）: {e}", to.display()))?;
+    std::fs::rename(from, to).map_err(|e| format!("替换文件失败（{}）: {e}", to.display()))
+}
+
+// ===========================================================================
+// 音色上传覆盖 / 恢复作者原版（用户对自带音色不满意时替换；解析链零改动）
+// ===========================================================================
+
+/// 托管目录内音色四件套路径（reference.* 当前生效 + reference.original.* 作者备份）。
+struct CompanionVoicePaths {
+    wav: PathBuf,
+    txt: PathBuf,
+    original_wav: PathBuf,
+    original_txt: PathBuf,
+}
+
+fn voice_paths(model_dir: &Path) -> CompanionVoicePaths {
+    let voice_dir = model_dir.join(VOICE_DIR);
+    CompanionVoicePaths {
+        wav: voice_dir.join(REFERENCE_WAV),
+        txt: voice_dir.join(REFERENCE_TXT),
+        original_wav: voice_dir.join(REFERENCE_ORIGINAL_WAV),
+        original_txt: voice_dir.join(REFERENCE_ORIGINAL_TXT),
+    }
+}
+
+/// 首次覆盖前备份作者原版（逐文件独立判断，自愈半完成备份；**拷贝不 move**）：
+/// 仅当 `original.X 不存在 && reference.X 存在` 时拷贝——重复上传不覆盖备份，
+/// 备份永远保持作者原版。
+fn backup_original_voice(paths: &CompanionVoicePaths) -> Result<(), String> {
+    for (src, dst) in [
+        (&paths.wav, &paths.original_wav),
+        (&paths.txt, &paths.original_txt),
+    ] {
+        if !dst.is_file() && src.is_file() {
+            std::fs::copy(src, dst)
+                .map_err(|e| format!("备份作者原版音色失败（{}）: {e}", src.display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// 伙伴是否留有作者原版音色备份（`reference.original.*` 成对；true = 可一键恢复）。
+///
+/// 任意 format 均可（上传不限定角色包）；成对性严格判定——缺一即视为无备份，
+/// 避免「按钮亮着但恢复必失败」的半状态。毫秒级 stat，与 `has_persona` 同量级。
+pub fn has_original_voice(model: &CompanionModel) -> bool {
+    let paths = voice_paths(Path::new(&model.model_dir));
+    paths.original_wav.is_file() && paths.original_txt.is_file()
+}
+
+/// 上传自定义参考音频，覆盖托管目录内角色音色（`voice/reference.wav + reference.txt`）。
+///
+/// 首次覆盖前把作者原版备份为 `reference.original.*`（重复上传不覆盖备份）。
+/// 任意 format 均可；不写 library.json（音色是目录级资产，voice_id 绑定不受影响）。
+///
+/// 事务性：所有校验/转换先在暂存文件上完成，备份（纯拷贝）成功后才允许落位——
+/// 任何失败路径都不得破坏既有 `reference.*`。落位顺序 txt 先、wav 最后「翻面」：
+/// 两文件无法真正原子，但落位前 pair 已存在即保住「成对」不变量
+/// （`validate_character_pack` 校验成对，破对会被 sanitize 判无效）。
+/// **同步阻塞（秒级），调用方必须 spawn_blocking。**
+pub fn upload_companion_voice(
+    id: &str,
+    source_wav: &Path,
+    reference_text: &str,
+) -> Result<(), String> {
+    let text = reference_text.trim();
+    if text.is_empty() {
+        return Err("请提供参考音频的逐字转写文本".to_string());
+    }
+    let model_dir = {
+        let _g = lock();
+        let lib = load_library_inner()?;
+        lib.models
+            .iter()
+            .find(|m| m.id == id)
+            .ok_or_else(|| "未找到该伙伴".to_string())?
+            .model_dir
+            .clone()
+    };
+    let paths = voice_paths(Path::new(&model_dir));
+    std::fs::create_dir_all(Path::new(&model_dir).join(VOICE_DIR))
+        .map_err(|e| format!("创建 voice 目录失败: {e}"))?;
+
+    // 暂存文件上完成全部校验/转换（mono 改写的是暂存副本，源文件不动）。
+    let tmp_wav = paths.wav.with_extension("upload.tmp.wav");
+    let tmp_txt = paths.txt.with_extension("upload.tmp.txt");
+    let stage = (|| -> Result<(), String> {
+        std::fs::copy(source_wav, &tmp_wav).map_err(|e| format!("读取上传音频失败: {e}"))?;
+        // 早期干净报错（12 字节头），重量级解码前拦截明显不是 wav 的文件。
+        validate_wav_header(&tmp_wav)?;
+        // 立体声/高位宽/float → 16-bit 单声道（采样率原样，合成侧 normalize 归一）。
+        convert_reference_to_mono(&tmp_wav)?;
+        // 终检：hound 全量解码 = 合成链同款解码器，拦下头合法但数据坏/空的文件。
+        crate::audio::read_wav_mono(&tmp_wav)?;
+        backup_original_voice(&paths)?;
+        // 破坏性边界之上：到这里原 reference.* 一字未动。
+        std::fs::write(&tmp_txt, text).map_err(|e| format!("写入转写文本失败: {e}"))?;
+        rename_replace(&tmp_txt, &paths.txt)?;
+        rename_replace(&tmp_wav, &paths.wav)?;
+        Ok(())
+    })();
+    if let Err(e) = stage {
+        let _ = std::fs::remove_file(&tmp_wav);
+        let _ = std::fs::remove_file(&tmp_txt);
+        return Err(e);
+    }
+    tracing::info!(
+        "伙伴 {id} 音色已更新（作者原版备份状态：original.wav 存在={}）",
+        paths.original_wav.is_file()
+    );
+    Ok(())
+}
+
+/// 恢复作者原版音色：`reference.original.*` 拷回 `reference.*` 并删除备份。
+///
+/// 无备份（或不成对）→ Err；备份在恢复成功前绝不删除，中途失败可重试。
+/// `reference.wav` 被手动删除的情况天然修复（copy 不依赖目标存在）。
+pub fn restore_companion_voice(id: &str) -> Result<(), String> {
+    let model_dir = {
+        let _g = lock();
+        let lib = load_library_inner()?;
+        lib.models
+            .iter()
+            .find(|m| m.id == id)
+            .ok_or_else(|| "未找到该伙伴".to_string())?
+            .model_dir
+            .clone()
+    };
+    let paths = voice_paths(Path::new(&model_dir));
+    if !paths.original_wav.is_file() || !paths.original_txt.is_file() {
+        return Err("没有可恢复的原始音色备份".to_string());
+    }
+
+    let tmp_wav = paths.wav.with_extension("restore.tmp.wav");
+    let tmp_txt = paths.txt.with_extension("restore.tmp.txt");
+    let result = (|| -> Result<(), String> {
+        std::fs::copy(&paths.original_wav, &tmp_wav)
+            .map_err(|e| format!("读取备份音频失败: {e}"))?;
+        std::fs::copy(&paths.original_txt, &tmp_txt)
+            .map_err(|e| format!("读取备份转写失败: {e}"))?;
+        // 自检备份未被手动损坏：坏备份宁可报错也不写坏生效音色。
+        validate_wav_header(&tmp_wav)?;
+        rename_replace(&tmp_txt, &paths.txt)?;
+        rename_replace(&tmp_wav, &paths.wav)?;
+        Ok(())
+    })();
+    if let Err(e) = result {
+        let _ = std::fs::remove_file(&tmp_wav);
+        let _ = std::fs::remove_file(&tmp_txt);
+        return Err(e);
+    }
+    // 落位成功后才清备份（逐个 best-effort，NotFound 无害）。
+    let _ = std::fs::remove_file(&paths.original_wav);
+    let _ = std::fs::remove_file(&paths.original_txt);
+    tracing::info!("伙伴 {id} 已恢复作者原版音色");
+    Ok(())
 }
 
 /// 导入角色包目录：复制到托管目录（含立体声→单声道改写）并登记进伙伴库。
@@ -918,7 +1167,11 @@ pub fn import_character_from_dir(source: &Path) -> Result<(CompanionModel, bool)
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| id.clone());
-    let name = extract_character_name(&source_abs.join(CHARACTER_MD), &fallback_name);
+    // 名字解析链（A > C）：character.json.name > character.md H1 > 目录 basename。
+    let manifest = CompanionManifest::read(&source_abs)?;
+    let name = CompanionManifest::preset(&manifest.name)
+        .map(|n| truncate_name(&n))
+        .unwrap_or_else(|| extract_character_name(&source_abs.join(CHARACTER_MD), &fallback_name));
 
     // 去重预检（短锁，避免已导入时白白复制目录）。
     {
@@ -959,6 +1212,7 @@ pub fn import_character_from_dir(source: &Path) -> Result<(CompanionModel, bool)
         model_file_rel: PathBuf::from(CHARACTER_PNG),
         format: CHARACTER_FORMAT.to_string(),
         imported_at: now_rfc3339(),
+        manifest,
     })
 }
 
@@ -1063,6 +1317,83 @@ pub fn active_companion_voice() -> Option<CharacterVoice> {
     companion_voice_in(model).map(|(voice, _)| voice)
 }
 
+/// 当前 active 伙伴（任意 format；库读取失败或无 active → None）。
+///
+/// 与 `active_character_model`（仅角色包）相对；唤醒词/欢迎语不限定角色包，
+/// GIF 桌宠同样可以拥有（音色回退全局默认）。
+pub fn active_model_fast() -> Option<CompanionModel> {
+    let lib = load_library_fast()
+        .map_err(|e| {
+            tracing::warn!("读取伙伴库失败（跳过伙伴探测）: {e}");
+            e
+        })
+        .ok()?;
+    active_model(&lib).cloned()
+}
+
+/// 伙伴生效唤醒词：自定义优先，未自定义跟随当前 `name`（rename 自动跟随）。
+pub fn effective_wake_word(model: &CompanionModel) -> String {
+    model
+        .wake_word
+        .clone()
+        .unwrap_or_else(|| model.name.clone())
+}
+
+/// 伙伴生效欢迎语文本：自定义优先，未自定义按默认模板展开 name。
+pub fn effective_welcome_text(model: &CompanionModel) -> String {
+    model
+        .welcome_text
+        .clone()
+        .unwrap_or_else(|| DEFAULT_WELCOME_TEMPLATE.replace("{name}", &model.name))
+}
+
+/// active 伙伴的生效唤醒词（无 active → None）。
+pub fn active_wake_word() -> Option<String> {
+    active_model_fast().map(|m| effective_wake_word(&m))
+}
+
+/// 唤醒词解析结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WakeWordResolution {
+    /// 最终生效唤醒词（已确认可编码为 token）；`None` = 沿用 KWS 模型内置关键词。
+    pub word: Option<String>,
+    /// active 伙伴的角色级唤醒词（参与判定的原始值）；无 active 伙伴时为 None。
+    pub companion_word: Option<String>,
+    /// 角色级唤醒词能否编码为 token；`false` = 已回退 `fallback`（前端据此提示）。
+    pub companion_ok: bool,
+}
+
+/// 解析生效唤醒词：active 伙伴词 > `fallback` > None（模型内置）。
+///
+/// `fallback` 传 `resolve()` 合并后的既有唤醒词链（cli > [voice].keywords >
+/// [kws].custom_keywords），本函数在其上叠加「激活即换词」语义——active 伙伴词
+/// **压过 CLI flag**：唤醒词跟随当前角色是显式产品行为，CLI 仅在无角色或角色词
+/// 不可编码时兜底。角色词编码失败（生僻字/表情等）回退 `fallback` 并置
+/// `companion_ok = false`，由调用方告警。
+pub fn resolve_wake_word(fallback: Option<&str>, tokens: &Path) -> WakeWordResolution {
+    let Some(word) = active_wake_word() else {
+        return WakeWordResolution {
+            word: fallback.map(str::to_string),
+            companion_word: None,
+            companion_ok: true,
+        };
+    };
+    let ok = crate::kws::token::encode_custom_keywords(&word, tokens).is_ok();
+    if ok {
+        WakeWordResolution {
+            word: Some(word.clone()),
+            companion_word: Some(word),
+            companion_ok: true,
+        }
+    } else {
+        WakeWordResolution {
+            word: fallback.map(str::to_string),
+            companion_word: Some(word),
+            companion_ok: false,
+        }
+    }
+}
+
 /// 探测托管目录内的角色音色（voice/reference.wav + reference.txt 成对且非空）。
 fn character_voice_in(model_dir: &Path) -> Option<CharacterVoice> {
     let voice_dir = model_dir.join(VOICE_DIR);
@@ -1130,6 +1461,83 @@ pub fn set_voice_binding(id: &str, voice_id: Option<&str>) -> Result<CompanionLi
         lib = inner;
     }
     Ok(lib)
+}
+
+/// 设置伙伴自定义唤醒词（`None` = 恢复跟随 `name`）。
+///
+/// 只存原始字符串，不做编码校验——可编码性随 KWS 模型变化，存储侧保持宽松；
+/// 保存前的即时校验由命令层负责（用户保存时即知，而不是等下次启动会话）。
+pub fn set_wake_word(id: &str, wake_word: Option<&str>) -> Result<CompanionLibrary, String> {
+    let lib;
+    {
+        let _g = lock();
+        let mut inner = load_library_inner()?;
+        let model = inner
+            .models
+            .iter_mut()
+            .find(|m| m.id == id)
+            .ok_or_else(|| "未找到该伙伴".to_string())?;
+        model.wake_word = normalize_optional_text(wake_word, MAX_WAKE_WORD_CHARS, "唤醒词")?;
+        save_library_inner(&inner)?;
+        lib = inner;
+    }
+    Ok(lib)
+}
+
+/// 设置伙伴自定义欢迎语（`None` = 恢复默认模板）。预合成 wav 的重生成由命令层联动。
+pub fn set_welcome_text(id: &str, text: Option<&str>) -> Result<CompanionLibrary, String> {
+    let lib;
+    {
+        let _g = lock();
+        let mut inner = load_library_inner()?;
+        let model = inner
+            .models
+            .iter_mut()
+            .find(|m| m.id == id)
+            .ok_or_else(|| "未找到该伙伴".to_string())?;
+        model.welcome_text = normalize_optional_text(text, MAX_WELCOME_CHARS, "欢迎语")?;
+        save_library_inner(&inner)?;
+        lib = inner;
+    }
+    Ok(lib)
+}
+
+/// 自定义文本入库前的统一清洗：trim；空串归一为 `None`（= 恢复默认）；
+/// 超长按 chars 计数报错。欢迎语/唤醒词共用，规则与 `rename` 一致。
+fn normalize_optional_text(
+    raw: Option<&str>,
+    max_chars: usize,
+    label: &str,
+) -> Result<Option<String>, String> {
+    let Some(text) = raw else {
+        return Ok(None);
+    };
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.chars().count() > max_chars {
+        return Err(format!("{label}过长（最多 {max_chars} 个字符）"));
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
+/// 按 id 解析角色包伙伴条目（导出分享用，`companion_share::export_pack` 消费）。
+///
+/// 短锁读取（不跨重型 IO）；非角色包格式 → Err：Live2D 含版权模型且无
+/// character.md、GIF 为单文件，均无「角色包分享」语义。
+pub(crate) fn character_pack_model(id: &str) -> Result<CompanionModel, String> {
+    let _g = lock();
+    let lib = load_library_inner()?;
+    let model = lib
+        .models
+        .into_iter()
+        .find(|m| m.id == id)
+        .ok_or_else(|| "未找到该伙伴".to_string())?;
+    if !is_character(&model) {
+        return Err("仅角色包伙伴支持导出分享（Live2D 含版权模型，GIF 为单文件）".to_string());
+    }
+    Ok(model)
 }
 
 /// 清理所有指向 `voice_id` 的伙伴绑定（音色库条目被删除时由命令层联动调用）。
@@ -1952,6 +2360,8 @@ mod tests {
                     imported_at: "t".into(),
                     voice_id: None,
                     layout: None,
+                    wake_word: None,
+                    welcome_text: None,
                 }],
                 active_model_id: Some(id.to_string()),
                 completed_migrations: Vec::new(),
@@ -3085,6 +3495,443 @@ mod tests {
                 .filter(|n| n.starts_with("companion-"))
                 .collect();
             assert_eq!(dirs.len(), 1, "并发导入只能有一个正式目录: {dirs:?}");
+        });
+    }
+
+    // ==================== 唤醒词 / 欢迎语 ====================
+
+    /// 直接写一份含单个伙伴的库清单（绕过导入流程，聚焦字段语义）。
+    /// 托管目录必须通过 `validate_managed`（load_library_fast 会校正 active），
+    /// 因此 seed 同步落一份最小合法模型。
+    fn seed_library(id: &str, name: &str, wake_word: Option<&str>, welcome: Option<&str>) {
+        let model_dir = get_companions_dir().join(id);
+        make_valid_model(&model_dir, "a.model3.json");
+        let lib = CompanionLibrary {
+            schema_version: SCHEMA_VERSION,
+            models: vec![CompanionModel {
+                id: id.to_string(),
+                name: name.to_string(),
+                source_path: None,
+                model_dir: model_dir.display().to_string(),
+                model_file: model_dir.join("a.model3.json").display().to_string(),
+                format: "cubism3".into(),
+                imported_at: "t".into(),
+                voice_id: None,
+                layout: None,
+                wake_word: wake_word.map(str::to_string),
+                welcome_text: welcome.map(str::to_string),
+            }],
+            active_model_id: Some(id.to_string()),
+            completed_migrations: Vec::new(),
+        };
+        std::fs::create_dir_all(get_companions_dir()).unwrap();
+        std::fs::write(
+            get_companions_dir().join(LIBRARY_FILE),
+            serde_json::to_string_pretty(&lib).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// 写最小 KWS token 集（`n ǐ` 已 tokenized 序列可透传；不在集内的词编码失败）。
+    fn seed_tokens(dir: &Path) -> PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        let path = dir.join("tokens.txt");
+        std::fs::write(&path, "n\nǐ\nh\nǎo\nx\niǎo\nzh\nì\n").unwrap();
+        path
+    }
+
+    #[test]
+    fn test_wake_and_welcome_fields_serde_defaults() {
+        // 老 JSON（无新字段）→ 宽容默认 None，不报错。
+        let legacy = r#"{"id":"companion-x","name":"猫","model_dir":"/m","model_file":"/m/a.model3.json","format":"cubism3","imported_at":"t"}"#;
+        let m: CompanionModel = serde_json::from_str(legacy).unwrap();
+        assert_eq!(m.wake_word, None);
+        assert_eq!(m.welcome_text, None);
+
+        let full = CompanionModel {
+            id: "companion-x".into(),
+            name: "猫".into(),
+            source_path: None,
+            model_dir: "/m".into(),
+            model_file: "/m/a.model3.json".into(),
+            format: "cubism3".into(),
+            imported_at: "t".into(),
+            voice_id: None,
+            layout: None,
+            wake_word: Some("小猫".into()),
+            welcome_text: None,
+        };
+        let json = serde_json::to_string(&full).unwrap();
+        assert!(json.contains("小猫"));
+        assert!(!json.contains("welcome_text"), "None 字段不序列化");
+        let back: CompanionModel = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, full);
+    }
+
+    #[test]
+    fn test_effective_wake_word_and_welcome_text() {
+        let mut m = CompanionModel {
+            id: "companion-x".into(),
+            name: "大月下".into(),
+            source_path: None,
+            model_dir: "/m".into(),
+            model_file: "/m/a.model3.json".into(),
+            format: "cubism3".into(),
+            imported_at: "t".into(),
+            voice_id: None,
+            layout: None,
+            wake_word: None,
+            welcome_text: None,
+        };
+        // 未自定义：唤醒词跟随 name，欢迎语按模板展开。
+        assert_eq!(effective_wake_word(&m), "大月下");
+        assert_eq!(effective_welcome_text(&m), "你好，我是大月下。");
+        // rename 后未自定义的唤醒词自动跟随。
+        m.name = "新月下".into();
+        assert_eq!(effective_wake_word(&m), "新月下");
+        assert_eq!(effective_welcome_text(&m), "你好，我是新月下。");
+        // 自定义优先。
+        m.wake_word = Some("小月".into());
+        m.welcome_text = Some("嗨！".into());
+        assert_eq!(effective_wake_word(&m), "小月");
+        assert_eq!(effective_welcome_text(&m), "嗨！");
+    }
+
+    #[test]
+    fn test_set_wake_word_and_welcome_text_roundtrip() {
+        run_with_temp_home(|_home| {
+            seed_library("companion-w", "猫猫", None, None);
+            let lib = set_wake_word("companion-w", Some("  喵喵  ")).unwrap();
+            let m = lib.models.first().unwrap();
+            assert_eq!(m.wake_word.as_deref(), Some("喵喵"), "trim 后入库");
+
+            let lib = set_welcome_text("companion-w", Some("   ")).unwrap();
+            assert_eq!(
+                lib.models.first().unwrap().welcome_text,
+                None,
+                "空白串归一为 None（恢复默认）"
+            );
+            let lib = set_wake_word("companion-w", None).unwrap();
+            assert_eq!(lib.models.first().unwrap().wake_word, None);
+
+            let long: String = "字".repeat(MAX_WAKE_WORD_CHARS + 1);
+            assert!(
+                set_wake_word("companion-w", Some(&long)).is_err(),
+                "超长报错"
+            );
+            let long: String = "字".repeat(MAX_WELCOME_CHARS + 1);
+            assert!(set_welcome_text("companion-w", Some(&long)).is_err());
+            assert!(
+                set_wake_word("companion-nope", Some("x")).is_err(),
+                "未知 id 报错"
+            );
+        });
+    }
+
+    #[test]
+    fn test_resolve_wake_word_priority_and_fallback() {
+        run_with_temp_home(|home| {
+            let tokens = seed_tokens(&home.join("kws-model"));
+
+            // 无 active 伙伴 → 原样回退 fallback。
+            let r = resolve_wake_word(Some("全局词"), &tokens);
+            assert_eq!(r.word.as_deref(), Some("全局词"));
+            assert_eq!(r.companion_word, None);
+            assert!(r.companion_ok);
+
+            // active 伙伴自定义可编码唤醒词 → 压过 fallback（激活即换词语义）。
+            seed_library("companion-r", "猫猫", Some("n ǐ"), None);
+            let r = resolve_wake_word(Some("全局词"), &tokens);
+            assert_eq!(r.word.as_deref(), Some("n ǐ"));
+            assert_eq!(r.companion_word.as_deref(), Some("n ǐ"));
+            assert!(r.companion_ok);
+
+            // 角色词不可编码 → 回退 fallback 且 companion_ok = false。
+            seed_library("companion-r", "猫猫", Some("😂😂"), None);
+            let r = resolve_wake_word(Some("全局词"), &tokens);
+            assert_eq!(r.word.as_deref(), Some("全局词"));
+            assert_eq!(r.companion_word.as_deref(), Some("😂😂"));
+            assert!(!r.companion_ok);
+
+            // 未自定义 → 跟随 name；名字不可编码同样回退。
+            seed_library("companion-r", "😂", None, None);
+            let r = resolve_wake_word(Some("全局词"), &tokens);
+            assert_eq!(r.word.as_deref(), Some("全局词"));
+            assert!(!r.companion_ok);
+        });
+    }
+
+    // ==================== character.json（作者预设声明） ====================
+
+    /// 构造含 character.md/png 的源角色包目录。
+    fn make_character_source(dir: &Path, h1: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join(CHARACTER_MD), format!("# {h1}\n\n你是{h1}。\n")).unwrap();
+        std::fs::write(dir.join(CHARACTER_PNG), b"\x89PNG\r\n\x1a\n png").unwrap();
+    }
+
+    #[test]
+    fn test_manifest_preset_prefills_on_import() {
+        run_with_temp_home(|home| {
+            let src = home.join("furina");
+            make_character_source(&src, "错误的H1名字");
+            // 四字段齐备：name 优先于 H1；wake_word/welcome_text 预填进库。
+            std::fs::write(
+                src.join(CHARACTER_JSON),
+                r#"{"version":1,"name":"芙宁娜","wake_word":"水神","welcome_text":"哼~没错，就是我。"}"#,
+            )
+            .unwrap();
+
+            let (model, already) = import_character_from_dir(&src).unwrap();
+            assert!(!already);
+            assert_eq!(model.name, "芙宁娜", "manifest.name 优先于 H1");
+            assert_eq!(model.wake_word.as_deref(), Some("水神"));
+            assert_eq!(model.welcome_text.as_deref(), Some("哼~没错，就是我。"));
+        });
+    }
+
+    #[test]
+    fn test_manifest_missing_falls_back_to_h1_and_none_fields() {
+        run_with_temp_home(|home| {
+            let src = home.join("大月下");
+            make_character_source(&src, "大月下");
+            let (model, _) = import_character_from_dir(&src).unwrap();
+            // 无 character.json → 照旧走 H1 推导，预设字段为 None。
+            assert_eq!(model.name, "大月下");
+            assert_eq!(model.wake_word, None);
+            assert_eq!(model.welcome_text, None);
+        });
+    }
+
+    #[test]
+    fn test_manifest_blank_fields_are_none_and_garbage_fails_import() {
+        run_with_temp_home(|home| {
+            // 空白字段 → 预填归 None（不产生"空唤醒词"）。
+            let src = home.join("blank");
+            make_character_source(&src, "空白字段");
+            std::fs::write(
+                src.join(CHARACTER_JSON),
+                r#"{"version":1,"name":"  ","wake_word":"   ","welcome_text":""}"#,
+            )
+            .unwrap();
+            let (model, _) = import_character_from_dir(&src).unwrap();
+            // name 空白 → 回退 H1。
+            assert_eq!(model.name, "空白字段");
+            assert_eq!(model.wake_word, None);
+            assert_eq!(model.welcome_text, None);
+
+            // 损坏声明 → 导入报错（不静默忽略，让作者修格式）。
+            let bad = home.join("bad");
+            make_character_source(&bad, "坏声明");
+            std::fs::write(bad.join(CHARACTER_JSON), "{not json").unwrap();
+            assert!(import_character_from_dir(&bad).is_err());
+        });
+    }
+
+    #[test]
+    fn test_validate_character_pack_manifest_optional_but_strict() {
+        run_with_temp_home(|home| {
+            let dir = home.join("pack");
+            make_character_source(&dir, "猫");
+            // 合法声明通过。
+            std::fs::write(dir.join(CHARACTER_JSON), r#"{"version":1,"name":"猫"}"#).unwrap();
+            assert!(validate_character_pack(&dir).is_ok());
+            // 缺失通过（存量角色包兼容）。
+            std::fs::remove_file(dir.join(CHARACTER_JSON)).unwrap();
+            assert!(validate_character_pack(&dir).is_ok());
+            // 损坏报错。
+            std::fs::write(dir.join(CHARACTER_JSON), "[]").unwrap();
+            assert!(validate_character_pack(&dir).is_err());
+        });
+    }
+
+    // ==================== 音色上传覆盖 / 恢复 ====================
+
+    /// 构造「带自带音色」的角色包并导入（返回导入的伙伴 id）。
+    fn import_pack_with_voice(home: &Path, name: &str) -> String {
+        let src = home.join(name);
+        make_character_source(&src, name);
+        std::fs::create_dir_all(src.join(VOICE_DIR)).unwrap();
+        make_wav(&src.join(VOICE_DIR).join(REFERENCE_WAV), 1, 16_000, 160);
+        std::fs::write(src.join(VOICE_DIR).join(REFERENCE_TXT), "作者原版转写").unwrap();
+        import_character_from_dir(&src).unwrap().0.id
+    }
+
+    #[test]
+    fn test_upload_voice_overrides_and_backs_up_original() {
+        run_with_temp_home(|home| {
+            let id = import_pack_with_voice(home, "芙宁娜");
+            let model = load_library_fast().unwrap();
+            let model = model.models.into_iter().find(|m| m.id == id).unwrap();
+            let paths = voice_paths(Path::new(&model.model_dir));
+            let original_wav = std::fs::read(&paths.wav).unwrap();
+            let original_txt = std::fs::read_to_string(&paths.txt).unwrap();
+            assert!(!has_original_voice(&model));
+
+            // 上传新音色（立体声 → 应被转 mono）。
+            let up = home.join("custom.wav");
+            make_wav(&up, 2, 44_100, 2);
+            upload_companion_voice(&id, &up, "自定义转写").unwrap();
+
+            // 生效音色切换 + 作者原版完整备份。
+            assert_eq!(std::fs::read_to_string(&paths.txt).unwrap(), "自定义转写");
+            assert_ne!(std::fs::read(&paths.wav).unwrap(), original_wav);
+            assert_eq!(std::fs::read(&paths.original_wav).unwrap(), original_wav);
+            assert_eq!(
+                std::fs::read_to_string(&paths.original_txt).unwrap(),
+                original_txt
+            );
+            assert!(has_original_voice(&model));
+            // 立体声已转单声道。
+            let spec = hound::WavReader::open(&paths.wav).unwrap().spec();
+            assert_eq!(spec.channels, 1);
+            // 解析链命中 Pack（零改动验证）。
+            let (voice, source) = companion_voice_in(&model).unwrap();
+            assert_eq!(voice.text, "自定义转写");
+            assert_eq!(source, CompanionVoiceSource::Pack);
+            // 上传残留在托管目录的 tmp 已清理。
+            assert!(!paths.wav.with_extension("upload.tmp.wav").exists());
+        });
+    }
+
+    #[test]
+    fn test_upload_voice_repeated_keeps_first_backup() {
+        run_with_temp_home(|home| {
+            let id = import_pack_with_voice(home, "芙宁娜");
+            let up1 = home.join("a.wav");
+            make_wav(&up1, 1, 16_000, 160);
+            upload_companion_voice(&id, &up1, "第一次").unwrap();
+            let model = load_library_fast().unwrap();
+            let model = model.models.into_iter().find(|m| m.id == id).unwrap();
+            let paths = voice_paths(Path::new(&model.model_dir));
+            let backup = std::fs::read(&paths.original_wav).unwrap();
+
+            let up2 = home.join("b.wav");
+            make_wav(&up2, 1, 16_000, 160);
+            upload_companion_voice(&id, &up2, "第二次").unwrap();
+            // 备份仍是作者原版（不是第一次上传的版本）。
+            assert_eq!(std::fs::read(&paths.original_wav).unwrap(), backup);
+            assert_eq!(
+                std::fs::read_to_string(&paths.original_txt).unwrap(),
+                "作者原版转写"
+            );
+            // 生效的是第二次上传。
+            assert_eq!(std::fs::read_to_string(&paths.txt).unwrap(), "第二次");
+        });
+    }
+
+    #[test]
+    fn test_upload_voice_without_existing_voice_creates_pack_voice() {
+        run_with_temp_home(|home| {
+            // 角色包不带 voice/（或 GIF/Live2D）→ 首传不建备份，直接生成 voice/。
+            let src = home.join("novoice");
+            make_character_source(&src, "无声角色");
+            let id = import_character_from_dir(&src).unwrap().0.id;
+            let model = load_library_fast().unwrap();
+            let model = model.models.into_iter().find(|m| m.id == id).unwrap();
+            assert!(companion_voice_in(&model).is_none());
+
+            let up = home.join("new.wav");
+            make_wav(&up, 1, 16_000, 160);
+            upload_companion_voice(&id, &up, "首次上传").unwrap();
+            let model = load_library_fast().unwrap();
+            let model = model.models.into_iter().find(|m| m.id == id).unwrap();
+            let (voice, source) = companion_voice_in(&model).unwrap();
+            assert_eq!(voice.text, "首次上传");
+            assert_eq!(source, CompanionVoiceSource::Pack);
+            assert!(!has_original_voice(&model), "无原版可备份");
+        });
+    }
+
+    #[test]
+    fn test_upload_voice_rejects_corrupt_and_empty_and_unknown() {
+        run_with_temp_home(|home| {
+            let id = import_pack_with_voice(home, "芙宁娜");
+            let model = load_library_fast().unwrap();
+            let model = model.models.into_iter().find(|m| m.id == id).unwrap();
+            let paths = voice_paths(Path::new(&model.model_dir));
+            let wav_before = std::fs::read(&paths.wav).unwrap();
+
+            // 损坏 wav → Err，原文件完好且无备份产生。
+            let bad = home.join("bad.wav");
+            std::fs::write(&bad, b"RIFFxxxxWAVEjunk").unwrap();
+            assert!(upload_companion_voice(&id, &bad, "转写").is_err());
+            assert_eq!(std::fs::read(&paths.wav).unwrap(), wav_before);
+            assert!(!paths.original_wav.exists());
+
+            // 空转写 → Err。
+            let ok = home.join("ok.wav");
+            make_wav(&ok, 1, 16_000, 160);
+            assert!(upload_companion_voice(&id, &ok, "   ").is_err());
+            // 未知 id → Err。
+            assert!(upload_companion_voice("companion-nope", &ok, "转写").is_err());
+            assert_eq!(std::fs::read(&paths.wav).unwrap(), wav_before);
+        });
+    }
+
+    #[test]
+    fn test_restore_voice_roundtrip_and_edge_cases() {
+        run_with_temp_home(|home| {
+            let id = import_pack_with_voice(home, "芙宁娜");
+            // 无备份时恢复 → Err。
+            assert!(restore_companion_voice(&id).is_err());
+
+            let model = load_library_fast().unwrap();
+            let model = model.models.into_iter().find(|m| m.id == id).unwrap();
+            let paths = voice_paths(Path::new(&model.model_dir));
+            let author_wav = std::fs::read(&paths.wav).unwrap();
+            let author_txt = std::fs::read_to_string(&paths.txt).unwrap();
+
+            let up = home.join("custom.wav");
+            make_wav(&up, 1, 16_000, 160);
+            upload_companion_voice(&id, &up, "自定义").unwrap();
+
+            // 恢复 → 与作者原版字节一致、备份删除、flag false。
+            restore_companion_voice(&id).unwrap();
+            assert_eq!(std::fs::read(&paths.wav).unwrap(), author_wav);
+            assert_eq!(std::fs::read_to_string(&paths.txt).unwrap(), author_txt);
+            assert!(!paths.original_wav.exists());
+            assert!(!paths.original_txt.exists());
+            let model = load_library_fast().unwrap();
+            let model = model.models.into_iter().find(|m| m.id == id).unwrap();
+            assert!(!has_original_voice(&model));
+            assert!(
+                restore_companion_voice(&id).is_err(),
+                "备份已删不可重复恢复"
+            );
+
+            // 手动删生效 wav 后恢复（若有备份）可修复——再造一次覆盖后手动删。
+            upload_companion_voice(&id, &up, "再覆盖").unwrap();
+            std::fs::remove_file(&paths.wav).unwrap();
+            restore_companion_voice(&id).unwrap();
+            assert_eq!(std::fs::read(&paths.wav).unwrap(), author_wav);
+        });
+    }
+
+    #[test]
+    fn test_upload_voice_invalidates_welcome_fingerprint() {
+        run_with_temp_home(|home| {
+            let id = import_pack_with_voice(home, "芙宁娜");
+            crate::companion::set_active(&id).unwrap(); // 当前生效音色（角色自带）参与指纹。
+            let fingerprint = || {
+                let mut cfg = crate::voice::config::resolve(
+                    None,
+                    &crate::voice::config::CliOverrides::default(),
+                )
+                .unwrap();
+                crate::voice::config::apply_companion_overrides(&mut cfg);
+                crate::companion_welcome::clip_fingerprint(&cfg)
+            };
+            let fp_before = fingerprint();
+            let up = home.join("custom.wav");
+            // 帧数与原版不同（len 必变）：mtime 秒级精度下同秒替换也可能撞指纹。
+            make_wav(&up, 1, 16_000, 320);
+            upload_companion_voice(&id, &up, "新转写").unwrap();
+            let fp_after = fingerprint();
+            assert_ne!(
+                fp_before, fp_after,
+                "音色改写必须使欢迎语指纹失效（自动重生成链）"
+            );
         });
     }
 }

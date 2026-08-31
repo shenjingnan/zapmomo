@@ -145,7 +145,11 @@ pub fn encode_custom_keywords(input: &str, tokens_path: &Path) -> Result<String,
 }
 
 /// 编码单个关键词。
-fn encode_keyword(
+/// 编码单个关键词。
+///
+/// `pub`：宿主 crate（zapmomo-app）视图层的伙伴唤醒词可编码性校验
+/// （wake_word_ok）复用 `load_token_set` + 本函数，避免整串重复编码。
+pub fn encode_keyword(
     raw: &str,
     tokens: &HashSet<String>,
     en_phone_path: &Path,

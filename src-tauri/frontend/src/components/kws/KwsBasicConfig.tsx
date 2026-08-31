@@ -142,6 +142,13 @@ export function KwsBasicConfig({ onTestOpen, onSwitchOpen }: KwsBasicConfigProps
             <dt className="text-sm text-text-primary">自定义唤醒词</dt>
             <dd className="mt-0.5 text-xs text-text-muted">
               提供后将仅监听这些关键词（会话级），留空使用模型内置关键词。
+              {config?.active_wake_word != null && (
+                <>
+                  当前唤醒词由伙伴「接管」（
+                  {config.active_wake_word}
+                  ），此处的词仅在无伙伴接管时生效。
+                </>
+              )}
             </dd>
           </div>
           <Input
