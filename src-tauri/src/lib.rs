@@ -36,7 +36,7 @@ use zapmomo::companion_click_through::{
 use zapmomo::companion_sprites::SpriteEvent;
 use zapmomo::config::settings::{
     self, AsrSettings, BubbleSettings, ChatboxSettings, CompanionDragMode, CompanionWindowLayer,
-    CompanionWindowPosition, KwsSettings, Live2dSettings, LlmSettings, TtsSettings,
+    CompanionWindowPosition, KwsSettings, Live2dSettings, LlmSettings, TtsSettings, VoiceSettings,
 };
 use zapmomo::datetime::iso_timestamp_now;
 use zapmomo::kws::{KwsResult, Reaction, ReactionOutcome};
@@ -2694,6 +2694,49 @@ fn is_voice_session_running(state: State<'_, VoiceSessionState>) -> bool {
     state.is_running()
 }
 
+/// 读取语音会话持久化启用态（`[voice].enabled`，缺省 true），供「模型与能力」页开关回显。
+#[tauri::command]
+fn get_voice_enabled() -> Result<bool, String> {
+    let settings = settings::load_settings()?;
+    Ok(settings
+        .as_ref()
+        .and_then(|s| s.voice.as_ref())
+        .and_then(|v| v.enabled)
+        .unwrap_or(true))
+}
+
+/// 启用/停用语音会话：持久化 `[voice].enabled`（决定下次启动是否自动进入待唤醒）
+/// 并立即生效（启用→启动会话，停用→停止会话）。
+///
+/// 两侧均幂等：已在运行时再启用只持久化不重复启动；未运行时停用只持久化。
+/// 启动失败（如缺模型/前置能力未启用）错误向调用方传播，持久化保持 on——
+/// 修复前置后重新开关或重启应用即可（与启动自动拉起的「静默降级」同语义）。
+#[tauri::command]
+fn set_voice_enabled(
+    app: AppHandle,
+    state: State<'_, VoiceSessionState>,
+    enabled: bool,
+) -> Result<(), String> {
+    tracing::info!("set_voice_enabled 命令被调用: enabled={enabled}");
+    let mut settings = settings::load_settings()?.unwrap_or_default();
+    settings
+        .voice
+        .get_or_insert_with(VoiceSettings::default)
+        .enabled = Some(enabled);
+    settings::save_settings(&settings)?;
+    if enabled {
+        if state.is_running() {
+            return Ok(());
+        }
+        start_voice_session_impl(app, state.inner())
+    } else {
+        if !state.is_running() {
+            return Ok(());
+        }
+        stop_voice_session_inner(state.inner())
+    }
+}
+
 /// 发送文字消息（输入条窗口）：经 mpsc 送进会话编排循环，与 ASR 最终文本等价
 /// 走 LLM → TTS → 落盘的完整对话链路。会话未运行时拒绝（不隐式启动/开麦克风）。
 #[tauri::command]
@@ -2706,7 +2749,7 @@ fn send_voice_text(state: State<'_, VoiceSessionState>, text: String) -> Result<
         .lock()
         .expect("voice text_tx lock poisoned")
         .clone()
-        .ok_or("语音互动未运行：请先在「对话记录」页开启语音互动，再发送文字消息".to_string())?;
+        .ok_or("语音互动未运行：请先在「模型与能力」页启用「语音会话」后再发文字".to_string())?;
     tx.send(text).map_err(|_| "语音会话已停止".to_string())
 }
 
@@ -6899,6 +6942,8 @@ pub fn run() {
             start_voice_session,
             stop_voice_session,
             is_voice_session_running,
+            get_voice_enabled,
+            set_voice_enabled,
             send_voice_text,
             get_dsh_config,
             set_dsh_enabled,

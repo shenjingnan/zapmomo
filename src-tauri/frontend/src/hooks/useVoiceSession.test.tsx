@@ -30,6 +30,7 @@ function Probe() {
     <div>
       <span data-testid="running">{String(voice.running)}</span>
       <span data-testid="phase">{voice.phase}</span>
+      <span data-testid="enabled">{String(voice.enabled)}</span>
       <span data-testid="partial">{voice.partial}</span>
       <span data-testid="reply">{voice.pendingReply}</span>
       <span data-testid="turnUserText">{voice.turnUserText}</span>
@@ -37,11 +38,11 @@ function Probe() {
       <span data-testid="current">{voice.currentSentence ?? ""}</span>
       <span data-testid="records">{voice.records.map((r) => `${r.role}:${r.text}`).join("|")}</span>
       <span data-testid="error">{voice.error ?? ""}</span>
-      <button type="button" data-testid="start" onClick={() => void voice.start()}>
-        start
+      <button type="button" data-testid="enable" onClick={() => void voice.setEnabled(true)}>
+        enable
       </button>
-      <button type="button" data-testid="stop" onClick={() => void voice.stop()}>
-        stop
+      <button type="button" data-testid="disable" onClick={() => void voice.setEnabled(false)}>
+        disable
       </button>
       <button type="button" data-testid="clear" onClick={() => void voice.clearRecords()}>
         clear
@@ -56,8 +57,9 @@ beforeEach(() => {
 });
 
 describe("useVoiceSession", () => {
-  it("回读后端运行态、载入持久化记录，事件驱动状态", async () => {
-    // 顺序：is_voice_session_running → get_conversation_records
+  it("回读后端运行态与持久化启用态、载入持久化记录，事件驱动状态", async () => {
+    // 顺序：is_voice_session_running → get_voice_enabled → get_conversation_records
+    invokeMock.mockResolvedValueOnce(true);
     invokeMock.mockResolvedValueOnce(true);
     invokeMock.mockResolvedValueOnce([
       { role: "user", text: "昨天的你好", at: "2026-08-18T10:00:00" },
@@ -65,6 +67,7 @@ describe("useVoiceSession", () => {
     ]);
     render(<Probe />);
     await waitFor(() => expect(screen.getByTestId("running").textContent).toBe("true"));
+    await waitFor(() => expect(screen.getByTestId("enabled").textContent).toBe("true"));
     await waitFor(() =>
       expect(screen.getByTestId("records").textContent).toBe("user:昨天的你好|assistant:你好呀"),
     );
@@ -159,18 +162,36 @@ describe("useVoiceSession", () => {
     expect(screen.getByTestId("error").textContent).toBe("缺模型");
   });
 
-  it("start/stop 调用对应 command", async () => {
+  it("setEnabled 调用 set_voice_enabled（持久化 + 启停原子），乐观更新本地 enabled", async () => {
     const user = userEvent.setup();
     render(<Probe />);
-    await user.click(screen.getByTestId("start"));
-    expect(invokeMock).toHaveBeenCalledWith("start_voice_session");
+    expect(screen.getByTestId("enabled").textContent).toBe("true");
 
-    await user.click(screen.getByTestId("stop"));
-    expect(invokeMock).toHaveBeenCalledWith("stop_voice_session");
+    await user.click(screen.getByTestId("disable"));
+    expect(invokeMock).toHaveBeenCalledWith("set_voice_enabled", { enabled: false });
+    await waitFor(() => expect(screen.getByTestId("enabled").textContent).toBe("false"));
+
+    await user.click(screen.getByTestId("enable"));
+    expect(invokeMock).toHaveBeenCalledWith("set_voice_enabled", { enabled: true });
+    await waitFor(() => expect(screen.getByTestId("enabled").textContent).toBe("true"));
+  });
+
+  it("setEnabled 失败：透出错误并回读后端权威态校正开关", async () => {
+    const user = userEvent.setup();
+    render(<Probe />);
+    // set_voice_enabled 拒绝，紧随其后的 get_voice_enabled 回读返回 false
+    invokeMock.mockRejectedValueOnce(new Error("缺模型"));
+    invokeMock.mockResolvedValueOnce(false);
+
+    await user.click(screen.getByTestId("disable"));
+
+    await waitFor(() => expect(screen.getByTestId("error").textContent).toContain("缺模型"));
+    await waitFor(() => expect(screen.getByTestId("enabled").textContent).toBe("false"));
   });
 
   it("clearRecords 调用命令并清空记录", async () => {
     invokeMock.mockResolvedValueOnce(false);
+    invokeMock.mockResolvedValueOnce(true);
     invokeMock.mockResolvedValueOnce([{ role: "user", text: "你好", at: "2026-08-19T10:00:00" }]);
     const user = userEvent.setup();
     render(<Probe />);

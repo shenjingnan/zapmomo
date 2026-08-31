@@ -134,6 +134,23 @@ function makeSpeaker(o?: { error?: string | null; modelPresent?: boolean; enable
   };
 }
 
+function makeVoice(o?: {
+  enabled?: boolean;
+  running?: boolean;
+  phase?: string;
+  error?: string | null;
+  pending?: boolean;
+}) {
+  return {
+    running: o?.running ?? false,
+    phase: o?.phase ?? "idle",
+    enabled: o?.enabled ?? true,
+    error: o?.error ?? null,
+    pending: o?.pending ?? false,
+    setEnabled: vi.fn(),
+  };
+}
+
 function makeRuntime(
   overrides?: Partial<{
     kws: ReturnType<typeof makeKws>;
@@ -141,6 +158,7 @@ function makeRuntime(
     llm: ReturnType<typeof makeLlm>;
     tts: ReturnType<typeof makeTts>;
     speaker: ReturnType<typeof makeSpeaker>;
+    voice: ReturnType<typeof makeVoice>;
   }>,
 ): RuntimeState {
   return {
@@ -149,6 +167,7 @@ function makeRuntime(
     llm: overrides?.llm ?? makeLlm(),
     tts: overrides?.tts ?? makeTts(),
     speaker: overrides?.speaker ?? makeSpeaker(),
+    voice: overrides?.voice ?? makeVoice(),
     device: null,
     sessionKeywords: null,
   } as unknown as RuntimeState;
@@ -156,6 +175,7 @@ function makeRuntime(
 
 /** 各摘要行的 aria-label（SummaryRow 用 aria-label=`配置${row.name}`）。 */
 const ROW_NAME = {
+  voice: "配置语音会话",
   kws: "配置唤醒词（KWS）",
   asr: "配置语音识别（ASR）",
   llm: "配置AI 大脑（LLM）",
@@ -278,6 +298,36 @@ describe("ModelSummary 模型摘要状态", () => {
     expectRowStatus(rowFor("tts"), "已关闭");
   });
 
+  it("语音会话：待唤醒（running + armed）→ 待唤醒", () => {
+    state.runtime = makeRuntime({ voice: makeVoice({ running: true, phase: "armed" }) });
+    renderSummary();
+    expectRowStatus(rowFor("voice"), "待唤醒", "text-emerald-600");
+  });
+
+  it("语音会话：running 但阶段仍 idle → 启动中", () => {
+    state.runtime = makeRuntime({ voice: makeVoice({ running: true, phase: "idle" }) });
+    renderSummary();
+    expectRowStatus(rowFor("voice"), "启动中", "text-blue-600");
+  });
+
+  it("语音会话：启用但未运行 → 已启用", () => {
+    state.runtime = makeRuntime({ voice: makeVoice({ enabled: true }) });
+    renderSummary();
+    expectRowStatus(rowFor("voice"), "已启用", "text-emerald-600");
+  });
+
+  it("语音会话：未启用 → 未开启", () => {
+    state.runtime = makeRuntime({ voice: makeVoice({ enabled: false }) });
+    renderSummary();
+    expectRowStatus(rowFor("voice"), "未开启", "text-text-muted");
+  });
+
+  it("语音会话：出错 → 错误", () => {
+    state.runtime = makeRuntime({ voice: makeVoice({ error: "缺模型" }) });
+    renderSummary();
+    expectRowStatus(rowFor("voice"), "错误", "text-red-600");
+  });
+
   it("默认全未配置：五行状态均显示未配置模型", () => {
     renderSummary();
     // 每行模型名 `<p>` 也是「未配置模型」，这里只统计状态 span（5 行各 1 个）。
@@ -350,5 +400,67 @@ describe("ModelSummary 摘要行开关", () => {
     await user.click(screen.getByRole("switch", { name: "语音合成（TTS）开关" }));
 
     expect(tts.setEnabled).toHaveBeenCalledWith(false);
+  });
+
+  it("语音会话：开启 → 调用 setEnabled(true)", async () => {
+    const user = userEvent.setup();
+    const voice = makeVoice({ enabled: false });
+    // 开关前置：KWS/ASR 需已启用，否则置灰点不动
+    state.runtime = makeRuntime({
+      kws: makeKws({ modelsPresent: true, enabled: true }),
+      asr: makeAsr({ modelsPresent: true, enabled: true }),
+      voice,
+    });
+    renderSummary();
+
+    await user.click(screen.getByRole("switch", { name: "语音会话开关" }));
+
+    expect(voice.setEnabled).toHaveBeenCalledWith(true);
+  });
+
+  it("语音会话：关闭 → 调用 setEnabled(false)", async () => {
+    const user = userEvent.setup();
+    const voice = makeVoice({ enabled: true });
+    state.runtime = makeRuntime({
+      kws: makeKws({ modelsPresent: true, enabled: true }),
+      asr: makeAsr({ modelsPresent: true, enabled: true }),
+      voice,
+    });
+    renderSummary();
+
+    await user.click(screen.getByRole("switch", { name: "语音会话开关" }));
+
+    expect(voice.setEnabled).toHaveBeenCalledWith(false);
+  });
+
+  it("语音会话：KWS 未启用时开关置灰（前置缺失）", () => {
+    state.runtime = makeRuntime({
+      kws: makeKws({ modelsPresent: true, enabled: false }),
+      voice: makeVoice({ enabled: false }),
+    });
+    renderSummary();
+
+    expect(screen.getByRole("switch", { name: "语音会话开关" })).toBeDisabled();
+  });
+
+  it("语音会话：ASR 未启用时开关置灰（前置缺失）", () => {
+    state.runtime = makeRuntime({
+      asr: makeAsr({ modelsPresent: true, enabled: false }),
+      voice: makeVoice({ enabled: false }),
+    });
+    renderSummary();
+
+    expect(screen.getByRole("switch", { name: "语音会话开关" })).toBeDisabled();
+  });
+
+  it("语音会话：前置齐全但启停在途时开关置灰（pending）", () => {
+    state.runtime = makeRuntime({
+      kws: makeKws({ modelsPresent: true, enabled: true }),
+      asr: makeAsr({ modelsPresent: true, enabled: true }),
+      voice: makeVoice({ pending: true }),
+    });
+    renderSummary();
+
+    expect(screen.getByRole("switch", { name: "语音会话开关" })).toBeDisabled();
   });
 });

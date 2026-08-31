@@ -57,12 +57,15 @@ let kwsListening = false;
 let llmConfig: typeof LLM_CONFIG;
 /** 模拟后端拒绝卸载 LLM（如语音会话占用），null = 卸载成功。 */
 let llmUnloadReject: string | null = null;
+/** 模拟后端持久化的语音会话启用态（get/set_voice_enabled）。 */
+let voiceEnabled = true;
 
 const ASR_CONFIG = {
   model_dir: "/home/user/.zapmomo/models/sherpa-onnx-streaming-zipformer",
   provider: "cpu",
   num_threads: 4,
   sample_rate: 16000,
+  enabled: false,
   models_present: false,
   punctuation_present: false,
   model_downloading: false,
@@ -128,6 +131,7 @@ beforeEach(() => {
   mic = "";
   devices = ["内置麦克风", "USB 麦克风"];
   kwsListening = false;
+  voiceEnabled = true;
 
   invokeMock.mockImplementation(
     (
@@ -214,6 +218,11 @@ beforeEach(() => {
         case "stop_listen":
         case "download_kws_model":
           return Promise.resolve(undefined);
+        case "get_voice_enabled":
+          return Promise.resolve(voiceEnabled);
+        case "set_voice_enabled":
+          voiceEnabled = args?.enabled ?? false;
+          return Promise.resolve(undefined);
         default:
           return Promise.resolve(undefined);
       }
@@ -278,9 +287,24 @@ describe("App（KWS 控制面板）", () => {
     });
   });
 
+  it("概览页语音会话开关调用 set_voice_enabled（持久化启用态）", async () => {
+    // 开关前置：KWS/ASR 需已启用，否则语音会话开关置灰点不动
+    kwsConfig = { ...DEFAULT_CONFIG, enabled: true, models_present: true };
+    asrConfig = { ...ASR_CONFIG, enabled: true, models_present: true };
+    const user = userEvent.setup();
+    renderApp("/models");
+
+    // 默认 voiceEnabled=true，点击即停用
+    await user.click(await screen.findByRole("switch", { name: "语音会话开关" }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("set_voice_enabled", { enabled: false });
+    });
+  });
+
   it("LLM 卸载失败：右上角通知展示真实原因（如语音会话占用）", async () => {
     llmConfig = { ...llmConfigured(llmConfig), ready: true };
-    llmUnloadReject = "语音会话正在使用 LLM。请先在「对话记录」页停止会话后再卸载。";
+    llmUnloadReject = "语音会话正在使用 LLM。请先在「模型与能力」页停止会话后再卸载。";
     const user = userEvent.setup();
     renderApp("/models");
 
@@ -289,7 +313,7 @@ describe("App（KWS 控制面板）", () => {
 
     // 真实错误经右上角 Toast 透出（而非仅红色「错误」）
     expect(
-      await screen.findByText("语音会话正在使用 LLM。请先在「对话记录」页停止会话后再卸载。"),
+      await screen.findByText("语音会话正在使用 LLM。请先在「模型与能力」页停止会话后再卸载。"),
     ).toBeInTheDocument();
   });
 

@@ -8,6 +8,7 @@ const { state } = vi.hoisted(() => {
   const makeVoice = (over: Partial<VoiceSessionState> = {}): VoiceSessionState => ({
     running: false,
     phase: "idle",
+    enabled: true,
     partial: "",
     records: [],
     pendingReply: "",
@@ -18,8 +19,7 @@ const { state } = vi.hoisted(() => {
     currentSentence: null,
     error: null,
     pending: false,
-    start: vi.fn().mockResolvedValue(undefined),
-    stop: vi.fn().mockResolvedValue(undefined),
+    setEnabled: vi.fn().mockResolvedValue(undefined),
     clearRecords: vi.fn().mockResolvedValue(undefined),
     ...over,
   });
@@ -43,11 +43,20 @@ describe("ChatPage", () => {
     expect(screen.getByText(/待唤醒中，喊唤醒词开始对话/)).toBeTruthy();
   });
 
-  it("未启动显示空态与「未启动」徽标", () => {
-    state.voice = { ...state.voice, running: false, phase: "idle" };
+  it("未启动显示空态与「未启动」徽标（enabled 时提示未在运行）", () => {
+    state.voice = { ...state.voice, running: false, phase: "idle", enabled: true };
     render(<ChatPage />);
     expect(screen.getByText("未启动")).toBeTruthy();
-    expect(screen.getByText(/打开开关后/)).toBeTruthy();
+    expect(screen.getByText("语音互动未在运行")).toBeTruthy();
+  });
+
+  it("未启用时空态引导到「模型与能力」页开关", () => {
+    state.voice = { ...state.voice, running: false, phase: "idle", enabled: false };
+    render(<ChatPage />);
+    expect(screen.getByText("未启动")).toBeTruthy();
+    expect(
+      screen.getByText(/语音互动未开启：到「模型与能力」页打开「语音会话」开关后开始对话/),
+    ).toBeTruthy();
   });
 
   it("渲染记录气泡与实时字幕", () => {
@@ -90,20 +99,6 @@ describe("ChatPage", () => {
     render(<ChatPage />);
     expect(screen.getByText("今天天气不错。")).toBeTruthy();
     expect(screen.getByText(/正在播报：今天天气不错。/)).toBeTruthy();
-  });
-
-  it("开关关闭时调用 stop", async () => {
-    state.voice = { ...state.voice, running: true, phase: "armed" };
-    render(<ChatPage />);
-    await userEvent.click(screen.getByRole("switch"));
-    expect(state.voice.stop).toHaveBeenCalled();
-  });
-
-  it("开关打开时调用 start", async () => {
-    state.voice = { ...state.voice, running: false, phase: "idle" };
-    render(<ChatPage />);
-    await userEvent.click(screen.getByRole("switch"));
-    expect(state.voice.start).toHaveBeenCalled();
   });
 
   it("无记录时清空按钮禁用", () => {

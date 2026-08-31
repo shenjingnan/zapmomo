@@ -20,6 +20,8 @@ const MAX_RECORDS = 200;
 export interface VoiceSessionState {
   running: boolean;
   phase: VoiceSessionPhase;
+  /** 持久化启用态（`[voice].enabled`，决定启动是否自动进入待唤醒） */
+  enabled: boolean;
   /** ASR 实时字幕（部分结果） */
   partial: string;
   /** 已持久化的对话记录（时间正序：旧的在上、新的在下） */
@@ -36,16 +38,16 @@ export interface VoiceSessionState {
   /** 正在播报的句子 */
   currentSentence: string | null;
   error: string | null;
-  /** start/stop 在途标志 */
+  /** 启停/启用在途标志 */
   pending: boolean;
-  start: () => Promise<void>;
-  stop: () => Promise<void>;
+  /** 启用/停用：持久化 `[voice].enabled` 并立即启停会话（「模型与能力」页开关入口） */
+  setEnabled: (enabled: boolean) => Promise<void>;
   clearRecords: () => Promise<void>;
 }
 
 /**
- * 语音会话状态管理：初始化回读后端运行态 + 载入持久化对话记录，订阅 `voice-session-*`
- * 事件驱动。桌宠窗口（无 RuntimeContext）与设置窗口共用。
+ * 语音会话状态管理：初始化回读后端运行态与持久化启用态 + 载入持久化对话记录，
+ * 订阅 `voice-session-*` 事件驱动。桌宠窗口（无 RuntimeContext）与设置窗口共用。
  *
  * 记录流：用户最终句（`transcript` is_final）与桌宠完整回复（`reply-finished` 携带 text）
  * 均提交进 `records`；后端在事件转发层同步落盘，前端仅做展示与本地累积。
@@ -54,6 +56,7 @@ export interface VoiceSessionState {
 export function useVoiceSession(): VoiceSessionState {
   const [running, setRunning] = useState(false);
   const [phase, setPhase] = useState<VoiceSessionPhase>("idle");
+  const [enabled, setEnabledState] = useState(true);
   const [partial, setPartial] = useState("");
   const [records, setRecords] = useState<ConversationRecord[]>([]);
   const [pendingReply, setPendingReply] = useState("");
@@ -70,6 +73,11 @@ export function useVoiceSession(): VoiceSessionState {
     api
       .isVoiceSessionRunning()
       .then(setRunning)
+      .catch(() => {});
+    // 回读持久化启用态（缺省 true；mock 环境返回 undefined 时同样兜底）
+    api
+      .getVoiceEnabled()
+      .then((v) => setEnabledState(v ?? true))
       .catch(() => {});
     // 载入持久化的对话记录（跨应用重启保留）
     api
@@ -137,33 +145,28 @@ export function useVoiceSession(): VoiceSessionState {
     };
   }, []);
 
-  const start = useCallback(async () => {
+  const setEnabled = useCallback(async (on: boolean) => {
     setPending(true);
-    setError(null);
-    // 新一轮开始前清空上一轮的流式展示（记录保留，跨轮持续累积）
-    setPendingReply("");
-    setReplyDone(false);
-    setQueuedSentences([]);
-    setCurrentSentence(null);
-    setPartial("");
-    try {
-      await api.startVoiceSession();
-      setRunning(true);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setPending(false);
+    if (on) {
+      setError(null);
+      // 新一轮开始前清空上一轮的流式展示（记录保留，跨轮持续累积）
+      setPendingReply("");
+      setReplyDone(false);
+      setQueuedSentences([]);
+      setCurrentSentence(null);
+      setPartial("");
     }
-  }, []);
-
-  const stop = useCallback(async () => {
-    setPending(true);
+    // 乐观置本地；后端持久化 + 启停原子完成，running/phase 变化经事件回流
+    setEnabledState(on);
     try {
-      await api.stopVoiceSession();
-      setRunning(false);
-      setPhase("idle");
+      await api.setVoiceEnabled({ enabled: on });
     } catch (e) {
       setError(String(e));
+      // 持久化可能已成功而启停失败（或整体失败）：回读后端权威态校正开关
+      await api
+        .getVoiceEnabled()
+        .then((v) => setEnabledState(v ?? true))
+        .catch(() => {});
     } finally {
       setPending(false);
     }
@@ -181,6 +184,7 @@ export function useVoiceSession(): VoiceSessionState {
   return {
     running,
     phase,
+    enabled,
     partial,
     records,
     pendingReply,
@@ -191,8 +195,7 @@ export function useVoiceSession(): VoiceSessionState {
     currentSentence,
     error,
     pending,
-    start,
-    stop,
+    setEnabled,
     clearRecords,
   };
 }
