@@ -94,8 +94,6 @@ let library: CompanionLibraryView;
 let importSeq: number;
 /** open_companion_dir mock 的可变失败注入（null = 成功）。 */
 let openDirError: string | null;
-/** 可变音色库快照（模拟 list_voice_library / set_companion_voice 绑定校验语义）。 */
-let voiceLibrary: { id: string; name: string }[];
 /** get_tts_config 返回的 TTS 模型类型（非克隆族提示分支测试用）。 */
 let ttsModelType: string;
 
@@ -111,7 +109,6 @@ beforeEach(() => {
   library = { models: [], active_model_id: null };
   importSeq = 0;
   openDirError = null;
-  voiceLibrary = [{ id: "custom-voice-1", name: "我的声音" }];
   ttsModelType = "zipvoice";
 
   invokeMock.mockImplementation(
@@ -121,15 +118,12 @@ beforeEach(() => {
         source?: string;
         id?: string;
         name?: string;
-        voiceId?: string | null;
         dest?: string;
       },
     ) => {
       switch (cmd) {
         case "list_companions":
           return Promise.resolve(library);
-        case "list_voice_library":
-          return Promise.resolve(voiceLibrary);
         case "get_tts_config":
           return Promise.resolve({
             model_type: ttsModelType,
@@ -143,28 +137,6 @@ beforeEach(() => {
             num_steps: 4,
             speed: 1.0,
           });
-        case "set_companion_voice": {
-          const vid = args?.voiceId ?? null;
-          // 与后端 set_voice_binding 一致：绑不存在的音色报错
-          if (vid != null && !voiceLibrary.some((v) => v.id === vid)) {
-            return Promise.reject(`未找到音色: ${vid}`);
-          }
-          library = {
-            ...library,
-            models: library.models.map((m) => {
-              if (m.id !== args?.id) return m;
-              const bound = vid != null;
-              // 简化：绑定即生效（voice_source = library）；解绑回退 null
-              return {
-                ...m,
-                voice_id: vid,
-                voice_source: bound ? "library" : null,
-                has_voice: bound,
-              };
-            }),
-          };
-          return Promise.resolve(library);
-        }
         case "get_live2d_config":
           return Promise.resolve({
             model_dir: null,
@@ -248,6 +220,8 @@ beforeEach(() => {
         }
         case "transcribe_reference_audio":
           return Promise.resolve("自动转写的文本");
+        case "preview_companion_voice":
+          return Promise.resolve("/zap/.zapmomo/companions/x/voice/reference.wav");
         case "upload_companion_voice": {
           library = {
             models: library.models.map((m) =>
@@ -734,61 +708,6 @@ describe("CompanionPage 伙伴模型管理器", () => {
     expect(item).not.toHaveTextContent("音色");
   });
 
-  it("音色绑定：选择音色库条目后调用 set_companion_voice，载荷键为 camelCase voiceId", async () => {
-    library = { models: [MODEL_A], active_model_id: MODEL_A.id };
-    const user = userEvent.setup();
-    renderPage();
-
-    await screen.findByRole("button", { name: /大月下.*使用中/ });
-    // 打开音色下拉并选择音色库条目。
-    await user.click(await screen.findByRole("combobox", { name: "伙伴音色" }));
-    await user.click(await screen.findByRole("option", { name: "我的声音" }));
-    await waitFor(() => {
-      // 载荷键名钉死 camelCase：写成 voice_id 会被后端静默丢参（编译期不报错）。
-      expect(invokeMock).toHaveBeenCalledWith("set_companion_voice", {
-        id: MODEL_A.id,
-        voiceId: "custom-voice-1",
-      });
-    });
-    // 绑定生效后列表项显示音色徽标。
-    const item = screen.getByTestId(`companion-item-${MODEL_A.id}`);
-    await waitFor(() => {
-      expect(item).toHaveTextContent("音色");
-    });
-  });
-
-  it("音色解绑：选择「使用全局默认」时 voiceId 传 null", async () => {
-    const bound = {
-      ...MODEL_A,
-      voice_id: "custom-voice-1",
-      voice_source: "library" as const,
-      has_voice: true,
-    };
-    library = { models: [bound], active_model_id: bound.id };
-    const user = userEvent.setup();
-    renderPage();
-
-    await screen.findByRole("button", { name: /大月下.*使用中/ });
-    await user.click(await screen.findByRole("combobox", { name: "伙伴音色" }));
-    await user.click(await screen.findByRole("option", { name: "使用全局默认" }));
-    await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("set_companion_voice", {
-        id: bound.id,
-        voiceId: null,
-      });
-    });
-  });
-
-  it("绑定失效：列表显示「音色已失效」徽标，详情区提示回退全局默认", async () => {
-    const stale = { ...MODEL_A, voice_id: "custom-gone", voice_source: null, has_voice: false };
-    library = { models: [stale], active_model_id: stale.id };
-    renderPage();
-
-    const item = await screen.findByTestId(`companion-item-${stale.id}`);
-    expect(item).toHaveTextContent("音色已失效");
-    expect(await screen.findByText(/绑定的音色已被删除/)).toBeInTheDocument();
-  });
-
   it("角色包自带音色：下拉显示优先级说明（自带优先生效）", async () => {
     const furina: CompanionModelInfo = {
       ...model("companion-furina", "芙宁娜"),
@@ -800,23 +719,9 @@ describe("CompanionPage 伙伴模型管理器", () => {
     renderPage();
 
     await screen.findByAltText("芙宁娜");
-    expect(await screen.findByText(/角色包自带的音色优先生效/)).toBeInTheDocument();
-  });
-
-  it("非克隆 TTS 模型：已绑定时提示切换模型后生效", async () => {
-    ttsModelType = "kitten";
-    // 绑定本身有效（has_voice=true，解析不依赖 TTS 模型），仅提示克隆语义不生效
-    const bound = {
-      ...MODEL_A,
-      voice_id: "custom-voice-1",
-      voice_source: "library" as const,
-      has_voice: true,
-    };
-    library = { models: [bound], active_model_id: bound.id };
-    renderPage();
-
-    await screen.findByRole("button", { name: /大月下.*使用中/ });
-    expect(await screen.findByText(/当前 TTS 模型不支持音色克隆/)).toBeInTheDocument();
+    // 有生效音色 → 渲染播放条（audio controls）并解析音色路径；
+    // 默认状态不再显示「角色默认音色」字样（状态文字为空）。
+    expect(await screen.findByLabelText("音色播放条")).toBeInTheDocument();
   });
 
   it("唤醒词/欢迎语：placeholder 取生效值，异常态显示回退与生成中提示", async () => {
@@ -870,16 +775,14 @@ describe("CompanionPage 伙伴模型管理器", () => {
   it("音色试听：有生效音色可用，点击调用 preview_companion_voice", async () => {
     const m: CompanionModelInfo = { ...MODEL_A, has_voice: true, voice_source: "pack" };
     library = { models: [m], active_model_id: m.id };
-    const user = userEvent.setup();
     renderPage();
 
     await screen.findByRole("button", { name: /大月下.*使用中/ });
-    const previewBtn = screen.getByRole("button", { name: "试听音色" });
-    expect(previewBtn).toBeEnabled();
-    await user.click(previewBtn);
+    // 选中后自动解析生效音色并渲染播放条（不再需要点按钮）。
     await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith("preview_companion_voice", { id: m.id });
     });
+    expect(await screen.findByLabelText("音色播放条")).toBeInTheDocument();
   });
 
   it("音色试听：无生效音色时禁用", async () => {
@@ -890,7 +793,7 @@ describe("CompanionPage 伙伴模型管理器", () => {
     renderPage();
 
     await screen.findByRole("button", { name: /大月下.*使用中/ });
-    expect(screen.getByRole("button", { name: "试听音色" })).toBeDisabled();
+    expect(screen.queryByLabelText("音色播放条")).not.toBeInTheDocument();
   });
 
   it("导出按钮：仅角色包可用，Live2D 行禁用并提示", async () => {
@@ -973,7 +876,7 @@ describe("CompanionPage 伙伴模型管理器", () => {
 
     await screen.findByRole("button", { name: /大月下.*使用中/ });
     // 无备份时不显示恢复按钮；点上传打开对话框。
-    expect(screen.queryByRole("button", { name: "恢复角色自带音色" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "恢复默认" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "上传音色" }));
     expect(screen.getByText("上传伙伴音色")).toBeInTheDocument();
 
@@ -1008,7 +911,7 @@ describe("CompanionPage 伙伴模型管理器", () => {
     renderPage();
 
     await screen.findByRole("button", { name: /大月下.*使用中/ });
-    await user.click(screen.getByRole("button", { name: "恢复角色自带音色" }));
+    await user.click(screen.getByRole("button", { name: "恢复默认" }));
     expect(screen.getAllByText("恢复角色自带音色").length).toBeGreaterThan(0);
     await user.click(screen.getByRole("button", { name: "恢复" }));
     await waitFor(() => {

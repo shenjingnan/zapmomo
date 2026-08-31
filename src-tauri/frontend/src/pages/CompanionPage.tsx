@@ -1,6 +1,7 @@
 import { open, save } from "@tauri-apps/plugin-dialog";
 import {
   CircleAlert,
+  CircleHelp,
   FileArchive,
   FolderOpen,
   Image as ImageIcon,
@@ -9,9 +10,7 @@ import {
   Sparkles,
   Star,
   Trash2,
-  Undo2,
   Upload,
-  Volume2,
 } from "lucide-react";
 import {
   type MouseEvent as ReactMouseEvent,
@@ -32,20 +31,13 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Slider } from "@/components/ui/slider";
-import { useToast } from "@/components/ui/toast";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useCompanionLibrary } from "@/hooks/useCompanionLibrary";
 import { isCharacterFormat, isStaticImageFormat } from "@/lib/companionFormat";
 import { api, toAssetUrl } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
-import type { CompanionModelInfo, TtsVoice } from "@/types/tauri";
+import type { CompanionModelInfo } from "@/types/tauri";
 
 /**
  * 把 Live2D 渲染画布截取为缩小的 PNG 字节数组（供保存为封面）。
@@ -425,7 +417,6 @@ export function CompanionPage() {
     restoreVoice,
     setActive,
     rename,
-    setVoice,
     setWakeWord,
     setWelcomeText,
     remove,
@@ -588,30 +579,30 @@ export function CompanionPage() {
   /** 正在导出的伙伴 id（按钮转 spinner 并禁用，防重复点击）。 */
   const [exportingId, setExportingId] = useState<string | null>(null);
 
-  // 音色试听：播放生效音色的参考音频（与合成同一条三级解析链），asset:// 播放。
-  const toast = useToast();
-  const voiceAudioRef = useRef<HTMLAudioElement>(null);
-  const [previewingVoice, setPreviewingVoice] = useState(false);
-  const handlePreviewVoice = useCallback(async () => {
-    const audio = voiceAudioRef.current;
-    if (!audio) return;
-    if (previewingVoice) {
-      audio.pause();
-      audio.currentTime = 0;
-      setPreviewingVoice(false);
+  // 音色播放条：解析生效音色参考音频（与合成同一条三级解析链），asset:// 播放。
+  // voiceTick 在上传/恢复成功后 +1：wav 路径不变（同一路径被覆盖），靠 query 触发重载。
+  const [voiceSrc, setVoiceSrc] = useState<string | null>(null);
+  const [voiceTick, setVoiceTick] = useState(0);
+  const selectedHasVoice = selected?.has_voice ?? false;
+  useEffect(() => {
+    if (!selectedId || !selectedHasVoice) {
+      setVoiceSrc(null);
       return;
     }
-    if (!selected) return;
-    try {
-      const wav = await api.previewCompanionVoice({ id: selected.id });
-      if (!wav) return;
-      audio.src = toAssetUrl(wav);
-      await audio.play();
-      setPreviewingVoice(true);
-    } catch (e) {
-      toast.error(`试听失败：${String(e)}`);
-    }
-  }, [previewingVoice, selected, toast]);
+    let cancelled = false;
+    api
+      .previewCompanionVoice({ id: selectedId })
+      .then((wav) => {
+        if (cancelled) return;
+        setVoiceSrc(wav ? `${toAssetUrl(wav)}?v=${voiceTick}` : null);
+      })
+      .catch(() => {
+        if (!cancelled) setVoiceSrc(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedId, selectedHasVoice, voiceTick]);
   const handleExportPack = useCallback(
     async (target: CompanionModelInfo) => {
       const dest = await save({
@@ -659,28 +650,14 @@ export function CompanionPage() {
   // 静态图像伙伴（GIF/角色包立绘）不走 PIXI 预览（无 canvas/动作目录），单独 img 分支。
   const showStage = !!selected?.valid && !isGif && previewSize.width > 0 && previewSize.height > 0;
 
-  // 音色绑定：音色库条目（模型无关全量）+ 当前 TTS 模型类型（非克隆族提示用）。
-  // 绑定是持久化元数据，与当前模型无关，故非克隆模型下不禁用，仅提示。
-  const [voiceLibrary, setVoiceLibrary] = useState<TtsVoice[]>([]);
+  // 当前 TTS 模型类型：非克隆族（如 kitten）不支持参考音频克隆，上传按钮禁用。
   const [ttsModelType, setTtsModelType] = useState("");
   useEffect(() => {
-    void api
-      .listVoiceLibrary()
-      .then(setVoiceLibrary)
-      .catch(() => {});
     void api
       .getTtsConfig()
       .then((c) => setTtsModelType(c.model_type))
       .catch(() => {});
   }, []);
-  const handleVoiceChange = useCallback(
-    (value: string) => {
-      if (!selected) return;
-      const voiceName = voiceLibrary.find((v) => v.id === value)?.name;
-      void setVoice(selected.id, value === "" ? null : value, voiceName);
-    },
-    [selected, setVoice, voiceLibrary],
-  );
 
   return (
     <div className="flex h-full flex-col gap-4">
@@ -797,82 +774,64 @@ export function CompanionPage() {
                     />
                     <span className="w-10 shrink-0 text-right tabular-nums">{opacityPercent}%</span>
                   </div>
+                  {/* 音色：label+说明 与 播放条/上传/恢复 单行并排（flex）。
+                      无音色时播放条位置显示状态文字。 */}
                   <div className="flex w-full items-center gap-2">
-                    <span className="w-20 shrink-0">音色</span>
-                    <Select value={selected.voice_id ?? ""} onValueChange={handleVoiceChange}>
-                      <SelectTrigger aria-label="伙伴音色" className="h-8 min-w-0 flex-1">
-                        <SelectValue placeholder="使用全局默认" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="">使用全局默认</SelectItem>
-                        {selected.voice_source === "pack" && (
-                          <SelectItem value="__pack_voice__" disabled>
-                            角色包自带音色（优先生效）
-                          </SelectItem>
-                        )}
-                        {voiceLibrary.map((v) => (
-                          <SelectItem key={v.id} value={v.id}>
-                            {v.name}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                    <button
-                      type="button"
-                      aria-label={previewingVoice ? "停止试听" : "试听音色"}
-                      title={
-                        selected.has_voice
-                          ? previewingVoice
-                            ? "停止试听"
-                            : "播放生效音色的参考音频"
-                          : "该伙伴暂无生效音色（使用全局默认）"
-                      }
-                      disabled={!selected.has_voice}
-                      onClick={() => void handlePreviewVoice()}
-                      className="shrink-0 rounded p-1.5 text-muted-foreground transition-colors hover:bg-muted/60 hover:text-text-primary disabled:pointer-events-none disabled:opacity-30"
-                    >
-                      {previewingVoice ? (
-                        <span className="block h-3.5 w-3.5 animate-pulse rounded-full bg-current" />
-                      ) : (
-                        <Volume2 className="h-3.5 w-3.5" />
-                      )}
-                    </button>
-                    <button
-                      type="button"
-                      aria-label="上传音色"
-                      title="上传自定义音色（覆盖当前生效音色，作者原版自动备份）"
-                      onClick={() => setVoiceUploadTarget(selected)}
-                      className="shrink-0 rounded p-1.5 text-muted-foreground transition-colors hover:bg-muted/60 hover:text-text-primary"
-                    >
-                      <Upload className="h-3.5 w-3.5" />
-                    </button>
+                    <span className="flex w-20 shrink-0 items-center gap-1">
+                      音色
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <span className="cursor-help text-muted-foreground" aria-label="音色说明">
+                            <CircleHelp className="h-3.5 w-3.5" />
+                          </span>
+                        </TooltipTrigger>
+                        <TooltipContent className="max-w-72 text-balance">
+                          播放条播放当前生效音色；「上传音色」用自己的声音覆盖（角色默认音色自动备份，
+                          可恢复）；分享角色包时会带上当前生效的音色。
+                        </TooltipContent>
+                      </Tooltip>
+                    </span>
+                    {selected.has_voice && voiceSrc ? (
+                      <audio
+                        controls
+                        src={voiceSrc}
+                        className="h-8 min-w-0 flex-1"
+                        aria-label="音色播放条"
+                      />
+                    ) : (
+                      <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+                        {!selected.has_voice && "未设置（合成用全局默认音色）"}
+                        {selected.has_voice &&
+                          selected.has_original_voice &&
+                          "自定义音色（原音色已备份）"}
+                      </span>
+                    )}
                     {selected.has_original_voice && (
-                      <button
-                        type="button"
-                        aria-label="恢复角色自带音色"
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-8 shrink-0"
                         title="恢复作者原版音色（丢弃当前上传的版本）"
                         onClick={() => setRestoreVoiceTarget(selected)}
-                        className="shrink-0 rounded p-1.5 text-muted-foreground transition-colors hover:bg-muted/60 hover:text-text-primary"
                       >
-                        <Undo2 className="h-3.5 w-3.5" />
-                      </button>
+                        恢复默认
+                      </Button>
                     )}
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-8 shrink-0"
+                      title={
+                        isCloneTtsKind(ttsModelType)
+                          ? "上传自定义音色（覆盖当前生效音色，角色默认音色自动备份）"
+                          : "当前 TTS 模型不支持音色克隆，无法上传自定义音色"
+                      }
+                      disabled={!isCloneTtsKind(ttsModelType)}
+                      onClick={() => setVoiceUploadTarget(selected)}
+                    >
+                      上传音色
+                    </Button>
                   </div>
-                  {selected.voice_id != null && !selected.has_voice ? (
-                    <p className="text-xs text-destructive">
-                      绑定的音色已被删除，该伙伴已回退全局默认音色。
-                    </p>
-                  ) : selected.voice_source === "pack" ? (
-                    <p className="text-xs text-muted-foreground">
-                      {selected.has_original_voice
-                        ? "当前音色为自定义版本，作者原版已备份可恢复；分享角色包会带上当前生效的音色。"
-                        : "角色包自带的音色优先生效；点「上传音色」可用自己的声音覆盖，作者原版自动备份。"}
-                    </p>
-                  ) : !isCloneTtsKind(ttsModelType) && selected.voice_id != null ? (
-                    <p className="text-xs text-muted-foreground">
-                      当前 TTS 模型不支持音色克隆，绑定将在切换到克隆模型后生效。
-                    </p>
-                  ) : null}
                   {/* 唤醒词/欢迎语：受控草稿 + 显式保存——保存会重启语音会话，
                       不做失焦自动提交，避免误触发；输入文字用正文色
                       （容器继承 text-muted-foreground，需显式覆盖）。 */}
@@ -1046,9 +1005,11 @@ export function CompanionPage() {
         open={voiceUploadTarget != null}
         companion={voiceUploadTarget}
         onClose={() => setVoiceUploadTarget(null)}
-        onSubmit={(wavPath, referenceText) =>
-          uploadVoice(voiceUploadTarget?.id ?? "", wavPath, referenceText)
-        }
+        onSubmit={async (wavPath, referenceText) => {
+          const ok = await uploadVoice(voiceUploadTarget?.id ?? "", wavPath, referenceText);
+          if (ok) setVoiceTick((t) => t + 1); // wav 路径不变内容已换，触发播放条重载
+          return ok;
+        }}
       />
 
       {/* 恢复角色自带音色确认（不可逆：丢弃当前上传的版本） */}
@@ -1065,7 +1026,9 @@ export function CompanionPage() {
             <Button
               size="sm"
               onClick={() => {
-                if (restoreVoiceTarget) void restoreVoice(restoreVoiceTarget.id);
+                if (restoreVoiceTarget) {
+                  void restoreVoice(restoreVoiceTarget.id).then(() => setVoiceTick((t) => t + 1));
+                }
                 setRestoreVoiceTarget(null);
               }}
             >
@@ -1086,9 +1049,7 @@ export function CompanionPage() {
           </div>
         )}
       </ModelDialog>
-      {/* 音色试听播放器（隐藏；播完复位按钮态）。 */}
-      {/* biome-ignore lint/a11y/useMediaCaption: 隐藏的功能性播放器（试听参考音频），无可感知的媒体内容 */}
-      <audio ref={voiceAudioRef} className="hidden" onEnded={() => setPreviewingVoice(false)} />
+      {/* 音色播放条已内嵌详情区（controls 自带播放/进度），此处不再有隐藏播放器。 */}
     </div>
   );
 }

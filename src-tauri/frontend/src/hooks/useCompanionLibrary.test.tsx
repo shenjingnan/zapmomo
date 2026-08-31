@@ -4,7 +4,6 @@ import { ToastProvider } from "@/components/ui/toast";
 import type { CompanionLibraryView } from "@/types/tauri";
 import { useCompanionLibrary } from "./useCompanionLibrary";
 
-type SetVoice = (id: string, voiceId: string | null, voiceName?: string) => Promise<void>;
 type SetWakeWord = (id: string, wakeWord: string | null) => Promise<void>;
 type SetWelcomeText = (id: string, text: string | null) => Promise<void>;
 
@@ -40,16 +39,13 @@ function listCallCount(): number {
 const library: CompanionLibraryView = { models: [], active_model_id: null };
 
 function Probe({
-  onSetVoice,
   onSetWakeWord,
   onSetWelcomeText,
 }: {
-  onSetVoice?: (setVoice: SetVoice) => void;
   onSetWakeWord?: (fn: SetWakeWord) => void;
   onSetWelcomeText?: (fn: SetWelcomeText) => void;
 }) {
-  const { loading, setVoice, setWakeWord, setWelcomeText } = useCompanionLibrary();
-  onSetVoice?.(setVoice);
+  const { loading, setWakeWord, setWelcomeText } = useCompanionLibrary();
   onSetWakeWord?.(setWakeWord);
   onSetWelcomeText?.(setWelcomeText);
   return <span data-testid="loading">{String(loading)}</span>;
@@ -89,74 +85,6 @@ describe("useCompanionLibrary", () => {
     await new Promise((r) => setTimeout(r, 0));
     emit("live2d-model-changed", {});
     await new Promise((r) => setTimeout(r, 0));
-    expect(listCallCount()).toBe(1);
-  });
-
-  it("setVoice 绑定：调用 set_companion_voice 并以返回视图更新库", async () => {
-    let captured: SetVoice | undefined;
-    const updated: CompanionLibraryView = { models: [], active_model_id: null };
-    invokeMock.mockImplementation((cmd: string) => {
-      if (cmd === "list_companions") return Promise.resolve(library);
-      if (cmd === "set_companion_voice") return Promise.resolve(updated);
-      return Promise.resolve(undefined);
-    });
-    render(
-      <ToastProvider>
-        <Probe onSetVoice={(fn) => (captured = fn)} />
-      </ToastProvider>,
-    );
-    await waitFor(() => expect(listCallCount()).toBe(1));
-
-    await act(async () => {
-      await captured?.("companion-a", "custom-1", "我的声音");
-    });
-    // 载荷键名钉死 camelCase（voice_id 会被后端静默丢参）。
-    expect(invokeMock).toHaveBeenCalledWith("set_companion_voice", {
-      id: "companion-a",
-      voiceId: "custom-1",
-    });
-  });
-
-  it("setVoice 解绑：voiceId 传 null", async () => {
-    let captured: SetVoice | undefined;
-    render(
-      <ToastProvider>
-        <Probe onSetVoice={(fn) => (captured = fn)} />
-      </ToastProvider>,
-    );
-    await waitFor(() => expect(listCallCount()).toBe(1));
-
-    await act(async () => {
-      await captured?.("companion-a", null);
-    });
-    expect(invokeMock).toHaveBeenCalledWith("set_companion_voice", {
-      id: "companion-a",
-      voiceId: null,
-    });
-  });
-
-  it("setVoice 失败：toast 报错且不更新库", async () => {
-    let captured: SetVoice | undefined;
-    invokeMock.mockImplementation((cmd: string) => {
-      if (cmd === "list_companions") return Promise.resolve(library);
-      if (cmd === "set_companion_voice") return Promise.reject("未找到音色: custom-nope");
-      return Promise.resolve(undefined);
-    });
-    render(
-      <ToastProvider>
-        <Probe onSetVoice={(fn) => (captured = fn)} />
-      </ToastProvider>,
-    );
-    await waitFor(() => expect(listCallCount()).toBe(1));
-
-    await act(async () => {
-      await captured?.("companion-a", "custom-nope");
-    });
-    expect(invokeMock).toHaveBeenCalledWith("set_companion_voice", {
-      id: "companion-a",
-      voiceId: "custom-nope",
-    });
-    // 失败路径不刷新库（list_companions 仍只有挂载那一次）。
     expect(listCallCount()).toBe(1);
   });
 
