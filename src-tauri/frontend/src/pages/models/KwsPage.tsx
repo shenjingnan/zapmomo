@@ -6,11 +6,9 @@ import { KwsBasicConfig } from "@/components/kws/KwsBasicConfig";
 import { KwsModelDialog } from "@/components/kws/KwsModelDialog";
 import { KwsRunControl } from "@/components/kws/KwsRunControl";
 import { KwsTechnicalInfo } from "@/components/kws/KwsTechnicalInfo";
-import { KwsTestDialog } from "@/components/kws/KwsTestDialog";
 
 /** 唤醒词（KWS）配置页：标题行含监听开关 + 基础配置 + 模型信息 + 高级参数。 */
 export function KwsPage() {
-  const [testOpen, setTestOpen] = useState(false);
   const [switchOpen, setSwitchOpen] = useState(false);
 
   return (
@@ -30,16 +28,12 @@ export function KwsPage() {
         <KwsRunControl />
       </header>
 
-      <KwsBasicConfig
-        onTestOpen={() => setTestOpen(true)}
-        onSwitchOpen={() => setSwitchOpen(true)}
-      />
+      <KwsBasicConfig onSwitchOpen={() => setSwitchOpen(true)} />
 
       <KwsTechnicalInfo />
 
       <KwsAdvancedParams />
 
-      <KwsTestDialog open={testOpen} onClose={() => setTestOpen(false)} />
       <KwsModelDialog open={switchOpen} onClose={() => setSwitchOpen(false)} />
     </div>
   );

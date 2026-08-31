@@ -1,4 +1,4 @@
-import { BellRing, CircleAlert, Download, FolderOpen, Repeat2, Settings2 } from "lucide-react";
+import { CircleAlert, Download, FolderOpen, Repeat2, Settings2 } from "lucide-react";
 import { useState } from "react";
 import { DeviceSelect } from "@/components/DeviceSelect";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -9,7 +9,6 @@ import { useRuntime } from "@/providers/RuntimeContext";
 import { isDefaultKwsModelDir, modelNameFromDir } from "./kwsMeta";
 
 interface KwsBasicConfigProps {
-  onTestOpen: () => void;
   /** 打开「选择唤醒词模型」弹窗（由 KwsPage 持有弹窗状态） */
   onSwitchOpen: () => void;
 }
@@ -17,13 +16,13 @@ interface KwsBasicConfigProps {
 /**
  * 基础配置（macOS 设置行）：
  * 当前模型（名称 + 就绪/未下载 Badge + 切换模型 + 可展开完整路径）/ 麦克风来源 +
- * 底部「下载模型 / 选择模型 / 测试唤醒词」操作按钮。
+ * 底部「下载模型 / 选择模型」操作按钮。
  *
- * 全局自定义唤醒词输入已移除：唤醒词由伙伴在「伙伴」页按角色设置
- * （角色词压过全局词，见 `companion::resolve_wake_word`）；`[kws].custom_keywords`
- * 保留为无伙伴接管时的回退（存量配置继续生效，仅无 UI 入口）。
+ * 全局自定义唤醒词输入与「测试唤醒词」入口已移除：唤醒词由伙伴在「伙伴」页
+ * 按角色设置并在该处测试（角色词压过全局词，见 `companion::resolve_wake_word`）；
+ * `[kws].custom_keywords` 保留为无伙伴接管时的回退（存量配置继续生效，仅无 UI 入口）。
  */
-export function KwsBasicConfig({ onTestOpen, onSwitchOpen }: KwsBasicConfigProps) {
+export function KwsBasicConfig({ onSwitchOpen }: KwsBasicConfigProps) {
   const {
     kws,
     devices: { error: devicesError },
@@ -162,15 +161,6 @@ export function KwsBasicConfig({ onTestOpen, onSwitchOpen }: KwsBasicConfigProps
               选择模型
             </Button>
           ))}
-        <Button
-          variant="secondary"
-          className="shadow-none"
-          disabled={!modelsPresent}
-          onClick={onTestOpen}
-        >
-          <BellRing className="h-4 w-4" />
-          测试唤醒词
-        </Button>
       </div>
 
       {progress && (

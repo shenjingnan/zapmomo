@@ -209,7 +209,7 @@ beforeEach(() => {
 });
 
 describe("KwsPage（唤醒词配置）", () => {
-  it("未下载模型：开关禁用、状态「未启用」、显示模型名与「未下载」Badge、测试禁用", async () => {
+  it("未下载模型：开关禁用、状态「未启用」、显示模型名与「未下载」Badge", async () => {
     renderKwsPage();
     expect(await screen.findByText("唤醒词（KWS）配置")).toBeInTheDocument();
     expect(screen.getByText("sherpa-onnx-kws-zipformer-zh-en-3M")).toBeInTheDocument();
@@ -220,7 +220,6 @@ describe("KwsPage（唤醒词配置）", () => {
     expect(runSwitch).toBeDisabled();
     expect(runSwitch).toHaveAttribute("aria-checked", "false");
     expect(screen.getByRole("button", { name: "下载模型" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "测试唤醒词" })).toBeDisabled();
   });
 
   it("模型就绪：状态「未启用」、显示「已就绪」Badge、开关可用、无下载按钮", async () => {
@@ -230,7 +229,6 @@ describe("KwsPage（唤醒词配置）", () => {
     expect(screen.getByText("已就绪")).toBeInTheDocument();
     expect(screen.getByRole("switch", { name: "唤醒词监听开关" })).toBeEnabled();
     expect(screen.queryByRole("button", { name: "下载模型" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "测试唤醒词" })).toBeEnabled();
   });
 
   it("顶部开关 ON 携带麦克风调用 start_listen 并持久化 enabled", async () => {
@@ -335,88 +333,6 @@ describe("KwsPage（唤醒词配置）", () => {
     await waitFor(() => {
       const calls = invokeMock.mock.calls.filter((c) => c[0] === "list_devices");
       expect(calls.length).toBeGreaterThanOrEqual(2);
-    });
-  });
-
-  it("测试对话框：打开自动开始监听、结果实时追加、关闭自动停止", async () => {
-    kwsConfig = { ...kwsConfig, models_present: true };
-    const user = userEvent.setup();
-    renderKwsPage();
-
-    await user.click(await screen.findByRole("button", { name: /测试唤醒词/ }));
-    expect(screen.getByRole("dialog")).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "测试唤醒词" })).toBeInTheDocument();
-
-    // 打开即自动开始监听
-    await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("start_listen", { device: null, keywords: null });
-    });
-    expect(await screen.findByText("正在监听")).toBeInTheDocument();
-
-    act(() => {
-      listeners.get("kws-detected")?.({
-        payload: {
-          keyword: "闪电娘",
-          tokens: "",
-          tokens_arr: [],
-          timestamps: [],
-          start_time: 0.64,
-          json: "{}",
-        },
-      });
-    });
-    expect(await screen.findByText("“闪电娘”")).toBeInTheDocument();
-
-    // 关闭自动停止（本对话框发起）
-    await user.keyboard("{Escape}");
-    await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("stop_listen");
-    });
-  });
-
-  it("打开前已在监听：测试对话框显示「正在监听」且不重复 start、关闭不停止", async () => {
-    kwsConfig = { ...kwsConfig, models_present: true };
-    const user = userEvent.setup();
-    renderKwsPage();
-    await screen.findByText("未启用");
-
-    // 顶部开关开启监听
-    await user.click(screen.getByRole("switch", { name: "唤醒词监听开关" }));
-    await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("start_listen", { device: null, keywords: null });
-    });
-    invokeMock.mockClear();
-
-    // 打开对话框：正在监听，且不重复 start（已在监听，自动 start 跳过）
-    await user.click(screen.getByRole("button", { name: /测试唤醒词/ }));
-    expect(await screen.findByText("正在监听")).toBeInTheDocument();
-    expect(invokeMock).not.toHaveBeenCalledWith("start_listen", expect.anything());
-
-    // 关闭对话框：绝不停止（监听由顶部开关发起）
-    await user.keyboard("{Escape}");
-    await waitFor(() => {
-      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    });
-    expect(invokeMock).not.toHaveBeenCalledWith("stop_listen");
-  });
-
-  it("对话框打开自动启动的监听：关闭时自动停止（startedByDialog）", async () => {
-    kwsConfig = { ...kwsConfig, models_present: true };
-    const user = userEvent.setup();
-    renderKwsPage();
-
-    await user.click(await screen.findByRole("button", { name: /测试唤醒词/ }));
-    await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("start_listen", { device: null, keywords: null });
-    });
-
-    await user.keyboard("{Escape}");
-
-    await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("stop_listen");
-    });
-    await waitFor(() => {
-      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     });
   });
 

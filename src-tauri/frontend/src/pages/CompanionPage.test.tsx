@@ -6,8 +6,8 @@ import type { CompanionLibraryView, CompanionModelInfo } from "@/types/tauri";
 import { CompanionPage } from "./CompanionPage";
 
 type StageCatalog = import("@/components/live2d/previewManager").Live2dCatalog;
-const { invokeMock, openMock, saveMock, stageHandleMock, stageState, configState } = vi.hoisted(
-  () => ({
+const { invokeMock, openMock, saveMock, stageHandleMock, stageState, configState, runtimeState } =
+  vi.hoisted(() => ({
     invokeMock: vi.fn(),
     openMock: vi.fn(),
     saveMock: vi.fn(),
@@ -22,8 +22,11 @@ const { invokeMock, openMock, saveMock, stageHandleMock, stageState, configState
     configState: {
       windowScale: 1.0,
     },
-  }),
-);
+    /** 测试伙伴唤醒词弹窗的 KWS 运行时切片（仅对话框打开时被消费）。 */
+    runtimeState: {
+      startArgs: [] as Array<[string | null, string | null]>,
+    },
+  }));
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: invokeMock,
@@ -36,6 +39,27 @@ vi.mock("@tauri-apps/api/event", () => ({
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: openMock,
   save: saveMock,
+}));
+
+// 测试唤醒词弹窗（打开才挂载）读取 KWS 运行时；伙伴页本体不依赖该上下文。
+vi.mock("@/providers/RuntimeContext", () => ({
+  useRuntime: () => ({
+    kws: {
+      listening: {
+        isListening: false,
+        pending: false,
+        error: null,
+        start: (device: string | null, keywords: string | null) => {
+          runtimeState.startArgs.push([device, keywords]);
+          return Promise.resolve();
+        },
+        stop: () => Promise.resolve(),
+      },
+      results: [],
+    },
+    device: null,
+    sessionKeywords: "",
+  }),
 }));
 
 // SharedLive2dStage 依赖 pixi / WebGL，jsdom 无法运行；预览容器量测（ResizeObserver）在
@@ -769,6 +793,28 @@ describe("CompanionPage 伙伴模型管理器", () => {
         id: m.id,
         wakeWord: "小月",
       });
+    });
+  });
+
+  it("唤醒词测试：点击「测试」按生效唤醒词开始 KWS 实测监听", async () => {
+    const m: CompanionModelInfo = {
+      ...MODEL_A,
+      wake_word: null,
+      wake_word_effective: "大月下",
+      wake_word_ok: true,
+      welcome_ready: true,
+    };
+    library = { models: [m], active_model_id: m.id };
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByRole("button", { name: /大月下.*使用中/ });
+    await user.click(screen.getByRole("button", { name: "测试伙伴唤醒词" }));
+
+    // 对话框以伙伴名命名，并用生效唤醒词发起监听
+    expect(await screen.findByRole("dialog", { name: "测试唤醒词 · 大月下" })).toBeInTheDocument();
+    await waitFor(() => {
+      expect(runtimeState.startArgs).toEqual([[null, "大月下"]]);
     });
   });
 

@@ -21,6 +21,7 @@ import {
   useState,
 } from "react";
 import { CompanionVoiceUploadDialog } from "@/components/companions/CompanionVoiceUploadDialog";
+import { KwsTestDialog } from "@/components/kws/KwsTestDialog";
 import type { Live2dCatalog } from "@/components/live2d/previewManager";
 import type { SharedLive2dStageHandle } from "@/components/live2d/SharedLive2dStage";
 import { SharedLive2dStage } from "@/components/live2d/SharedLive2dStage";
@@ -433,6 +434,8 @@ export function CompanionPage() {
   const [restoreVoiceTarget, setRestoreVoiceTarget] = useState<CompanionModelInfo | null>(null);
   /** 唤醒词/欢迎语受控草稿：切伙伴或保存成功（库值变化）时同步。 */
   const [wakeWordDraft, setWakeWordDraft] = useState("");
+  // 测试伙伴唤醒词弹窗（用选中伙伴的生效唤醒词做 KWS 实测）
+  const [wakeTestOpen, setWakeTestOpen] = useState(false);
   const [welcomeDraft, setWelcomeDraft] = useState("");
   const previewRef = useRef<HTMLDivElement>(null);
   const stageHandleRef = useRef<SharedLive2dStageHandle>(null);
@@ -854,6 +857,16 @@ export function CompanionPage() {
                     >
                       保存
                     </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-8 shrink-0"
+                      aria-label="测试伙伴唤醒词"
+                      title={`实测「${selected.wake_word_effective}」能否被麦克风唤醒`}
+                      onClick={() => setWakeTestOpen(true)}
+                    >
+                      测试
+                    </Button>
                   </div>
                   {selected.wake_word_ok ? (
                     <p className="text-xs text-muted-foreground">
@@ -966,6 +979,17 @@ export function CompanionPage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* 测试伙伴唤醒词：用选中伙伴的生效唤醒词（自定义词或角色名推导）做 KWS 实测。
+          条件挂载——伙伴页自身不依赖 useRuntime，对话框打开时才引入运行时依赖。 */}
+      {wakeTestOpen && selected && (
+        <KwsTestDialog
+          open
+          onClose={() => setWakeTestOpen(false)}
+          keywords={selected.wake_word_effective}
+          title={`测试唤醒词 · ${selected.name}`}
+        />
+      )}
 
       {/* 移除伙伴确认（样式对齐模型卸载确认框） */}
       <ModelDialog

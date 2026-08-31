@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -425,30 +425,6 @@ describe("App（KWS 控制面板）", () => {
     await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith("set_kws_enabled", { enabled: false });
     });
-  });
-
-  it("检测到唤醒词后把结果追加到测试对话框", async () => {
-    kwsConfig = { ...kwsConfig, models_present: true };
-    const user = userEvent.setup();
-    renderApp();
-
-    await user.click(await screen.findByRole("button", { name: /测试唤醒词/ }));
-    expect(await screen.findByText("尚未检测到唤醒词")).toBeInTheDocument();
-
-    act(() => {
-      listeners.get("kws-detected")?.({
-        payload: {
-          keyword: "文森特卡索",
-          tokens: "",
-          tokens_arr: [],
-          timestamps: [],
-          start_time: 0.64,
-          json: "{}",
-        },
-      });
-    });
-
-    expect(await screen.findByText("“文森特卡索”")).toBeInTheDocument();
   });
 
   it("点击下载模型调用 download_kws_model 并刷新配置", async () => {
