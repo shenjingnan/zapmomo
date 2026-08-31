@@ -120,6 +120,9 @@ struct ListenState {
     handle: Mutex<Option<std::thread::JoinHandle<()>>>,
     /// 当前会话真正使用的模型目录（启动监听时固化；停止/线程退出时清空）
     active_model_dir: Arc<Mutex<Option<PathBuf>>>,
+    /// 本次独立监听启动时是否挂起了语音会话（互斥：麦克风同一时刻只归一方）。
+    /// 线程退出时据此恢复语音会话。
+    voice_suspended_by_listen: Mutex<bool>,
 }
 
 impl ListenState {
@@ -128,6 +131,7 @@ impl ListenState {
             running: Arc::new(AtomicBool::new(false)),
             handle: Mutex::new(None),
             active_model_dir: Arc::new(Mutex::new(None)),
+            voice_suspended_by_listen: Mutex::new(false),
         }
     }
 
@@ -1113,6 +1117,24 @@ fn start_listen_impl(
         ));
     }
 
+    // 互斥：独立监听持有麦克风期间挂起语音会话（内部 KWS/ASR 与本监听抢同一设备），
+    // 线程退出时按快照恢复。放在所有可 Err 的校验之后——拒绝启动时不误挂起。
+    // 标记可继承：上一任监听在声纹录音挂起期退出时留下标记，由本任监听退出时代为恢复。
+    let voice_state = app.state::<VoiceSessionState>();
+    let voice_was_running = voice_state.is_running();
+    let inherited = *state
+        .voice_suspended_by_listen
+        .lock()
+        .expect("listen voice_suspended lock poisoned");
+    if voice_was_running {
+        tracing::info!("独立 KWS 监听启动：挂起语音会话（监听退出后自动恢复）");
+        stop_voice_session_inner(voice_state.inner())?;
+    }
+    *state
+        .voice_suspended_by_listen
+        .lock()
+        .expect("listen voice_suspended lock poisoned") = voice_was_running || inherited;
+
     let running = state.running.clone();
     running.store(true, Ordering::Relaxed);
     // RuntimeActual：记录本次会话使用的模型目录；随线程退出（RAII）自动清空
@@ -1139,6 +1161,35 @@ fn start_listen_impl(
             error: result.err(),
         };
         let _ = reaction.app.emit("kws-stopped", payload);
+        // 恢复被本次监听挂起的语音会话（clean/错误退出统一在此收敛；
+        // stop_listen_inner 的 join 会等本线程完成后才返回）
+        let app = reaction.app;
+        let listen = app.state::<ListenState>();
+        let mut suspended = listen
+            .voice_suspended_by_listen
+            .lock()
+            .expect("listen voice_suspended lock poisoned");
+        if *suspended {
+            // 声纹录音挂起期内不恢复（录音正独占麦克风）：保留标记——
+            // speaker_resume 随后会重启本监听（start_listen_impl 继承标记），
+            // 监听最终退出时再恢复语音会话。
+            let speaker_suspended = app
+                .state::<SpeakerState>()
+                .suspended
+                .lock()
+                .map(|g| g.is_some())
+                .unwrap_or(false);
+            if speaker_suspended {
+                tracing::info!("独立 KWS 监听退出：处于声纹录音挂起期，语音会话恢复顺延");
+            } else {
+                *suspended = false;
+                drop(suspended);
+                let voice = app.state::<VoiceSessionState>();
+                if let Err(e) = start_voice_session_impl(app.clone(), voice.inner()) {
+                    tracing::warn!("独立 KWS 监听退出后恢复语音会话失败: {e}");
+                }
+            }
+        }
     });
     *state.handle.lock().expect("listen handle lock poisoned") = Some(handle);
     // 通知前端监听已启动（含切换设备后的自动重启；启动瞬间前端未订阅时静默丢弃）
@@ -2413,6 +2464,14 @@ fn make_voice_emit(app: AppHandle) -> Box<dyn Fn(VoiceEvent) + Send> {
 fn start_voice_session_impl(app: AppHandle, state: &VoiceSessionState) -> Result<(), String> {
     if state.is_running() {
         return Err("语音会话已在运行中".to_string());
+    }
+    // 互斥（与 start_listen_impl 的挂起配对）：独立 KWS 监听持有麦克风时拒绝开启
+    // 语音会话，用户按提示先关监听（监听退出不会恢复未成功挂起的会话）。
+    if app.state::<ListenState>().is_listening() {
+        return Err(
+            "独立 KWS 监听运行中：请先在「唤醒词（KWS）配置」页停止监听，再开启语音会话"
+                .to_string(),
+        );
     }
     let settings = zapmomo::config::settings::load_settings()?;
     let mut cfg =
