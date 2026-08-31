@@ -11,7 +11,8 @@
 #
 # 实现：Tauri 没有往 dmg 根目录放额外文件的配置（bundle.macOS.files 进的是
 # .app 内部），只能在产物 dmg 上后处理：挂载 → 连同 .DS_Store / .background
-# 原样拷出（保住安装窗口布局）→ 加入修复脚本 → hdiutil 重建压缩镜像。
+# 原样拷出（保住安装窗口布局）→ 加入修复脚本 → Finder AppleScript 固定 fixer
+# 图标位置（create-dmg/Tauri bundle_dmg 同款机制）→ 转压缩镜像。
 set -euo pipefail
 
 DMG="${1:?用法: $0 <dmg 路径>}"
@@ -28,8 +29,8 @@ mkdir -p "$STAGE"
 MOUNTED=0
 cleanup() {
   # 中途失败也要卸载，否则同 runner 重试报 resource busy
-  if [ "$MOUNTED" -eq 1 ]; then
-    hdiutil detach "$MNT" -force -quiet >/dev/null 2>&1 || true
+  if [ "$MOUNTED" -eq 1 ] && [ -n "${DEV:-}" ]; then
+    hdiutil detach "$DEV" -force -quiet >/dev/null 2>&1 || true
   fi
   rm -rf "$WORK"
 }
@@ -139,8 +140,49 @@ fi
 FIXER_BODY
 chmod +x "$STAGE/$FIXER_NAME"
 
-# 重建压缩镜像（UDZO，与 create-dmg/Tauri 默认一致），原地覆盖（文件名不变，
+# 先重建为可写镜像：用 Finder 把 fixer 图标钉到 app / Applications 行正下方居中位
+# （Tauri 默认窗口 660x400，app 在 (175,120)、Applications 在 (425,120)，二者中点
+# x=300；y=250 位于窗口下半空区视觉焦点）。注入的文件本无定位，Finder 会随手乱放，
+# 不钉位用户容易看不见。Tauri bundler 自身即在 CI 上用同款 AppleScript 定位图标。
+# 定位失败不阻断发布（图标退化为 Finder 自动摆放，注入本身不受影响）。
+FIXER_POS_X=300
+FIXER_POS_Y=250
+RW_DMG="$WORK/rw.dmg"
+hdiutil create -volname "$VOL_NAME" -srcfolder "$STAGE" -ov -format UDRW -quiet "$RW_DMG"
+# 用默认挂载点（/Volumes/<卷名>）：Finder 只为挂在 /Volumes 下的卷注册 disk
+# 对象，-mountpoint 挂进深层目录（如 CI workspace）或 -nobrowse 都会让下方
+# AppleScript 报 Can't get disk。解析设备名与实际挂载点供定位/卸载使用。
+ATTACH_OUT="$(hdiutil attach "$RW_DMG" -noautoopen -readwrite)"
+# APFS 镜像 attach 输出多行，挂载行在最后；字段间还有对齐空格需去掉
+DEV="$(printf '%s\n' "$ATTACH_OUT" | awk -F'\t' 'END{print $1}' | tr -d ' ')"
+MNT_REAL="$(printf '%s\n' "$ATTACH_OUT" | awk -F'\t' 'END{print $3}' | tr -d ' ')"
+MOUNTED=1
+# 同名卷被占用时挂载点会带 N 后缀，此时 tell disk 会命中错卷，宁可不定位
+if [ "$MNT_REAL" = "/Volumes/$VOL_NAME" ]; then
+  osascript <<APPLESCRIPT || echo "::warning::未能固定 ${FIXER_NAME} 图标位置（不影响注入，图标将由 Finder 自动摆放）"
+tell application "Finder"
+  tell disk "$VOL_NAME"
+    open
+    set current view of container window to icon view
+    set theViewOptions to the icon view options of container window
+    set arrangement of theViewOptions to not arranged
+    delay 3
+    set position of item "$FIXER_NAME" of container window to {$FIXER_POS_X, $FIXER_POS_Y}
+    close
+  end tell
+end tell
+APPLESCRIPT
+else
+  echo "::warning::dmg 卷挂载于 $MNT_REAL 而非 /Volumes/${VOL_NAME}，跳过图标定位"
+fi
+# Finder 异步落盘 .DS_Store，等它写完再卸载
+sleep 3
+sync
+hdiutil detach "$DEV" -quiet
+MOUNTED=0
+
+# 转压缩镜像（UDZO，与 create-dmg/Tauri 默认一致），原地覆盖（文件名不变，
 # 下游 release job 的 `*aarch64.dmg` / `*x64.dmg` 重命名规则不受影响）
-rm "$DMG"
-hdiutil create -volname "$VOL_NAME" -srcfolder "$STAGE" -ov -format UDZO -quiet "$DMG"
-echo "已注入 $FIXER_NAME -> $DMG"
+rm -f "$DMG"
+hdiutil convert "$RW_DMG" -format UDZO -o "$DMG" -ov -quiet
+echo "已注入 ${FIXER_NAME}（图标位置 {$FIXER_POS_X, $FIXER_POS_Y}）-> $DMG"
