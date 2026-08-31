@@ -6211,12 +6211,40 @@ fn show_companion_menu(app: AppHandle, x: f64, y: f64) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-/// 显示设置窗口并聚焦。
+/// 显示设置窗口并聚焦（用户主动打开：托盘/右键菜单/全局快捷键/单实例回调）。
 fn show_settings_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("settings") {
         let _ = window.show();
         let _ = window.set_focus();
     }
+}
+
+/// 仅显示设置窗口、不抢键盘焦点（启动 2 秒后自动打开用）：自动弹出只为可发现性，
+/// 键盘焦点应留给输入条（ChatboxBar 挂载即聚焦，见 set_chatbox_visible）。
+///
+/// macOS 不走 tao 的 `window.show()`——其底层 makeKeyAndOrderFront 会把 key window
+/// 从输入条抢走；`orderFront:` 只调整 Z 序、不改变 key 归属。AppKit 调用须在主线程，
+/// 经 `run_on_main_thread` 跳板（与 `rebuild_tray_menu_threadsafe` 同款）。
+fn show_settings_window_unfocused(app: &AppHandle) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(window) = handle.get_webview_window("settings") {
+            #[cfg(target_os = "macos")]
+            {
+                use objc2_app_kit::NSWindow;
+                if let Ok(ns) = window.ns_window() {
+                    // SAFETY: ns_window 返回 tauri 持有的合法 NSWindow 指针，
+                    // 且本闭包经 run_on_main_thread 在主线程执行。
+                    let ns = unsafe { &*(ns.cast::<NSWindow>()) };
+                    ns.orderFront(None);
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = window.show();
+            }
+        }
+    });
 }
 
 /// 切换常驻角色窗口的显隐（文字输入条联动：显隐状态与角色保持一致）。
@@ -7679,11 +7707,14 @@ pub fn run() {
                     panel.set_level(MACOS_OVERLAY_PANEL_LEVEL);
                 }
             }
-            // 恢复持久化的可见性（缺省显示：首次启动输入条随角色一同出现）
-            if resolve_chatbox_visible(chatbox_cfg.as_ref())
-                && let Some(window) = app.get_webview_window("chatbox")
-            {
-                let _ = window.show();
+            // 恢复持久化的可见性（缺省显示：首次启动输入条随角色一同出现）。
+            // 走与显隐快捷键相同的单一写点并聚焦：macOS 经 NSPanel show_and_make_key
+            // 使输入条持有 key window，配合前端挂载时的 textarea.focus()，启动即可直接
+            // 打字；自启动（--autostart）不聚焦——桌宠静默出现，不抢其它应用的键盘输入
+            // （与设置窗自启动不弹出同一原则）。
+            let launched_by_autostart = is_launched_by_autostart(std::env::args());
+            if resolve_chatbox_visible(chatbox_cfg.as_ref()) {
+                set_chatbox_visible(app.handle(), true, !launched_by_autostart);
             }
 
             // 语音回复气泡窗口：纯展示（流式回复打字机），显隐跟随角色窗口
@@ -7772,18 +7803,18 @@ pub fn run() {
 
             // 自动打开设置窗口：仅用于「无全局菜单栏」的场景（macOS Accessory 模式或非 macOS），
             // 否则 Cmd+, 快捷键不可靠，自动打开可避免「找不到设置」；普通模式有菜单栏，无需自动弹出。
+            // 弹出走 show_settings_window_unfocused：自动打开只为可发现性，键盘焦点留给输入条。
             // 自启动拉起（--autostart）时跳过：桌宠静默出现，设置窗不自动弹出；
             // 手动启动行为不变。
-            let launched_by_autostart = is_launched_by_autostart(std::env::args());
             #[cfg(target_os = "macos")]
-            let auto_open_settings = !hide_dock_icon && !launched_by_autostart;
+            let auto_open_settings = hide_dock_icon;
             #[cfg(not(target_os = "macos"))]
-            let auto_open_settings = !launched_by_autostart;
-            if auto_open_settings {
+            let auto_open_settings = true;
+            if auto_open_settings && !launched_by_autostart {
                 let app_handle = app.handle().clone();
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_secs(2));
-                    show_settings_window(&app_handle);
+                    show_settings_window_unfocused(&app_handle);
                 });
             }
 
