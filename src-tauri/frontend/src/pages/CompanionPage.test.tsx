@@ -6,21 +6,24 @@ import type { CompanionLibraryView, CompanionModelInfo } from "@/types/tauri";
 import { CompanionPage } from "./CompanionPage";
 
 type StageCatalog = import("@/components/live2d/previewManager").Live2dCatalog;
-const { invokeMock, openMock, stageHandleMock, stageState, configState } = vi.hoisted(() => ({
-  invokeMock: vi.fn(),
-  openMock: vi.fn(),
-  stageHandleMock: {
-    playMotion: vi.fn(async () => true),
-    applyExpression: vi.fn(async () => true),
-    resetExpression: vi.fn(),
-  },
-  /** 供 mock 替身注入目录的可变容器（vi.mock 工厂只可靠引用 hoisted 变量）。 */
-  stageState: { catalog: null as StageCatalog | null },
-  /** get_live2d_config 返回的有效缩放（模拟「active 伙伴私有 ?? 全局」合并结果）。 */
-  configState: {
-    windowScale: 1.0,
-  },
-}));
+const { invokeMock, openMock, saveMock, stageHandleMock, stageState, configState } = vi.hoisted(
+  () => ({
+    invokeMock: vi.fn(),
+    openMock: vi.fn(),
+    saveMock: vi.fn(),
+    stageHandleMock: {
+      playMotion: vi.fn(async () => true),
+      applyExpression: vi.fn(async () => true),
+      resetExpression: vi.fn(),
+    },
+    /** 供 mock 替身注入目录的可变容器（vi.mock 工厂只可靠引用 hoisted 变量）。 */
+    stageState: { catalog: null as StageCatalog | null },
+    /** get_live2d_config 返回的有效缩放（模拟「active 伙伴私有 ?? 全局」合并结果）。 */
+    configState: {
+      windowScale: 1.0,
+    },
+  }),
+);
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: invokeMock,
@@ -32,6 +35,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: openMock,
+  save: saveMock,
 }));
 
 // SharedLive2dStage 依赖 pixi / WebGL，jsdom 无法运行；预览容器量测（ResizeObserver）在
@@ -71,6 +75,13 @@ function model(id: string, name: string, valid = true): CompanionModelInfo {
     voice_id: null,
     voice_source: null,
     has_voice: false,
+    has_original_voice: false,
+    wake_word: null,
+    wake_word_effective: "",
+    wake_word_ok: true,
+    welcome_text: null,
+    welcome_text_effective: "",
+    welcome_ready: true,
   };
 }
 
@@ -91,6 +102,7 @@ let ttsModelType: string;
 beforeEach(() => {
   invokeMock.mockReset();
   openMock.mockReset();
+  saveMock.mockReset();
   stageHandleMock.playMotion.mockReset();
   stageHandleMock.applyExpression.mockReset();
   stageHandleMock.resetExpression.mockReset();
@@ -105,7 +117,13 @@ beforeEach(() => {
   invokeMock.mockImplementation(
     (
       cmd: string,
-      args?: { source?: string; id?: string; name?: string; voiceId?: string | null },
+      args?: {
+        source?: string;
+        id?: string;
+        name?: string;
+        voiceId?: string | null;
+        dest?: string;
+      },
     ) => {
       switch (cmd) {
         case "list_companions":
@@ -192,6 +210,22 @@ beforeEach(() => {
           library = { ...library, active_model_id: args?.id ?? null };
           return Promise.resolve(library);
         }
+        case "import_companion_zip": {
+          // 与后端 import_companion 同语义：返回视图 + 选中。
+          const id = `companion-zip-${++importSeq}`;
+          const imported: CompanionModelInfo = {
+            ...model(id, "压缩包角色"),
+            source_path: args?.source ?? null,
+            format: "character",
+          };
+          library = {
+            models: [...library.models, imported],
+            active_model_id: library.active_model_id,
+          };
+          return Promise.resolve({ library, model_id: id, already_imported: false });
+        }
+        case "export_companion_pack":
+          return Promise.resolve({ dest: args?.dest ?? "/out/pack.zip", files: 6 });
         case "rename_companion": {
           library = {
             ...library,
@@ -209,6 +243,26 @@ beforeEach(() => {
             // 删的是 active → 落到第一个剩余或 null（与后端语义一致）。
             active_model_id:
               library.active_model_id === id ? (remaining[0]?.id ?? null) : library.active_model_id,
+          };
+          return Promise.resolve(library);
+        }
+        case "transcribe_reference_audio":
+          return Promise.resolve("自动转写的文本");
+        case "upload_companion_voice": {
+          library = {
+            models: library.models.map((m) =>
+              m.id === args?.id ? { ...m, has_original_voice: true, has_voice: true } : m,
+            ),
+            active_model_id: library.active_model_id,
+          };
+          return Promise.resolve(library);
+        }
+        case "restore_companion_voice": {
+          library = {
+            models: library.models.map((m) =>
+              m.id === args?.id ? { ...m, has_original_voice: false } : m,
+            ),
+            active_model_id: library.active_model_id,
           };
           return Promise.resolve(library);
         }
@@ -763,5 +817,204 @@ describe("CompanionPage 伙伴模型管理器", () => {
 
     await screen.findByRole("button", { name: /大月下.*使用中/ });
     expect(await screen.findByText(/当前 TTS 模型不支持音色克隆/)).toBeInTheDocument();
+  });
+
+  it("唤醒词/欢迎语：placeholder 取生效值，异常态显示回退与生成中提示", async () => {
+    const m: CompanionModelInfo = {
+      ...MODEL_A,
+      wake_word: null,
+      wake_word_effective: "大月下",
+      wake_word_ok: false,
+      welcome_text: null,
+      welcome_text_effective: "你好，我是大月下。",
+      welcome_ready: false,
+    };
+    library = { models: [m], active_model_id: m.id };
+    renderPage();
+
+    await screen.findByRole("button", { name: /大月下.*使用中/ });
+    expect(screen.getByLabelText("伙伴唤醒词")).toHaveProperty("placeholder", "大月下");
+    expect(screen.getByLabelText("伙伴欢迎语")).toHaveProperty("placeholder", "你好，我是大月下。");
+    expect(screen.getByText(/无法转为唤醒词，已回退全局唤醒词/)).toBeInTheDocument();
+    expect(screen.getByText(/欢迎语音生成中/)).toBeInTheDocument();
+  });
+
+  it("唤醒词输入后点保存：调用 set_companion_wake_word；无变更时按钮禁用", async () => {
+    const m: CompanionModelInfo = {
+      ...MODEL_A,
+      wake_word: null,
+      wake_word_effective: "大月下",
+      wake_word_ok: true,
+      welcome_ready: true,
+    };
+    library = { models: [m], active_model_id: m.id };
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByRole("button", { name: /大月下.*使用中/ });
+    const saveBtn = screen.getByRole("button", { name: "保存唤醒词" });
+    // 无变更时保存按钮禁用。
+    expect(saveBtn).toBeDisabled();
+    const wakeInput = screen.getByLabelText("伙伴唤醒词");
+    await user.type(wakeInput, "小月");
+    expect(saveBtn).toBeEnabled();
+    await user.click(saveBtn);
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("set_companion_wake_word", {
+        id: m.id,
+        wakeWord: "小月",
+      });
+    });
+  });
+
+  it("音色试听：有生效音色可用，点击调用 preview_companion_voice", async () => {
+    const m: CompanionModelInfo = { ...MODEL_A, has_voice: true, voice_source: "pack" };
+    library = { models: [m], active_model_id: m.id };
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByRole("button", { name: /大月下.*使用中/ });
+    const previewBtn = screen.getByRole("button", { name: "试听音色" });
+    expect(previewBtn).toBeEnabled();
+    await user.click(previewBtn);
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("preview_companion_voice", { id: m.id });
+    });
+  });
+
+  it("音色试听：无生效音色时禁用", async () => {
+    library = {
+      models: [{ ...MODEL_A, has_voice: false, voice_source: null }],
+      active_model_id: MODEL_A.id,
+    };
+    renderPage();
+
+    await screen.findByRole("button", { name: /大月下.*使用中/ });
+    expect(screen.getByRole("button", { name: "试听音色" })).toBeDisabled();
+  });
+
+  it("导出按钮：仅角色包可用，Live2D 行禁用并提示", async () => {
+    const character: CompanionModelInfo = { ...MODEL_A, format: "character" };
+    library = { models: [character, MODEL_B], active_model_id: character.id };
+    renderPage();
+
+    await screen.findByRole("button", { name: /大月下.*使用中/ });
+    const charBtn = screen.getByRole("button", { name: "导出分享「大月下」" });
+    expect(charBtn).toBeEnabled();
+    const live2dBtn = screen.getByRole("button", { name: "导出分享「星语」" });
+    expect(live2dBtn).toBeDisabled();
+    expect(live2dBtn.getAttribute("title")).toContain("仅角色包");
+  });
+
+  it("导出：save 取消（返回 null）不调用 export_companion_pack", async () => {
+    const character: CompanionModelInfo = { ...MODEL_A, format: "character" };
+    library = { models: [character], active_model_id: character.id };
+    const user = userEvent.setup();
+    saveMock.mockResolvedValue(null);
+    renderPage();
+
+    await screen.findByRole("button", { name: /大月下.*使用中/ });
+    await user.click(screen.getByRole("button", { name: "导出分享「大月下」" }));
+    expect(invokeMock).not.toHaveBeenCalledWith("export_companion_pack", expect.anything());
+  });
+
+  it("导出：save 返回路径后调用 export_companion_pack（camelCase 载荷）", async () => {
+    const character: CompanionModelInfo = { ...MODEL_A, format: "character" };
+    library = { models: [character], active_model_id: character.id };
+    const user = userEvent.setup();
+    saveMock.mockResolvedValue("/Downloads/大月下.zip");
+    renderPage();
+
+    await screen.findByRole("button", { name: /大月下.*使用中/ });
+    await user.click(screen.getByRole("button", { name: "导出分享「大月下」" }));
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("export_companion_pack", {
+        id: character.id,
+        dest: "/Downloads/大月下.zip",
+      });
+    });
+    expect(await screen.findByText(/已导出「大月下」/)).toBeInTheDocument();
+  });
+
+  it("导入 zip：open 返回路径后调用 import_companion_zip 并选中新伙伴", async () => {
+    const user = userEvent.setup();
+    openMock.mockResolvedValue("/Downloads/share.zip");
+    renderPage();
+
+    await user.click(screen.getByRole("button", { name: "导入角色包（.zip）" }));
+    expect(openMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        filters: [{ name: "Zip 压缩包", extensions: ["zip"] }],
+      }),
+    );
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("import_companion_zip", {
+        source: "/Downloads/share.zip",
+      });
+    });
+    // 导入后自动选中新伙伴（列表项 + 右侧详情标题均出现其名）。
+    await waitFor(() => {
+      expect(screen.getAllByText("压缩包角色").length).toBeGreaterThan(0);
+    });
+  });
+
+  it("音色上传：对话框选文件转写后提交调用 upload_companion_voice", async () => {
+    const character: CompanionModelInfo = {
+      ...MODEL_A,
+      format: "character",
+      has_voice: true,
+      voice_source: "pack",
+      has_original_voice: false,
+    };
+    library = { models: [character], active_model_id: character.id };
+    const user = userEvent.setup();
+    openMock.mockResolvedValue("/Downloads/my-voice.wav");
+    renderPage();
+
+    await screen.findByRole("button", { name: /大月下.*使用中/ });
+    // 无备份时不显示恢复按钮；点上传打开对话框。
+    expect(screen.queryByRole("button", { name: "恢复角色自带音色" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "上传音色" }));
+    expect(screen.getByText("上传伙伴音色")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "选择 wav 文件" }));
+    await user.click(screen.getByRole("button", { name: /自动转写/ }));
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("transcribe_reference_audio", {
+        wavPath: "/Downloads/my-voice.wav",
+      });
+    });
+    expect(screen.getByLabelText("参考文本")).toHaveValue("自动转写的文本");
+    await user.click(screen.getByRole("button", { name: "保存并覆盖" }));
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("upload_companion_voice", {
+        id: character.id,
+        wavPath: "/Downloads/my-voice.wav",
+        referenceText: "自动转写的文本",
+      });
+    });
+  });
+
+  it("恢复角色自带音色：有备份显示按钮，确认后调用 restore_companion_voice", async () => {
+    const character: CompanionModelInfo = {
+      ...MODEL_A,
+      format: "character",
+      has_voice: true,
+      voice_source: "pack",
+      has_original_voice: true,
+    };
+    library = { models: [character], active_model_id: character.id };
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByRole("button", { name: /大月下.*使用中/ });
+    await user.click(screen.getByRole("button", { name: "恢复角色自带音色" }));
+    expect(screen.getAllByText("恢复角色自带音色").length).toBeGreaterThan(0);
+    await user.click(screen.getByRole("button", { name: "恢复" }));
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("restore_companion_voice", {
+        id: character.id,
+      });
+    });
   });
 });

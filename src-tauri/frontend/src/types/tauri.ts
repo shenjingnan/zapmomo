@@ -25,6 +25,8 @@ export interface KwsConfigInfo {
   keywords_threshold: number;
   debug: boolean;
   keywords: string[];
+  /** 当前伙伴的生效唤醒词（非 null = 唤醒词由角色接管，全局输入框仅为兜底） */
+  active_wake_word: string | null;
   models_present: boolean;
   model_downloading: boolean;
   settings_path: string;
@@ -251,6 +253,20 @@ export interface CompanionModelInfo {
   voice_source: "pack" | "library" | null;
   /** 是否有生效音色（目录自带或绑定命中；绑定指向的音色已删除时为 false） */
   has_voice: boolean;
+  /** 是否留有作者原版音色备份（true = 可一键「恢复角色自带」） */
+  has_original_voice: boolean;
+  /** 自定义唤醒词原始值（null = 跟随角色名，rename 自动跟随；编辑框初值） */
+  wake_word: string | null;
+  /** 生效唤醒词（自定义或角色名；编辑框 placeholder） */
+  wake_word_effective: string;
+  /** 生效唤醒词能否转为 KWS 唤醒词（false = 已回退全局唤醒词，界面红字提示） */
+  wake_word_ok: boolean;
+  /** 自定义欢迎语文本（null = 默认模板「你好，我是{name}。」；编辑框初值） */
+  welcome_text: string | null;
+  /** 生效欢迎语文本（自定义或模板展开；编辑框 placeholder） */
+  welcome_text_effective: string;
+  /** 预合成欢迎语与当前配置一致（false = 语音生成中 / 唤醒时先用实时合成） */
+  welcome_ready: boolean;
 }
 
 /** `list_companions` / `set_active_companion` 返回的伙伴库视图 */
@@ -264,6 +280,12 @@ export interface ImportCompanionResult {
   library: CompanionLibraryView;
   model_id: string;
   already_imported: boolean;
+}
+
+/** `export_companion_pack` 返回：实际写入路径与打包文件数 */
+export interface ExportCompanionPackResult {
+  dest: string;
+  files: number;
 }
 
 /** `get_tts_config` 返回 */

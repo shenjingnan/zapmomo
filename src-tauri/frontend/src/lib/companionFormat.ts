@@ -9,3 +9,8 @@
 export function isStaticImageFormat(format: string | null | undefined): boolean {
   return format === "gif" || format === "character";
 }
+
+/** 角色包伙伴：唯一支持「导出分享 .zip」的格式（Live2D 含版权模型、GIF 为单文件）。 */
+export function isCharacterFormat(format: string | null | undefined): boolean {
+  return format === "character";
+}

@@ -176,3 +176,40 @@ pnpm --filter zapmomo-frontend test:run       # vitest
 | R8 | 与窗口属性命令（set_companion_scale 等）命名混淆 | 低 | doc 注释明确是伙伴库元数据 |
 
 **回滚**：`voice_id` 为 Option + skip_serializing_if，旧代码读新文件忽略未知字段，无需数据迁移；各 Phase 独立 commit，可单独 revert，行为面回滚集中在 companion.rs + config.rs:176 + 3 个调用点。
+
+---
+
+## 增补（2026-08-30）：用户上传音色覆盖（备份作者原版）
+
+> 详细方案见 `COMPANION_VOICE_UPLOAD_DESIGN.md`。本节记录对本文档音色体系的扩展。
+
+### 变更
+
+角色包自带音色不再「只读」：用户可在伙伴面板**上传自定义音色覆盖**当前生效音色，
+覆盖前自动备份作者原版，可一键恢复。
+
+```
+{model_dir}/voice/
+├── reference.wav + reference.txt        # 当前生效音色（作者原版 或 用户上传覆盖后的版本）
+└── reference.original.wav + .txt        # 首次覆盖时的作者原版备份（本机恢复点，不随包分享）
+```
+
+### 语义
+
+- **解析链零改动**：`companion_voice_in` 三级优先级保持「目录自带 > voice_id 绑定 >
+  全局默认」——上传直接写托管目录，合成/试听/欢迎语重生成自然全部切换。
+- **分享语义**：导出白名单按精确文件名收 `reference.wav/txt`，`reference.original.*`
+  结构性不进包 → **接收者拿到的是分享者调好的音色**（角色包 = 角色当前完整状态）。
+- **联动**：音色改写使欢迎语指纹（wav len/mtime）失效 → 后台自动用新音色重生成；
+  active 伙伴上传/恢复即重启语音会话。
+- **事务性**：校验（头 + mono 转换 + hound 全量终检）全部在暂存文件完成，备份
+  （纯拷贝）成功后才落位（txt 先、wav 最后翻面，保住成对不变量）；任何失败不破坏
+  既有音色。
+- **恢复**：`restore_companion_voice` 拷回备份并删除备份文件；备份在恢复成功前绝不删除。
+
+### 新增接口
+
+- 根 crate：`upload_companion_voice` / `restore_companion_voice` / `has_original_voice`
+- Tauri command：`upload_companion_voice` / `restore_companion_voice`
+- 前端：音色行「上传音色」（`CompanionVoiceUploadDialog`：选 wav → ASR 自动转写可编辑 →
+  覆盖）与「恢复角色自带」（确认框，仅 `has_original_voice` 时显示）

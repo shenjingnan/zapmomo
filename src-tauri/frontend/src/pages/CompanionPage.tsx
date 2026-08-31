@@ -1,13 +1,17 @@
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import {
   CircleAlert,
+  FileArchive,
   FolderOpen,
   Image as ImageIcon,
   Pencil,
+  Share2,
   Sparkles,
   Star,
   Trash2,
+  Undo2,
   Upload,
+  Volume2,
 } from "lucide-react";
 import {
   type MouseEvent as ReactMouseEvent,
@@ -17,6 +21,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { CompanionVoiceUploadDialog } from "@/components/companions/CompanionVoiceUploadDialog";
 import type { Live2dCatalog } from "@/components/live2d/previewManager";
 import type { SharedLive2dStageHandle } from "@/components/live2d/SharedLive2dStage";
 import { SharedLive2dStage } from "@/components/live2d/SharedLive2dStage";
@@ -35,8 +40,9 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Slider } from "@/components/ui/slider";
+import { useToast } from "@/components/ui/toast";
 import { useCompanionLibrary } from "@/hooks/useCompanionLibrary";
-import { isStaticImageFormat } from "@/lib/companionFormat";
+import { isCharacterFormat, isStaticImageFormat } from "@/lib/companionFormat";
 import { api, toAssetUrl } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 import type { CompanionModelInfo, TtsVoice } from "@/types/tauri";
@@ -68,18 +74,23 @@ function CompanionListItem({
   model,
   selected,
   isActive,
+  exporting,
   onSelect,
   onRename,
   onRequestRemove,
   onOpenAssets,
+  onExport,
 }: {
   model: CompanionModelInfo;
   selected: boolean;
   isActive: boolean;
+  /** 该伙伴的 .zip 导出进行中（按钮转 spinner 并禁用）。 */
+  exporting: boolean;
   onSelect: () => void;
   onRename: (id: string, name: string) => void;
   onRequestRemove: (model: CompanionModelInfo) => void;
   onOpenAssets: (id: string) => void;
+  onExport: (model: CompanionModelInfo) => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(model.name);
@@ -187,6 +198,32 @@ function CompanionListItem({
           )}
         </span>
       </button>
+
+      {!editing && (
+        <button
+          type="button"
+          aria-label={`导出分享「${model.name}」`}
+          title={
+            isCharacterFormat(model.format)
+              ? exporting
+                ? "正在打包…"
+                : "打包为 .zip 分享给他人导入（含唤醒词/欢迎语预设）"
+              : "仅角色包伙伴支持导出分享（Live2D 含版权模型，GIF 为单文件）"
+          }
+          disabled={!isCharacterFormat(model.format) || exporting}
+          onClick={(e) => {
+            e.stopPropagation();
+            onExport(model);
+          }}
+          className="shrink-0 rounded p-1 text-muted-foreground opacity-60 transition-opacity group-hover:opacity-100 hover:text-text-primary focus:opacity-100 disabled:pointer-events-none disabled:opacity-30"
+        >
+          {exporting ? (
+            <span className="block h-3.5 w-3.5 animate-spin rounded-full border border-current border-t-transparent" />
+          ) : (
+            <Share2 className="h-3.5 w-3.5" />
+          )}
+        </button>
+      )}
 
       {!editing && (
         <button
@@ -382,9 +419,15 @@ export function CompanionPage() {
     loading,
     error,
     importModel,
+    importZip,
+    exportPack,
+    uploadVoice,
+    restoreVoice,
     setActive,
     rename,
     setVoice,
+    setWakeWord,
+    setWelcomeText,
     remove,
     openAssetsDir,
     saveCover,
@@ -393,6 +436,13 @@ export function CompanionPage() {
   const [stageError, setStageError] = useState<string | null>(null);
   const [previewSize, setPreviewSize] = useState({ width: 0, height: 0 });
   const [removeTarget, setRemoveTarget] = useState<CompanionModelInfo | null>(null);
+  /** 音色上传对话框目标（非 null = 打开）。 */
+  const [voiceUploadTarget, setVoiceUploadTarget] = useState<CompanionModelInfo | null>(null);
+  /** 音色恢复确认目标（非 null = 打开；恢复不可逆）。 */
+  const [restoreVoiceTarget, setRestoreVoiceTarget] = useState<CompanionModelInfo | null>(null);
+  /** 唤醒词/欢迎语受控草稿：切伙伴或保存成功（库值变化）时同步。 */
+  const [wakeWordDraft, setWakeWordDraft] = useState("");
+  const [welcomeDraft, setWelcomeDraft] = useState("");
   const previewRef = useRef<HTMLDivElement>(null);
   const stageHandleRef = useRef<SharedLive2dStageHandle>(null);
   const [catalog, setCatalog] = useState<Live2dCatalog | null>(null);
@@ -408,6 +458,27 @@ export function CompanionPage() {
     [library, selectedId],
   );
   const isActive = selected != null && selected.id === library?.active_model_id;
+
+  // 唤醒词/欢迎语草稿同步：切伙伴或保存成功（库值变化）时重置为库值；
+  // 用户打字期间库值不变，不会打断输入。
+  const selectedWakeWord = selected?.wake_word ?? "";
+  const selectedWelcomeText = selected?.welcome_text ?? "";
+  useEffect(() => {
+    setWakeWordDraft(selectedWakeWord);
+    setWelcomeDraft(selectedWelcomeText);
+  }, [selectedWakeWord, selectedWelcomeText]);
+  const wakeWordDirty = wakeWordDraft.trim() !== selectedWakeWord;
+  const welcomeDirty = welcomeDraft.trim() !== selectedWelcomeText;
+  const commitWakeWord = useCallback(() => {
+    if (!selected || !wakeWordDirty) return;
+    const v = wakeWordDraft.trim();
+    void setWakeWord(selected.id, v === "" ? null : v);
+  }, [selected, wakeWordDirty, wakeWordDraft, setWakeWord]);
+  const commitWelcomeText = useCallback(() => {
+    if (!selected || !welcomeDirty) return;
+    const v = welcomeDraft.trim();
+    void setWelcomeText(selected.id, v === "" ? null : v);
+  }, [selected, welcomeDirty, welcomeDraft, setWelcomeText]);
 
   // selected 校正：切换模型 / 库变化后，selected 不存在时落到 active(valid) → 首个 valid → null。
   useEffect(() => {
@@ -502,6 +573,62 @@ export function CompanionPage() {
     if (typeof file === "string") await importAndSelect(file);
   }, [importAndSelect]);
 
+  const handleImportZip = useCallback(async () => {
+    const file = await open({
+      title: "选择角色包压缩包",
+      filters: [{ name: "Zip 压缩包", extensions: ["zip"] }],
+      multiple: false,
+    });
+    if (typeof file !== "string") return;
+    setStageError(null);
+    const model = await importZip(file);
+    if (model) setSelectedId(model.id);
+  }, [importZip]);
+
+  /** 正在导出的伙伴 id（按钮转 spinner 并禁用，防重复点击）。 */
+  const [exportingId, setExportingId] = useState<string | null>(null);
+
+  // 音色试听：播放生效音色的参考音频（与合成同一条三级解析链），asset:// 播放。
+  const toast = useToast();
+  const voiceAudioRef = useRef<HTMLAudioElement>(null);
+  const [previewingVoice, setPreviewingVoice] = useState(false);
+  const handlePreviewVoice = useCallback(async () => {
+    const audio = voiceAudioRef.current;
+    if (!audio) return;
+    if (previewingVoice) {
+      audio.pause();
+      audio.currentTime = 0;
+      setPreviewingVoice(false);
+      return;
+    }
+    if (!selected) return;
+    try {
+      const wav = await api.previewCompanionVoice({ id: selected.id });
+      if (!wav) return;
+      audio.src = toAssetUrl(wav);
+      await audio.play();
+      setPreviewingVoice(true);
+    } catch (e) {
+      toast.error(`试听失败：${String(e)}`);
+    }
+  }, [previewingVoice, selected, toast]);
+  const handleExportPack = useCallback(
+    async (target: CompanionModelInfo) => {
+      const dest = await save({
+        defaultPath: `${target.name}.zip`,
+        filters: [{ name: "Zip 压缩包", extensions: ["zip"] }],
+      });
+      if (typeof dest !== "string") return; // 用户取消，静默
+      setExportingId(target.id);
+      try {
+        await exportPack(target.id, target.name, dest);
+      } finally {
+        setExportingId(null);
+      }
+    },
+    [exportPack],
+  );
+
   const handleRemoveConfirm = useCallback(() => {
     if (!removeTarget) return;
     void remove(removeTarget.id);
@@ -582,6 +709,16 @@ export function CompanionPage() {
                 <ImageIcon className="h-4 w-4" />
                 导入 GIF
               </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => void handleImportZip()}
+                disabled={loading}
+                aria-label="导入角色包（.zip）"
+                title="从 .zip 导入角色包"
+              >
+                <FileArchive className="h-4 w-4" />
+              </Button>
             </div>
           </CardHeader>
           <CardContent className="flex min-h-0 flex-1 flex-col gap-3">
@@ -614,6 +751,8 @@ export function CompanionPage() {
                     onRename={(id, name) => void rename(id, name)}
                     onRequestRemove={setRemoveTarget}
                     onOpenAssets={(id) => void openAssetsDir(id)}
+                    exporting={exportingId === model.id}
+                    onExport={(m) => void handleExportPack(m)}
                   />
                 ))}
               </div>
@@ -661,7 +800,7 @@ export function CompanionPage() {
                   <div className="flex w-full items-center gap-2">
                     <span className="w-20 shrink-0">音色</span>
                     <Select value={selected.voice_id ?? ""} onValueChange={handleVoiceChange}>
-                      <SelectTrigger aria-label="伙伴音色" className="h-8 w-48">
+                      <SelectTrigger aria-label="伙伴音色" className="h-8 min-w-0 flex-1">
                         <SelectValue placeholder="使用全局默认" />
                       </SelectTrigger>
                       <SelectContent>
@@ -678,6 +817,46 @@ export function CompanionPage() {
                         ))}
                       </SelectContent>
                     </Select>
+                    <button
+                      type="button"
+                      aria-label={previewingVoice ? "停止试听" : "试听音色"}
+                      title={
+                        selected.has_voice
+                          ? previewingVoice
+                            ? "停止试听"
+                            : "播放生效音色的参考音频"
+                          : "该伙伴暂无生效音色（使用全局默认）"
+                      }
+                      disabled={!selected.has_voice}
+                      onClick={() => void handlePreviewVoice()}
+                      className="shrink-0 rounded p-1.5 text-muted-foreground transition-colors hover:bg-muted/60 hover:text-text-primary disabled:pointer-events-none disabled:opacity-30"
+                    >
+                      {previewingVoice ? (
+                        <span className="block h-3.5 w-3.5 animate-pulse rounded-full bg-current" />
+                      ) : (
+                        <Volume2 className="h-3.5 w-3.5" />
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      aria-label="上传音色"
+                      title="上传自定义音色（覆盖当前生效音色，作者原版自动备份）"
+                      onClick={() => setVoiceUploadTarget(selected)}
+                      className="shrink-0 rounded p-1.5 text-muted-foreground transition-colors hover:bg-muted/60 hover:text-text-primary"
+                    >
+                      <Upload className="h-3.5 w-3.5" />
+                    </button>
+                    {selected.has_original_voice && (
+                      <button
+                        type="button"
+                        aria-label="恢复角色自带音色"
+                        title="恢复作者原版音色（丢弃当前上传的版本）"
+                        onClick={() => setRestoreVoiceTarget(selected)}
+                        className="shrink-0 rounded p-1.5 text-muted-foreground transition-colors hover:bg-muted/60 hover:text-text-primary"
+                      >
+                        <Undo2 className="h-3.5 w-3.5" />
+                      </button>
+                    )}
                   </div>
                   {selected.voice_id != null && !selected.has_voice ? (
                     <p className="text-xs text-destructive">
@@ -685,13 +864,77 @@ export function CompanionPage() {
                     </p>
                   ) : selected.voice_source === "pack" ? (
                     <p className="text-xs text-muted-foreground">
-                      角色包自带的音色优先生效；上方绑定仅在移除自带音色后生效。
+                      {selected.has_original_voice
+                        ? "当前音色为自定义版本，作者原版已备份可恢复；分享角色包会带上当前生效的音色。"
+                        : "角色包自带的音色优先生效；点「上传音色」可用自己的声音覆盖，作者原版自动备份。"}
                     </p>
                   ) : !isCloneTtsKind(ttsModelType) && selected.voice_id != null ? (
                     <p className="text-xs text-muted-foreground">
                       当前 TTS 模型不支持音色克隆，绑定将在切换到克隆模型后生效。
                     </p>
                   ) : null}
+                  {/* 唤醒词/欢迎语：受控草稿 + 显式保存——保存会重启语音会话，
+                      不做失焦自动提交，避免误触发；输入文字用正文色
+                      （容器继承 text-muted-foreground，需显式覆盖）。 */}
+                  <div className="flex w-full items-center gap-2">
+                    <span className="w-20 shrink-0">唤醒词</span>
+                    <Input
+                      value={wakeWordDraft}
+                      onChange={(e) => setWakeWordDraft(e.target.value)}
+                      placeholder={selected.wake_word_effective}
+                      aria-label="伙伴唤醒词"
+                      className="h-8 min-w-0 flex-1 text-text-primary"
+                    />
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-8 shrink-0"
+                      aria-label="保存唤醒词"
+                      disabled={!wakeWordDirty}
+                      onClick={() => commitWakeWord()}
+                    >
+                      保存
+                    </Button>
+                  </div>
+                  {selected.wake_word_ok ? (
+                    <p className="text-xs text-muted-foreground">
+                      对着麦克风喊唤醒词即可唤醒；留空 = 跟随角色名。
+                    </p>
+                  ) : (
+                    <p className="text-xs text-destructive">
+                      「{selected.wake_word_effective}
+                      」无法转为唤醒词，已回退全局唤醒词，请换一个词。
+                    </p>
+                  )}
+                  <div className="flex w-full items-center gap-2">
+                    <span className="w-20 shrink-0">欢迎语</span>
+                    <Input
+                      value={welcomeDraft}
+                      onChange={(e) => setWelcomeDraft(e.target.value)}
+                      placeholder={selected.welcome_text_effective}
+                      aria-label="伙伴欢迎语"
+                      className="h-8 min-w-0 flex-1 text-text-primary"
+                    />
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-8 shrink-0"
+                      aria-label="保存欢迎语"
+                      disabled={!welcomeDirty}
+                      onClick={() => commitWelcomeText()}
+                    >
+                      保存
+                    </Button>
+                  </div>
+                  {selected.welcome_ready ? (
+                    <p className="text-xs text-muted-foreground">
+                      唤醒后播报的欢迎语；留空 = 使用「你好，我是{selected.name}。」。
+                    </p>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">
+                      欢迎语音生成中，唤醒时将先用实时合成。
+                    </p>
+                  )}
                 </>
               )}
             </div>
@@ -797,6 +1040,55 @@ export function CompanionPage() {
           </div>
         )}
       </ModelDialog>
+
+      {/* 音色上传对话框 */}
+      <CompanionVoiceUploadDialog
+        open={voiceUploadTarget != null}
+        companion={voiceUploadTarget}
+        onClose={() => setVoiceUploadTarget(null)}
+        onSubmit={(wavPath, referenceText) =>
+          uploadVoice(voiceUploadTarget?.id ?? "", wavPath, referenceText)
+        }
+      />
+
+      {/* 恢复角色自带音色确认（不可逆：丢弃当前上传的版本） */}
+      <ModelDialog
+        open={restoreVoiceTarget != null}
+        onClose={() => setRestoreVoiceTarget(null)}
+        title="恢复角色自带音色"
+        width="sm"
+        footer={
+          <>
+            <Button variant="ghost" size="sm" onClick={() => setRestoreVoiceTarget(null)}>
+              取消
+            </Button>
+            <Button
+              size="sm"
+              onClick={() => {
+                if (restoreVoiceTarget) void restoreVoice(restoreVoiceTarget.id);
+                setRestoreVoiceTarget(null);
+              }}
+            >
+              恢复
+            </Button>
+          </>
+        }
+      >
+        {(restoreVoiceTarget ?? null) && (
+          <div className="space-y-1">
+            <p className="text-sm text-text-primary">
+              确定要把 <span className="font-semibold">{restoreVoiceTarget?.name}</span>{" "}
+              的音色恢复为作者原版吗？
+            </p>
+            <p className="text-sm text-text-secondary">
+              恢复后，当前上传的音色将被删除，且无法找回。
+            </p>
+          </div>
+        )}
+      </ModelDialog>
+      {/* 音色试听播放器（隐藏；播完复位按钮态）。 */}
+      {/* biome-ignore lint/a11y/useMediaCaption: 隐藏的功能性播放器（试听参考音频），无可感知的媒体内容 */}
+      <audio ref={voiceAudioRef} className="hidden" onEnded={() => setPreviewingVoice(false)} />
     </div>
   );
 }

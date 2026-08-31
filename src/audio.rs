@@ -236,6 +236,42 @@ pub fn write_wav_f32(path: &Path, sample_rate: u32, samples: &[f32]) -> Result<(
     write_wav(path, sample_rate, &pcm)
 }
 
+/// 读任意 wav 为 mono f32 样本 + 采样率（`write_wav_f32` 的逆操作）。
+///
+/// 解码规则与 `companion::convert_reference_to_mono` 一致：Int 按位宽归一、
+/// Float 直读、多声道按帧平均混音。供欢迎语预合成音频等「存盘 wav 再喂播放器」
+/// 的路径使用——`Speaker::play` 只接受 f32 采样，播放时采样率按文件自带值传，
+/// 与合成路径同构（rodio 侧采样率适配行为一致）。
+pub fn read_wav_mono(path: &Path) -> Result<(Vec<f32>, u32), String> {
+    let mut reader = hound::WavReader::open(path)
+        .map_err(|e| format!("无法解码音频（{}）: {e}", path.display()))?;
+    let spec = reader.spec();
+    let channels = spec.channels.max(1) as usize;
+    let scale = (1u64 << (spec.bits_per_sample.saturating_sub(1))) as f32;
+    let mixed: hound::Result<Vec<f32>> = match spec.sample_format {
+        hound::SampleFormat::Int => reader
+            .samples::<i32>()
+            .map(|s| s.map(|v| v as f32 / scale))
+            .collect(),
+        hound::SampleFormat::Float => reader.samples::<f32>().collect(),
+    };
+    let samples = mixed.map_err(|e| format!("读取音频采样失败（{}）: {e}", path.display()))?;
+    if samples.is_empty() {
+        return Err(format!("音频为空（{}）", path.display()));
+    }
+    // 单声道零拷贝直返；多声道按帧平均。
+    let mono = if channels == 1 {
+        samples
+    } else {
+        samples
+            .chunks(channels)
+            .filter(|frame| !frame.is_empty())
+            .map(|frame| frame.iter().sum::<f32>() / frame.len() as f32)
+            .collect()
+    };
+    Ok((mono, spec.sample_rate))
+}
+
 fn mic_permission_hint() -> String {
     "未找到默认麦克风。\n  macOS 请在「系统设置 → 隐私与安全性 → 麦克风」中授权当前终端 App，然后重试。\n  可用 `kws list-devices` 查看设备，`kws run --device <名称>` 指定设备。"
         .to_string()
@@ -384,5 +420,53 @@ mod tests {
         assert_eq!(f32_to_i16(2.0), i16::MAX); // 超界裁剪
         assert_eq!(f32_to_i16(-2.0), -i16::MAX);
         assert_eq!(f32_to_i16(0.0), 0);
+    }
+
+    #[test]
+    fn test_read_wav_mono_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.wav");
+        let samples = vec![0.5f32, -0.25, 0.75];
+        write_wav_f32(&path, 24_000, &samples).unwrap();
+        let (loaded, rate) = read_wav_mono(&path).unwrap();
+        assert_eq!(rate, 24_000);
+        assert_eq!(loaded.len(), 3);
+        // 量化误差内一致（write 走 i16）。
+        for (a, b) in loaded.iter().zip(samples.iter()) {
+            assert!((a - b).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn test_read_wav_mono_stereo_mixdown() {
+        // 手写一个 stereo wav（每帧两声道），验证按帧平均混音。
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("st.wav");
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate: 16_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut w = hound::WavWriter::create(&path, spec).unwrap();
+        // 帧1: (0.5, -0.5) → 0；帧2: (1.0, 0.0) → 0.5
+        for s in [16384i32, -16384, 32767, 0] {
+            w.write_sample(s).unwrap();
+        }
+        w.finalize().unwrap();
+        let (mono, rate) = read_wav_mono(&path).unwrap();
+        assert_eq!(rate, 16_000);
+        assert_eq!(mono.len(), 2);
+        assert!(mono[0].abs() < 1e-4);
+        assert!((mono[1] - 0.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_read_wav_mono_rejects_garbage() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.wav");
+        std::fs::write(&path, b"not a wav").unwrap();
+        assert!(read_wav_mono(&path).is_err());
+        assert!(read_wav_mono(&dir.path().join("missing.wav")).is_err());
     }
 }

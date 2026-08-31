@@ -474,7 +474,7 @@ impl VoiceSession {
         Ok(())
     }
 
-    /// Armed：待唤醒，喂 KWS 检测唤醒词；命中 → 合成欢迎语并切到 Greeting（播欢迎语）。
+    /// Armed：待唤醒，喂 KWS 检测唤醒词；命中 → 播欢迎语并切到 Greeting。
     fn step_armed(&mut self) -> Result<(), String> {
         let chunk = match self.mic.next(MIC_POLL)? {
             MicEvent::Chunk(c) => c,
@@ -488,18 +488,25 @@ impl VoiceSession {
             (self.emit)(VoiceEvent::Wake { keyword });
             // 首响打点：唤醒时刻（含欢迎语流程；回复轮的起点在 start_reply）
             self.t_wake = Some(Instant::now());
-            // 唤醒 → 合成并播放欢迎语（复用 SynthHandle；进入 Greeting 等结果）。
-            // 欢迎语同规则清洗（剥 emoji 等）；清洗为空**必须回退原文**——
-            // step_greeting 靠恰一次合成终态置 welcome_played，跳过 enqueue 会卡死
-            let welcome = sanitize_for_tts(&self.cfg.welcome_text);
-            let welcome = if welcome.is_empty() {
-                self.cfg.welcome_text.clone()
-            } else {
-                welcome
-            };
-            self.synth.clear_cancel();
-            self.synth.enqueue(welcome, self.current_gen);
-            self.welcome_played = false;
+            match resolve_welcome_source(&self.cfg) {
+                // 预合成 wav 新鲜：直接播放（零合成延迟）。welcome_played 恰一次置位，
+                // step_greeting 等 drained() 迁移，状态机语义不变。
+                WelcomeSource::Clip {
+                    samples,
+                    sample_rate,
+                } => {
+                    self.speaker.play(samples, sample_rate);
+                    self.welcome_played = true;
+                }
+                // 走实时合成（无预合成 / 指纹过期 / wav 损坏的统一降级路径）。
+                // 欢迎语同规则清洗（剥 emoji 等）；清洗为空**必须回退原文**——
+                // step_greeting 靠恰一次合成终态置 welcome_played，跳过 enqueue 会卡死
+                WelcomeSource::Synthesize(welcome) => {
+                    self.synth.clear_cancel();
+                    self.synth.enqueue(welcome, self.current_gen);
+                    self.welcome_played = false;
+                }
+            }
             self.set_state(SessionEvent::KeywordDetected)?; // → Greeting
         }
         Ok(())
@@ -1367,6 +1374,38 @@ fn hot_swap_voice_fallback(
     }
 }
 
+/// 唤醒后欢迎语的来源（`resolve_welcome_source` 产出，`step_armed` 消费）。
+enum WelcomeSource {
+    /// 预合成 wav 新鲜：直接播放已解码采样（零合成延迟）。
+    Clip { samples: Vec<f32>, sample_rate: u32 },
+    /// 实时合成文本（清洗后）；无预合成 / 指纹过期 / wav 损坏的统一降级路径。
+    Synthesize(String),
+}
+
+/// 解析唤醒后的欢迎语来源：预合成指纹新鲜 → 直接播 wav，否则实时合成。
+///
+/// 纯逻辑（可单测）：wav 读取失败也归入降级——唤醒路径绝不因资产问题卡死。
+fn resolve_welcome_source(cfg: &ResolvedSessionConfig) -> WelcomeSource {
+    if let Some(clip) = &cfg.welcome_clip
+        && let Some((samples, sample_rate)) =
+            crate::companion_welcome::load_fresh(&clip.wav, &clip.meta, &clip.fingerprint)
+    {
+        return WelcomeSource::Clip {
+            samples,
+            sample_rate,
+        };
+    }
+    // 欢迎语同规则清洗（剥 emoji 等）；清洗为空必须回退原文——
+    // step_greeting 靠恰一次合成终态置 welcome_played，跳过 enqueue 会卡死。
+    let welcome = sanitize_for_tts(&cfg.welcome_text);
+    let welcome = if welcome.is_empty() {
+        cfg.welcome_text.clone()
+    } else {
+        welcome
+    };
+    WelcomeSource::Synthesize(welcome)
+}
+
 /// KWS 反应（Armed 待唤醒）：命中唤醒词即停止检测并记录关键词 → 切换 ASR。
 #[derive(Default)]
 struct WakeReaction {
@@ -1399,6 +1438,7 @@ impl Reaction for BargeInReaction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::run_with_temp_home;
 
     /// 热切换音色解析失败兜底：强制克隆族（qwen3_tts 两尺寸）不换引擎（None），
     /// 其余族兜底 Sid(0)（auto voice / 默认音色语义）。
@@ -1906,5 +1946,79 @@ mod tests {
         assert!(gate.on_terminal());
         assert!(gate.on_stream_chunk(), "句 2 首块在句 1 补弹复位后正常触发");
         assert!(!gate.on_terminal());
+    }
+
+    /// 构造最小会话配置（temp home 内 resolve 默认值）。
+    fn welcome_test_cfg() -> ResolvedSessionConfig {
+        crate::voice::config::resolve(None, &crate::voice::config::CliOverrides::default()).unwrap()
+    }
+
+    #[test]
+    fn test_resolve_welcome_source_branches() {
+        run_with_temp_home(|_home| {
+            // 无 clip → 实时合成（全局默认文案）。
+            let cfg = welcome_test_cfg();
+            assert!(matches!(
+                resolve_welcome_source(&cfg),
+                WelcomeSource::Synthesize(_)
+            ));
+
+            // 清洗为空（纯 emoji）→ 回退原文。
+            let mut cfg = welcome_test_cfg();
+            cfg.welcome_text = "😂😂".to_string();
+            match resolve_welcome_source(&cfg) {
+                WelcomeSource::Synthesize(text) => assert_eq!(text, "😂😂"),
+                _ => panic!("应走实时合成分支"),
+            }
+
+            // clip 指纹不匹配（旁车过期/被改）→ 降级实时合成。
+            let mut cfg = welcome_test_cfg();
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(dir.path().join("voice")).unwrap();
+            crate::audio::write_wav_f32(
+                &crate::companion_welcome::welcome_wav_path(dir.path()),
+                24_000,
+                &[0.1; 100],
+            )
+            .unwrap();
+            cfg.welcome_clip = Some(crate::voice::config::WelcomeClip {
+                wav: crate::companion_welcome::welcome_wav_path(dir.path()),
+                meta: crate::companion_welcome::welcome_meta_path(dir.path()),
+                fingerprint: "stale".to_string(),
+            });
+            assert!(matches!(
+                resolve_welcome_source(&cfg),
+                WelcomeSource::Synthesize(_)
+            ));
+
+            // 指纹匹配 + wav 可解码 → 直接播 clip。
+            let fp = crate::companion_welcome::clip_fingerprint(&cfg);
+            let meta = crate::companion_welcome::WelcomeMeta {
+                text: cfg.welcome_text.clone(),
+                fingerprint: fp.clone(),
+                sample_rate: 24_000,
+                generated_at: "2026-08-30T00:00:00Z".to_string(),
+            };
+            std::fs::write(
+                crate::companion_welcome::welcome_meta_path(dir.path()),
+                serde_json::to_string(&meta).unwrap(),
+            )
+            .unwrap();
+            cfg.welcome_clip = Some(crate::voice::config::WelcomeClip {
+                wav: crate::companion_welcome::welcome_wav_path(dir.path()),
+                meta: crate::companion_welcome::welcome_meta_path(dir.path()),
+                fingerprint: fp,
+            });
+            match resolve_welcome_source(&cfg) {
+                WelcomeSource::Clip {
+                    samples,
+                    sample_rate,
+                } => {
+                    assert_eq!(sample_rate, 24_000);
+                    assert_eq!(samples.len(), 100);
+                }
+                _ => panic!("指纹新鲜应走 clip 分支"),
+            }
+        });
     }
 }

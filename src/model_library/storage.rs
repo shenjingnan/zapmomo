@@ -814,6 +814,8 @@ mod tests {
                     imported_at: "t".into(),
                     voice_id: None,
                     layout: None,
+                    wake_word: None,
+                    welcome_text: None,
                 }],
                 active_model_id: Some(id.to_string()),
                 completed_migrations: Vec::new(),
