@@ -66,13 +66,16 @@ An open-source, real-time desktop **AI companion** with voice, memory, and a cus
 
 ### macOS 首次打开（未签名）
 
-项目未申请 Apple Developer 证书，安装包**未签名**。每次从 Releases 下载后，首次启动都会被系统拦截（提示「无法验证开发者」）。请先将 App 拖入「应用程序」，再执行：
+项目未申请 Apple Developer 证书，安装包**未签名**。首次打开会被 Gatekeeper 拦截，提示「"ZapMomo" 已损坏，无法打开。你应该将它移到废纸篓。」——**并非真的损坏**，只是系统给下载的文件加了隔离属性。两种处理方式：
 
-```bash
-xattr -cr "/Applications/ZapMomo.app"
-```
+- **双击修复脚本（推荐）**：打开下载的 dmg，双击其中的「**首次打开修复.command**」。脚本会自动把 ZapMomo 安装到「应用程序」、清除隔离属性并启动，无需手动拖动（若双击时提示「无法验证开发者」，右键该文件 →「打开」→ 再次点击「打开」）。
+- **手动执行命令**：先把 ZapMomo 拖入「应用程序」，再打开「终端」（Terminal）执行：
 
-随后启动即可正常打开。若 App 不在「应用程序」，把命令里的路径换成实际位置；或右键 App →「打开」→ 再次点击「打开」。
+  ```bash
+  xattr -cr "/Applications/ZapMomo.app"
+  ```
+
+若 App 不在「应用程序」，把命令里的路径换成实际位置；或右键 App →「打开」→ 再次点击「打开」。
 
 <details>
 

@@ -63,13 +63,16 @@ Click a button below to grab the latest installer for your system (no GitHub log
 
 ### First Launch on macOS (Unsigned)
 
-The project has no Apple Developer certificate, so installers are **unsigned**. Every freshly downloaded build from Releases is blocked on first launch ("cannot verify developer"). Drag the app into "Applications", then run:
+The project has no Apple Developer certificate, so installers are **unsigned**. On first launch macOS reports ""ZapMomo" is damaged and can't be opened. You should move it to the Trash." — the app is not actually damaged; Gatekeeper just adds a quarantine attribute to downloaded files. Two ways to fix it:
 
-```bash
-xattr -cr "/Applications/ZapMomo.app"
-```
+- **Run the fixer script (recommended)**: open the downloaded DMG and double-click **首次打开修复.command** ("first launch fix"). It installs ZapMomo into "Applications", clears the quarantine attribute, and launches the app — no manual dragging needed. (If double-clicking the script prompts "cannot verify developer", right-click it → "Open" → click "Open" again.)
+- **Run the command manually**: drag ZapMomo into "Applications", then open Terminal and run:
 
-After that the app launches normally. If the app is not in "Applications", replace the path with its actual location; or right-click the app → "Open" → click "Open" again.
+  ```bash
+  xattr -cr "/Applications/ZapMomo.app"
+  ```
+
+If the app is not in "Applications", replace the path with its actual location; or right-click the app → "Open" → click "Open" again.
 
 <details>
 

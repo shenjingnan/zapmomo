@@ -158,6 +158,16 @@ describe('PLATFORMS 数据完整性', () => {
       expect(f.systems, `${f.label} 缺少适用系统说明`).toBeTruthy();
     }
   });
+
+  it('macOS 平台的 note 指引双击「首次打开修复.command」', () => {
+    // 文件名须与 dmg 内注入的修复脚本（scripts/patch-dmg-gatekeeper.sh 的
+    // FIXER_NAME）及 README「macOS 首次打开」保持同步
+    for (const p of PLATFORMS.filter((p) => p.os === 'macOS')) {
+      expect(p.note ?? '', `${p.key} 的 note 未提及修复脚本`).toContain(
+        '首次打开修复.command',
+      );
+    }
+  });
 });
 
 describe('platformByKey', () => {

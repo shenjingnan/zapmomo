@@ -29,11 +29,15 @@ jobs:
       matrix:
         include:
           - platform: macos-latest
+            # triple 供下方 Stage macOS bundles 步骤定位 bundle 产物目录
+            # （target/<triple>/release/bundle），不挪用语义专属的 audiocpp_triple
+            triple: aarch64-apple-darwin
             args: '--target aarch64-apple-darwin'
             audiocpp_triple: aarch64-apple-darwin
             # arm64 保留 Metal（大模型可走 GPU；小模型实测 CPU 更快，运行时按 [tts].provider 选择）
             audiocpp_extra: '-DENGINE_ENABLE_METAL=ON'
           - platform: macos-latest
+            triple: x86_64-apple-darwin
             args: '--target x86_64-apple-darwin'
             audiocpp_triple: x86_64-apple-darwin
             # ARM runner 上交叉编译 x86_64：Metal 关闭（Intel Mac 走 CPU）
@@ -171,7 +175,11 @@ jobs:
       - uses: tauri-apps/tauri-action@v1
         with:
           args: ${{ matrix.args }}
-          uploadWorkflowArtifacts: true
+          # macOS 关闭 action 上传、改为下方手动上传：dmg 需先经
+          # scripts/patch-dmg-gatekeeper.sh 注入「首次打开修复.command」
+          # （未签名应用被 Gatekeeper 报「已损坏」，双击脚本即自动安装 + 修复），
+          # 注入必须发生在产物落盘之后、上传之前，action 的上传时机插不进自定义步骤。
+          uploadWorkflowArtifacts: ${{ runner.os != 'macOS' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # 配置证书后由 tauri-action 自动签名/公证 macOS 产物
@@ -180,11 +188,56 @@ jobs:
           # APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           # APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
+      - name: Stage macOS bundles and inject Gatekeeper fixer
+        # 产物先拷到 staged/ 扁平目录再上传：upload-artifact 以多行 path 的公共
+        # 祖先为根保留目录结构，直接传 bundle/ 会带出 dmg/、macos/ 子目录，
+        # release job 下载合并后 `for f in *` 就扫不到文件了。
+        # 注意是仓库根 target/ 而非 src-tauri/target/：根 Cargo.toml 定义了
+        # workspace，cargo 把产物统一放在 workspace 根 target/ 下按 triple 分目录。
+        if: matrix.platform == 'macos-latest'
+        shell: bash
+        run: |
+          BUNDLE="target/${{ matrix.triple }}/release/bundle"
+          shopt -s nullglob
+          DMGS=("$BUNDLE"/dmg/*.dmg)
+          # 空 glob 防呆：路径写错/布局变化时立刻失败并打出目录树，而不是发布出
+          # 一个没有 dmg 的 Release。只校验 dmg：本仓库未启用 updater，
+          # 不产出 .app.tar.gz（已核实历史 Release 资产）。
+          if [ ${#DMGS[@]} -eq 0 ]; then
+            echo "::error::未找到 dmg 产物: $BUNDLE/dmg/"
+            ls -R "$BUNDLE" || true
+            exit 1
+          fi
+          mkdir -p staged
+          cp "${DMGS[@]}" staged/
+          for dmg in staged/*.dmg; do
+            ./scripts/patch-dmg-gatekeeper.sh "$dmg"
+          done
+          ls -l staged
+
+      - name: Upload macOS bundles
+        if: matrix.platform == 'macos-latest'
+        uses: actions/upload-artifact@v6
+        with:
+          # 双架构同为 macos-latest，platform 无法区分，按 triple 命名；
+          # release job 的 download-artifact 用 pattern '*' 合并，名字只需唯一
+          name: bundle-${{ matrix.triple }}
+          path: staged/*
+
   release:
     name: Create GitHub Release
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - name: "Guard: only publish from v* tags"
+        # 本 workflow 也可 workflow_dispatch 手动触发（验证构建用），但下方
+        # softprops 会以 github.ref_name（分支名）为 tag 建公开 Release 并触发
+        # upload-baidu-pan.yml，必须硬拦：仅 v* tag 允许走到发布。
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        run: |
+          echo "::error::release job 仅支持 v* tag 触发；workflow_dispatch 只用于验证构建，不发布。"
+          exit 1
+
       - uses: actions/download-artifact@v8
         with:
           pattern: '*'
@@ -236,7 +289,9 @@ jobs:
           | **Ubuntu / Debian** | amd64 | [![deb](https://img.shields.io/badge/download-amd64.deb-A80030?logo=debian&logoColor=white)](${BASE}/ZapMomo_Linux_amd64.deb) | 或 [AppImage](${BASE}/ZapMomo_Linux_amd64.AppImage) 免安装运行 |
           | **Fedora / RHEL** | x86_64 | [![rpm](https://img.shields.io/badge/download-x86_64.rpm-294172?logo=fedora&logoColor=white)](${BASE}/ZapMomo_Linux_x86_64.rpm) | 或 [AppImage](${BASE}/ZapMomo_Linux_amd64.AppImage) 免安装运行 |
 
-          > 🍎 Mac 用户不确定选哪个？点按左上角  菜单 →「关于本机」：显示「芯片：Apple M…」下载 **arm64** 版；显示「处理器：Intel Core…」下载 **x64** 版。
+          > 🍎 **Mac 用户看这里：**
+          > 1. 不确定选哪个？点按左上角  菜单 →「关于本机」：显示「芯片：Apple M…」下载 **arm64** 版；显示「处理器：Intel Core…」下载 **x64** 版。
+          > 2. 首次打开若提示「"ZapMomo" 已损坏，无法打开」，并非真的损坏（应用未做 Apple 签名公证，被 Gatekeeper 拦截）：**双击 dmg 窗口里的「首次打开修复.command」**，自动安装到「应用程序」、清除隔离属性并启动；也可手动执行终端命令 \`xattr -cr /Applications/ZapMomo.app\`。详见 README「macOS 首次打开」一节。
           EOF
           cat release_body.md
 

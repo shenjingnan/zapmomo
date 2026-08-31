@@ -110,10 +110,11 @@ export function DownloadSection() {
                     ))}
                     {isMac && (
                       <p className="border-t border-fd-border px-4 py-2.5 text-xs leading-relaxed text-fd-muted-foreground">
-                        ⚠️ 未签名：首次打开前请执行{' '}
+                        ⚠️ 未签名：首次打开提示「已损坏」？双击 dmg 内的{' '}
                         <code className="rounded bg-fd-muted px-1 py-0.5">
-                          xattr -cr &quot;/Applications/ZapMomo.app&quot;
-                        </code>
+                          首次打开修复.command
+                        </code>{' '}
+                        自动安装并修复
                         <br />
                         不确定芯片？左上角  →「关于本机」看「芯片」一栏
                       </p>
