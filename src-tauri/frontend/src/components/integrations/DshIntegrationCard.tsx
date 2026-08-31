@@ -323,12 +323,12 @@ export function DshIntegrationCard() {
             {pluginInstalled && (
               <Button
                 size="sm"
-                variant="ghost"
+                variant="destructive"
                 disabled={busy}
                 onClick={() => void handleUninstall()}
               >
                 <Trash2 className="h-3.5 w-3.5" />
-                卸载插件
+                卸载
               </Button>
             )}
           </div>

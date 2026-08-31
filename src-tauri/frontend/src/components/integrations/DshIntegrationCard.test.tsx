@@ -212,7 +212,7 @@ describe("DshIntegrationCard", () => {
     });
     render(<DshIntegrationCard />);
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("get_dsh_config"));
-    await userEvent.click(screen.getByRole("button", { name: /卸载插件/ }));
+    await userEvent.click(screen.getByRole("button", { name: /卸载/ }));
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("uninstall_dsh_plugin"));
   });
 
@@ -232,7 +232,7 @@ describe("DshIntegrationCard", () => {
     });
     render(<DshIntegrationCard />);
     await screen.findByTestId("dsh-integration-state");
-    expect(screen.queryByRole("button", { name: /卸载插件/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /卸载/ })).toBeNull();
     expect(screen.getByRole("switch", { name: "LLM 播报文案" })).toBeDisabled();
     expect(screen.getByRole("button", { name: /测试播报/ })).toBeDisabled();
   });
@@ -245,7 +245,7 @@ describe("DshIntegrationCard", () => {
     });
     render(<DshIntegrationCard />);
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("get_dsh_config"));
-    await userEvent.click(screen.getByRole("button", { name: /卸载插件/ }));
+    await userEvent.click(screen.getByRole("button", { name: /卸载/ }));
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("uninstall_dsh_plugin"));
     emit("dsh-install-progress", {
       state: "failed",
