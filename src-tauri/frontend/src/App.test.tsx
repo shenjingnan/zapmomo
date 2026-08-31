@@ -287,12 +287,12 @@ describe("App（KWS 控制面板）", () => {
     });
   });
 
-  it("概览页语音会话开关调用 set_voice_enabled（持久化启用态）", async () => {
+  it("设置页语音会话开关调用 set_voice_enabled（持久化启用态）", async () => {
     // 开关前置：KWS/ASR 需已启用，否则语音会话开关置灰点不动
     kwsConfig = { ...DEFAULT_CONFIG, enabled: true, models_present: true };
     asrConfig = { ...ASR_CONFIG, enabled: true, models_present: true };
     const user = userEvent.setup();
-    renderApp("/models");
+    renderApp("/settings");
 
     // 默认 voiceEnabled=true，点击即停用
     await user.click(await screen.findByRole("switch", { name: "语音会话开关" }));

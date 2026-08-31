@@ -1,5 +1,5 @@
 import { open } from "@tauri-apps/plugin-dialog";
-import { CircleAlert, FolderOpen, HardDrive, Settings2 } from "lucide-react";
+import { AudioLines, CircleAlert, FolderOpen, HardDrive, Settings2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { DeviceSelect } from "@/components/DeviceSelect";
 import { ModelDialog } from "@/components/models/ModelDialog";
@@ -10,18 +10,23 @@ import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/components/ui/toast";
+import { voiceSessionStatus } from "@/components/voice/voiceSessionStatus";
 import { api, onAutostartChanged, onStorageMigrateProgress } from "@/lib/tauri";
 import { formatBytes } from "@/lib/utils";
 import { useRuntime } from "@/providers/RuntimeContext";
 import type { StorageInfo, StorageMigrateProgress } from "@/types/modelLibrary";
 
 /**
- * 设置页：通用设置（麦克风来源 / 隐藏 Dock 图标）+ 存储位置（数据目录）。
+ * 设置页：通用设置（麦克风来源 / 隐藏 Dock 图标）+ 语音互动总开关 + 存储位置（数据目录）。
  * 存储位置支持自定义数据目录（新下载走新目录、存量双根可见）与「迁移已有模型释放空间」。
  */
 export function SettingsPage() {
   const {
     devices: { error: devicesError },
+    kws,
+    asr,
+    llm,
+    voice,
   } = useRuntime();
   const toast = useToast();
   const [hideDockIcon, setHideDockIcon] = useState<boolean | null>(null);
@@ -109,6 +114,15 @@ export function SettingsPage() {
     setAutostart(enabled);
     void api.setAutostart({ enabled }).catch(() => setAutostart((prev) => !prev));
   };
+
+  // ---- 语音互动 ----
+
+  // 语音会话行状态由 voiceSessionStatus 统一推导（含大脑未就绪警示）；
+  // 前置（KWS/ASR 启用）缺失时开关置灰——后端 start_voice_session_impl 同口径校验兜底。
+  const kwsOn = kws.config.config?.enabled ?? false;
+  const asrOn = asr.config.config?.enabled ?? false;
+  const voiceReady = kwsOn && asrOn;
+  const voiceStatus = voiceSessionStatus(voice, llm);
 
   // ---- 存储位置交互 ----
 
@@ -221,6 +235,48 @@ export function SettingsPage() {
             </Alert>
           </div>
         )}
+      </section>
+
+      {/* 语音互动总开关（KWS→ASR→LLM→TTS 全链路，持久化 [voice].enabled，重启保持） */}
+      <section className="overflow-hidden rounded-[16px] border border-panel-border bg-panel-background">
+        <div className="px-3.5 py-2.5">
+          <div className="flex items-center gap-2.5">
+            <AudioLines className="h-4 w-4 shrink-0 text-text-secondary" />
+            <div>
+              <h2 className="text-base font-semibold text-text-primary">语音互动</h2>
+              <p className="mt-0.5 text-xs text-text-muted">
+                喊唤醒词与桌宠对话；关闭后对话记录保留但不再收音响应
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <dl className="divide-y divide-divider">
+          <div className="flex items-center justify-between gap-3.5 px-3.5 py-2.5">
+            <div className="min-w-0">
+              <dt className="text-sm text-text-primary">启用语音会话</dt>
+              <dd className="mt-0.5 text-xs text-text-muted">
+                唤醒词 → 识别 → 对话 → 语音播报 · 当前状态：{voiceStatus.label}
+              </dd>
+            </div>
+            <Switch
+              aria-label="语音会话开关"
+              checked={voice.enabled}
+              onCheckedChange={(on) => void voice.setEnabled(on)}
+              disabled={!voiceReady || voice.pending}
+            />
+          </div>
+
+          {!voiceReady && (
+            <div className="px-3.5 pb-2.5">
+              <Alert>
+                <AlertDescription>
+                  需要先在「模型与能力」页启用「唤醒词」(KWS) 与「语音识别」(ASR)。
+                </AlertDescription>
+              </Alert>
+            </div>
+          )}
+        </dl>
       </section>
 
       {/* 伙伴窗口（层级 / 点击穿透 / 锁定 / 修饰键拖动，全局生效） */}

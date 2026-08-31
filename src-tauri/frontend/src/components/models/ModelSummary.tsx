@@ -4,7 +4,6 @@ import {
   ChevronRight,
   Fingerprint,
   type LucideIcon,
-  MessageCircle,
   Mic,
   RefreshCw,
   Volume2,
@@ -22,17 +21,15 @@ import { KwsModelSwitchMenu } from "@/components/models/KwsModelSwitchMenu";
 import { TtsModelSwitchMenu } from "@/components/models/TtsModelSwitchMenu";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
-import { voiceSessionStatus } from "@/components/voice/voiceSessionStatus";
 import { cn } from "@/lib/utils";
 import { useRuntime } from "@/providers/RuntimeContext";
 
-type StatusTone = "good" | "idle" | "loading" | "warn" | "error";
+type StatusTone = "good" | "idle" | "loading" | "error";
 
 const STATUS_COLOR: Record<StatusTone, string> = {
   good: "text-emerald-600",
   idle: "text-text-muted",
   loading: "text-blue-600",
-  warn: "text-amber-600",
   error: "text-red-600",
 };
 
@@ -135,7 +132,7 @@ function SummaryRow({ row }: { row: SummaryRowData }) {
 
 /** 模型摘要：分组 List（macOS Settings 风格），非 DataTable。 */
 export function ModelSummary() {
-  const { kws, asr, llm, tts, speaker, voice, device, sessionKeywords } = useRuntime();
+  const { kws, asr, llm, tts, speaker, device, sessionKeywords } = useRuntime();
   const [refreshing, setRefreshing] = useState(false);
 
   const refreshAll = async () => {
@@ -219,29 +216,7 @@ export function ModelSummary() {
     "监听中",
   );
 
-  // 语音会话行：开关绑持久化 enabled；状态文案/色调由 voiceSessionStatus 统一推导
-  // （含「大脑未就绪」warn 修饰）。前置（KWS/ASR 启用）缺失时置灰——
-  // 后端 start_voice_session_impl 同口径校验兜底。
-  const voiceStatus = voiceSessionStatus(voice, llm);
-
-  /** 语音会话开关：持久化「启用」+ 立即启动/停止会话（后端原子完成）。 */
-  const handleVoiceToggle = () => {
-    void voice.setEnabled(!voice.enabled);
-  };
-
   const rows: SummaryRowData[] = [
-    {
-      accent: "bg-sky-100 text-sky-600",
-      icon: MessageCircle,
-      name: "语音会话",
-      model: "唤醒词 → 识别 → 对话 → 语音播报",
-      statusText: voiceStatus.label,
-      statusTone: voiceStatus.tone,
-      gearHref: "/chat",
-      toggled: voice.enabled,
-      onToggle: handleVoiceToggle,
-      toggleDisabled: !kwsOn || !asrOn || voice.pending,
-    },
     {
       accent: "bg-violet-100 text-violet-600",
       icon: AudioWaveform,

@@ -50,7 +50,7 @@ export function voiceSessionStatus(
 ): VoiceSessionStatus {
   if (voice.error) return { label: "异常", tone: "error" };
   if (!voice.running) {
-    return voice.enabled ? { label: "已启用", tone: "idle" } : { label: "未开启", tone: "idle" };
+    return voice.enabled ? { label: "已启用", tone: "good" } : { label: "未开启", tone: "idle" };
   }
   if (voice.phase === "idle") return { label: "启动中", tone: "loading" };
 
