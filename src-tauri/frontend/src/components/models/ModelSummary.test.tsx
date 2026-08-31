@@ -298,10 +298,19 @@ describe("ModelSummary 模型摘要状态", () => {
     expectRowStatus(rowFor("tts"), "已关闭");
   });
 
-  it("语音会话：待唤醒（running + armed）→ 待唤醒", () => {
-    state.runtime = makeRuntime({ voice: makeVoice({ running: true, phase: "armed" }) });
+  it("语音会话：待唤醒（running + armed + 大脑就绪）→ 待唤醒", () => {
+    state.runtime = makeRuntime({
+      voice: makeVoice({ running: true, phase: "armed" }),
+      llm: makeLlm({ ready: true }),
+    });
     renderSummary();
     expectRowStatus(rowFor("voice"), "待唤醒", "text-emerald-600");
+  });
+
+  it("语音会话：待唤醒但 LLM 未就绪 → 待唤醒·大脑未就绪（warn）", () => {
+    state.runtime = makeRuntime({ voice: makeVoice({ running: true, phase: "armed" }) });
+    renderSummary();
+    expectRowStatus(rowFor("voice"), "待唤醒·大脑未就绪", "text-amber-600");
   });
 
   it("语音会话：running 但阶段仍 idle → 启动中", () => {
@@ -313,7 +322,7 @@ describe("ModelSummary 模型摘要状态", () => {
   it("语音会话：启用但未运行 → 已启用", () => {
     state.runtime = makeRuntime({ voice: makeVoice({ enabled: true }) });
     renderSummary();
-    expectRowStatus(rowFor("voice"), "已启用", "text-emerald-600");
+    expectRowStatus(rowFor("voice"), "已启用", "text-text-muted");
   });
 
   it("语音会话：未启用 → 未开启", () => {
@@ -322,10 +331,10 @@ describe("ModelSummary 模型摘要状态", () => {
     expectRowStatus(rowFor("voice"), "未开启", "text-text-muted");
   });
 
-  it("语音会话：出错 → 错误", () => {
+  it("语音会话：出错 → 异常", () => {
     state.runtime = makeRuntime({ voice: makeVoice({ error: "缺模型" }) });
     renderSummary();
-    expectRowStatus(rowFor("voice"), "错误", "text-red-600");
+    expectRowStatus(rowFor("voice"), "异常", "text-red-600");
   });
 
   it("默认全未配置：五行状态均显示未配置模型", () => {

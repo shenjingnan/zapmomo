@@ -9,18 +9,20 @@ import {
 } from "lucide-react";
 import { isLlmConfigured } from "@/components/llm/llmMeta";
 import { deriveListenerStatus, type ListenerKind } from "@/components/models/capabilityStatus";
+import { voiceSessionStatus } from "@/components/voice/voiceSessionStatus";
 import type { LlmState } from "@/hooks/useLlm";
 import type { TtsState } from "@/hooks/useTts";
 import type { VoiceSessionState } from "@/hooks/useVoiceSession";
 import type { RuntimeState } from "@/providers/RuntimeContext";
 
 /** 状态语义色（与模型页 ModelSummary / 各能力 meta 的语义完全一致）。 */
-export type OverviewTone = "good" | "idle" | "loading" | "error";
+export type OverviewTone = "good" | "idle" | "loading" | "warn" | "error";
 
 export const OVERVIEW_STATUS_COLOR: Record<OverviewTone, string> = {
   good: "text-emerald-600",
   idle: "text-text-muted",
   loading: "text-blue-600",
+  warn: "text-amber-600",
   error: "text-red-600",
 };
 
@@ -120,26 +122,7 @@ function speakerStatus(speaker: RuntimeState["speaker"]): { label: string; tone:
   return { label: "已就绪", tone: "good" };
 }
 
-/** 语音会话状态：错误 > 启动中 > 欢迎中/待唤醒/聆听中/思考中/播报中 > 未启动。 */
-function voiceStatus(voice: VoiceSessionState): { label: string; tone: OverviewTone } {
-  if (voice.error) return { label: "异常", tone: "error" };
-  if (voice.running && voice.phase === "idle") return { label: "启动中", tone: "loading" };
-  switch (voice.phase) {
-    case "armed":
-      return { label: "待唤醒", tone: "good" };
-    case "greeting":
-      return { label: "欢迎中", tone: "loading" };
-    case "waiting_speech":
-    case "listening":
-      return { label: "聆听中", tone: "good" };
-    case "thinking":
-      return { label: "思考中", tone: "loading" };
-    case "speaking":
-      return { label: "播报中", tone: "loading" };
-    default:
-      return { label: "未启动", tone: "idle" };
-  }
-}
+/** 语音会话状态：文案/色调由 `voiceSessionStatus` 统一推导（含「大脑未就绪」warn 修饰）。 */
 
 /**
  * 概览页 AI 能力状态推导（纯函数）：基于真实 runtime 字段推导，
@@ -152,7 +135,7 @@ export function deriveOverview(input: OverviewInput): CapabilityStatus[] {
   const llmState = llmStatus(llm);
   const ttsState = ttsStatus(tts);
   const speakerState = speakerStatus(speaker);
-  const voiceState = voiceStatus(voice);
+  const voiceState = voiceSessionStatus(voice, llm);
 
   return [
     {

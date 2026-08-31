@@ -138,6 +138,7 @@ function makeVoice(o?: { running?: boolean; phase?: VoiceSessionPhase; error?: s
   return {
     running: o?.running ?? false,
     phase: o?.phase ?? "idle",
+    enabled: true,
     error: o?.error ?? null,
   };
 }

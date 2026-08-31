@@ -22,16 +22,17 @@ import { KwsModelSwitchMenu } from "@/components/models/KwsModelSwitchMenu";
 import { TtsModelSwitchMenu } from "@/components/models/TtsModelSwitchMenu";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
-import { voicePhaseLabel } from "@/components/voice/VoiceStatusBadge";
+import { voiceSessionStatus } from "@/components/voice/voiceSessionStatus";
 import { cn } from "@/lib/utils";
 import { useRuntime } from "@/providers/RuntimeContext";
 
-type StatusTone = "good" | "idle" | "loading" | "error";
+type StatusTone = "good" | "idle" | "loading" | "warn" | "error";
 
 const STATUS_COLOR: Record<StatusTone, string> = {
   good: "text-emerald-600",
   idle: "text-text-muted",
   loading: "text-blue-600",
+  warn: "text-amber-600",
   error: "text-red-600",
 };
 
@@ -218,18 +219,10 @@ export function ModelSummary() {
     "监听中",
   );
 
-  // 语音会话行：开关绑持久化 enabled；状态 = 错误 > 运行阶段 > 已启用/未开启。
-  // 前置（KWS/ASR 启用）缺失时置灰——后端 start_voice_session_impl 同口径校验兜底。
-  const voiceStatus: { text: string; tone: StatusTone } = voice.error
-    ? { text: "错误", tone: "error" }
-    : voice.running
-      ? {
-          text: voicePhaseLabel(voice.phase, true),
-          tone: voice.phase === "idle" ? "loading" : "good",
-        }
-      : voice.enabled
-        ? { text: "已启用", tone: "good" }
-        : { text: "未开启", tone: "idle" };
+  // 语音会话行：开关绑持久化 enabled；状态文案/色调由 voiceSessionStatus 统一推导
+  // （含「大脑未就绪」warn 修饰）。前置（KWS/ASR 启用）缺失时置灰——
+  // 后端 start_voice_session_impl 同口径校验兜底。
+  const voiceStatus = voiceSessionStatus(voice, llm);
 
   /** 语音会话开关：持久化「启用」+ 立即启动/停止会话（后端原子完成）。 */
   const handleVoiceToggle = () => {
@@ -242,7 +235,7 @@ export function ModelSummary() {
       icon: MessageCircle,
       name: "语音会话",
       model: "唤醒词 → 识别 → 对话 → 语音播报",
-      statusText: voiceStatus.text,
+      statusText: voiceStatus.label,
       statusTone: voiceStatus.tone,
       gearHref: "/chat",
       toggled: voice.enabled,
