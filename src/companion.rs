@@ -648,6 +648,18 @@ fn reject_managed_source(source_abs: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// 导入前置磁盘空间预检：store 卷可用空间 vs 源大小 + 余量。
+///
+/// `import_companion` 命令无命令级互斥（锁不跨复制），两次并发导入会各自通过
+/// 本校验——已接受的限制；校验只做提前拦截，不承诺原子性（TOCTOU 由复制/下载
+/// 自身的 IO 错误兜底）。
+fn ensure_store_space(payload_bytes: u64) -> Result<(), String> {
+    let store_dir = settings::get_companions_store_dir();
+    let available = crate::model_library::sysinfo::available_space(&store_dir);
+    let required = crate::model_library::sysinfo::required_bytes_for_import(payload_bytes);
+    crate::model_library::sysinfo::check_disk_space(available, required)
+}
+
 /// 导入准备（**不持锁**，可复制大目录）：
 /// 校验源 → 去重预检 → 复制到唯一 tmp → 托管副本校验 → 计算相对清单路径。
 fn prepare_import(source: &Path) -> Result<Prepared, String> {
@@ -683,6 +695,9 @@ fn prepare_import(source: &Path) -> Result<Prepared, String> {
                 .to_string(),
         );
     }
+
+    // 磁盘空间预检：不足在复制前拒绝（staging 尚未创建，无残留）。
+    ensure_store_space(crate::model_library::storage::dir_size(&source_abs))?;
 
     let store_dir = settings::get_companions_store_dir();
     let tmp_dir = store_dir.join(new_tmp_dir_name(&id));
@@ -828,6 +843,9 @@ pub fn import_gif_from_file(source: &Path) -> Result<(CompanionModel, bool), Str
             return Ok((existing, true));
         }
     }
+
+    // 磁盘空间预检（单文件 metadata 零递归；读取失败 fail-open，由复制自身报错）。
+    ensure_store_space(std::fs::metadata(&source_abs).map(|m| m.len()).unwrap_or(0))?;
 
     let store_dir = settings::get_companions_store_dir();
     let tmp_dir = store_dir.join(new_tmp_dir_name(&id));
@@ -1181,6 +1199,9 @@ pub fn import_character_from_dir(source: &Path) -> Result<(CompanionModel, bool)
             return Ok((existing, true));
         }
     }
+
+    // 磁盘空间预检：不足在复制前拒绝（staging 尚未创建，无残留）。
+    ensure_store_space(crate::model_library::storage::dir_size(&source_abs))?;
 
     let store_dir = settings::get_companions_store_dir();
     let tmp_dir = store_dir.join(new_tmp_dir_name(&id));
@@ -1992,6 +2013,16 @@ pub fn register_motions_for_existing() -> Result<usize, String> {
 mod tests {
     use super::*;
     use crate::test_util::run_with_temp_home;
+
+    #[test]
+    fn test_ensure_store_space_insufficient_message() {
+        run_with_temp_home(|_home| {
+            // required 饱和到 u64::MAX，任何真实磁盘都不可能满足 → 必报错且文案可操作
+            let err = ensure_store_space(u64::MAX).unwrap_err();
+            assert!(err.contains("磁盘空间不足"), "{err}");
+            assert!(err.contains("存储位置"), "{err}");
+        });
+    }
 
     /// 构造一个校验可通过的模型目录。
     fn make_valid_model(dir: &Path, manifest: &str) {

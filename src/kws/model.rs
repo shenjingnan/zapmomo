@@ -177,6 +177,8 @@ pub enum ModelError {
     Extract(String),
     #[error("IO 错误: {0}")]
     Io(#[from] std::io::Error),
+    #[error("磁盘空间不足：{0}")]
+    InsufficientSpace(String),
     #[error("下载已取消")]
     Cancelled,
 }

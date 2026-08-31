@@ -76,6 +76,22 @@ export interface MigrateFailedItem {
   reason: string;
 }
 
+/** 首次下载/导入前的存储位置引导信息（`get_storage_prompt`）。 */
+export interface StoragePrompt {
+  /** 是否建议弹引导（data_dir 未设置 && 无已装模型 && 用户未确认过） */
+  promptRecommended: boolean;
+  /** 默认数据根展示值（~/.zapmomo 展开后的绝对路径） */
+  defaultDir: string;
+  modelsDir: string;
+  companionsDir: string;
+  /** 建议目录（非默认卷中剩余空间最大的固定盘；单盘机器 = null） */
+  suggestedDir: string | null;
+  /** 建议卷可用字节 */
+  suggestedAvailable: number | null;
+  /** 默认卷可用字节 */
+  defaultAvailable: number;
+}
+
 /** 迁移进度（`storage-migrate-progress`）。 */
 export interface StorageMigrateProgress {
   state: "scanning" | "moving" | "finishing" | "done" | "cancelled" | "failed";
