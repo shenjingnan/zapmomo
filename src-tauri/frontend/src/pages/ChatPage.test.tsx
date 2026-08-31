@@ -27,8 +27,6 @@ const { state } = vi.hoisted(() => {
     state: {
       voice: makeVoice(),
       capabilities: { kws: true, asr: true },
-      // 徽标就绪度推导用：默认大脑已连接；个别用例可改写
-      llm: { ready: true, loading: false },
     },
   };
 });
@@ -36,7 +34,6 @@ const { state } = vi.hoisted(() => {
 vi.mock("@/providers/RuntimeContext", () => ({
   useRuntime: () => ({
     voice: state.voice,
-    llm: state.llm,
     // 默认 KWS/ASR 都启用（语音互动可用）；个别用例可改写 state.capabilities
     kws: { config: { config: { enabled: state.capabilities.kws, models_present: true } } },
     asr: { config: { config: { enabled: state.capabilities.asr, models_present: true } } },
@@ -44,34 +41,24 @@ vi.mock("@/providers/RuntimeContext", () => ({
 }));
 
 describe("ChatPage", () => {
-  it("待唤醒状态显示徽标与空态提示", () => {
+  it("待唤醒状态显示空态提示", () => {
     state.voice = { ...state.voice, running: true, phase: "armed" };
     render(<ChatPage />);
-    expect(screen.getByText("待唤醒")).toBeTruthy();
     expect(screen.getByText(/待唤醒中，喊唤醒词开始对话/)).toBeTruthy();
   });
 
-  it("未运行显示空态与「已启用」徽标（enabled 时提示未在运行）", () => {
+  it("未运行时显示空态提示（enabled）", () => {
     state.voice = { ...state.voice, running: false, phase: "idle", enabled: true };
     render(<ChatPage />);
-    expect(screen.getByText("已启用")).toBeTruthy();
     expect(screen.getByText("语音互动未在运行")).toBeTruthy();
   });
 
   it("未启用时空态引导到「模型与能力」页开关", () => {
     state.voice = { ...state.voice, running: false, phase: "idle", enabled: false };
     render(<ChatPage />);
-    expect(screen.getByText("未开启")).toBeTruthy();
     expect(
       screen.getByText(/语音互动未开启：到「模型与能力」页打开「语音会话」开关后开始对话/),
     ).toBeTruthy();
-  });
-
-  it("待唤醒但 LLM 未就绪 → 徽标降级为「待唤醒·大脑未就绪」警示", () => {
-    state.voice = { ...state.voice, running: true, phase: "armed" };
-    state.llm = { ready: false, loading: false };
-    render(<ChatPage />);
-    expect(screen.getByText("待唤醒·大脑未就绪")).toBeTruthy();
   });
 
   it("渲染记录气泡与实时字幕", () => {
@@ -139,18 +126,6 @@ describe("ChatPage", () => {
     render(<ChatPage />);
     expect(screen.getByText("语音会话异常")).toBeTruthy();
     expect(screen.getByText("缺模型")).toBeTruthy();
-  });
-
-  it("欢迎中/等说话阶段显示对应徽标", () => {
-    // 前置重置：上面的用例会遗留 error / llm 未就绪，徽标推导对这两者敏感
-    state.voice = { ...state.voice, error: null, running: true, phase: "greeting" };
-    state.llm = { ready: true, loading: false };
-    render(<ChatPage />);
-    expect(screen.getByText("欢迎中")).toBeTruthy();
-
-    state.voice = { ...state.voice, phase: "waiting_speech" };
-    render(<ChatPage />);
-    expect(screen.getAllByText("聆听中").length).toBeGreaterThan(0);
   });
 
   it("KWS 或 ASR 未启用时提示语音互动不可用", () => {

@@ -2,8 +2,6 @@ import { useEffect, useRef } from "react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { VoiceStatusBadge } from "@/components/voice/VoiceStatusBadge";
-import { voiceSessionStatus } from "@/components/voice/voiceSessionStatus";
 import { useRuntime } from "@/providers/RuntimeContext";
 
 /**
@@ -22,7 +20,7 @@ function formatTime(at: string): string {
 }
 
 export function ChatPage() {
-  const { voice, kws, asr, llm } = useRuntime();
+  const { voice, kws, asr } = useRuntime();
   const kwsEnabled = kws.config.config?.enabled ?? false;
   const asrEnabled = asr.config.config?.enabled ?? false;
   const capabilitiesReady = kwsEnabled && asrEnabled;
@@ -40,16 +38,11 @@ export function ChatPage() {
 
   return (
     <div className="flex h-full flex-col gap-4 overflow-hidden">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <div className="flex items-center gap-3">
-            <h1 className="text-xl font-semibold tracking-tight text-text-primary">对话记录</h1>
-            <VoiceStatusBadge status={voiceSessionStatus(voice, llm)} />
-          </div>
-          <p className="mt-0.5 text-sm text-muted-foreground">
-            喊唤醒词开始对话，播报中喊唤醒词可打断
-          </p>
-        </div>
+      <div>
+        <h1 className="text-xl font-semibold tracking-tight text-text-primary">对话记录</h1>
+        <p className="mt-0.5 text-sm text-muted-foreground">
+          喊唤醒词开始对话，播报中喊唤醒词可打断
+        </p>
       </div>
 
       {!capabilitiesReady && (
