@@ -99,6 +99,19 @@ pub struct ResolvedSessionConfig {
     /// active 伙伴的音色克隆参考（`apply_companion_overrides` 注入；None = 无伙伴音色，
     /// 上层回退 `[voice].voice` > `[tts].voice` > 内置默认）。
     pub character_voice: Option<crate::companion::CharacterVoice>,
+    /// active 伙伴的预合成欢迎语（`apply_companion_overrides` 注入；None = 唤醒时
+    /// 走实时合成）。新鲜度在注入时按指纹判定，唤醒时 `load_fresh` 再校验一次。
+    pub welcome_clip: Option<WelcomeClip>,
+}
+
+/// 预合成欢迎语的定位信息（路径 + 注入时的期望指纹）。
+///
+/// 唤醒时指纹必须与旁车一致才直接播放；不匹配（生成中/已过期/被删）降级实时合成。
+#[derive(Debug, Clone, PartialEq)]
+pub struct WelcomeClip {
+    pub wav: std::path::PathBuf,
+    pub meta: std::path::PathBuf,
+    pub fingerprint: String,
 }
 
 /// 合并 settings 与 CLI 覆盖得到最终会话配置。
@@ -196,13 +209,19 @@ pub fn resolve(
             .or_else(|| voice.and_then(|v| v.welcome_wait_timeout))
             .unwrap_or(DEFAULT_WELCOME_WAIT_TIMEOUT),
         character_voice: None,
+        welcome_clip: None,
     })
 }
 
-/// 应用 active 伙伴覆盖（人设 + 音色），在 `resolve` 之后调用。
+/// 应用 active 伙伴覆盖（人设 + 唤醒词 + 欢迎语 + 音色），在 `resolve` 之后调用。
 ///
 /// - 人设：active 伙伴是角色包且 character.md 非空 → **完全覆盖** `cfg.llm.system_prompt`
 ///   （不写盘，切回普通伙伴后下次会话自然回退全局 `[llm].system_prompt`）；
+/// - 唤醒词：`resolve_wake_word` 叠加「激活即换词」语义（角色词压过 resolve 的
+///   合并结果，编码失败回退并告警）；
+/// - 欢迎语：覆盖为角色级生效文本（自定义或「你好，我是{name}。」默认模板）——
+///   **有 active 伙伴时全局 `[voice].welcome_text` 不再生效**（预期行为变化）；
+/// - 预合成欢迎语：指纹新鲜才注入（唤醒直接播放），否则唤醒时降级实时合成；
 /// - 音色：伙伴音色三级解析（托管目录 `voice/` > 音色库绑定 > None，任意 format 均可，
 ///   见 `companion::companion_voice_in`）；仅当前 TTS 模型支持参考音频克隆时注入
 ///   `cfg.character_voice`（非克隆模型走全局音色，优雅降级）。
@@ -210,10 +229,33 @@ pub fn apply_companion_overrides(cfg: &mut ResolvedSessionConfig) {
     if let Some(persona) = crate::companion::active_persona() {
         cfg.llm.system_prompt = persona;
     }
+    // 音色注入必须先于指纹计算：指纹覆盖 character_voice，改音色要能触发重生成。
     if cfg.tts.uses_reference_audio()
         && let Some(voice) = crate::companion::active_companion_voice()
     {
         cfg.character_voice = Some(voice);
+    }
+    let model = crate::companion::active_model_fast();
+    if let Some(m) = &model {
+        let r = crate::companion::resolve_wake_word(cfg.keywords.as_deref(), &cfg.kws.tokens);
+        if !r.companion_ok {
+            tracing::warn!(
+                "伙伴 {} 的唤醒词「{}」无法转为 KWS token，已回退全局唤醒词",
+                m.id,
+                crate::companion::effective_wake_word(m)
+            );
+        }
+        cfg.keywords = r.word;
+        cfg.welcome_text = crate::companion::effective_welcome_text(m);
+        let fingerprint = crate::companion_welcome::clip_fingerprint(cfg);
+        let model_dir = std::path::Path::new(&m.model_dir);
+        if crate::companion_welcome::is_fresh(model_dir, &fingerprint) {
+            cfg.welcome_clip = Some(WelcomeClip {
+                wav: crate::companion_welcome::welcome_wav_path(model_dir),
+                meta: crate::companion_welcome::welcome_meta_path(model_dir),
+                fingerprint,
+            });
+        }
     }
 }
 
@@ -504,6 +546,95 @@ mod tests {
             // 无 active 角色包 → 全局配置原样
             assert_eq!(cfg.llm.system_prompt, prompt);
             assert!(cfg.character_voice.is_none());
+            assert!(cfg.welcome_clip.is_none());
+        });
+    }
+
+    /// 写最小 KWS token 集（`n ǐ` 已 tokenized 序列可透传），并把 cfg 指向它。
+    fn seed_tokens(cfg: &mut ResolvedSessionConfig, home: &std::path::Path) {
+        let dir = home.join("kws-model");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("tokens.txt"), "n\nǐ\n").unwrap();
+        cfg.kws.tokens = dir.join("tokens.txt");
+    }
+
+    /// 给 active 伙伴预置新鲜欢迎语（先跑一遍 override 拿到生效指纹再写资产）。
+    fn seed_fresh_clip(cfg: &mut ResolvedSessionConfig) {
+        let fp = crate::companion_welcome::clip_fingerprint(cfg);
+        let model = crate::companion::active_model_fast().unwrap();
+        let model_dir = std::path::PathBuf::from(&model.model_dir);
+        std::fs::create_dir_all(model_dir.join("voice")).unwrap();
+        crate::audio::write_wav_f32(
+            &crate::companion_welcome::welcome_wav_path(&model_dir),
+            24_000,
+            &[0.1; 2_400],
+        )
+        .unwrap();
+        let meta = crate::companion_welcome::WelcomeMeta {
+            text: cfg.welcome_text.clone(),
+            fingerprint: fp.clone(),
+            sample_rate: 24_000,
+            generated_at: "2026-08-30T00:00:00Z".to_string(),
+        };
+        std::fs::write(
+            crate::companion_welcome::welcome_meta_path(&model_dir),
+            serde_json::to_string(&meta).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_apply_companion_overrides_injects_wake_word_and_welcome() {
+        run_with_temp_home(|home| {
+            import_active_character(home);
+            let mut cfg = resolve(None, &CliOverrides::default()).unwrap();
+            seed_tokens(&mut cfg, home);
+            cfg.keywords = Some("全局词".to_string());
+            apply_companion_overrides(&mut cfg);
+            // 角色无自定义唤醒词 → 跟随名字「芙宁娜」；中文名在 token 集外会回退，
+            // 这里名字不可编码（token 集只有 n/ǐ）→ 回退全局词。
+            assert_eq!(cfg.keywords.as_deref(), Some("全局词"));
+            // 欢迎语覆盖为角色级默认模板。
+            assert_eq!(cfg.welcome_text, "你好，我是芙宁娜。");
+            // 无预生成资产 → 不注入 clip。
+            assert!(cfg.welcome_clip.is_none());
+
+            // 设可编码的自定义唤醒词 → 压过全局词。
+            crate::companion::set_wake_word(
+                &crate::companion::active_model_fast().unwrap().id,
+                Some("n ǐ"),
+            )
+            .unwrap();
+            apply_companion_overrides(&mut cfg);
+            assert_eq!(cfg.keywords.as_deref(), Some("n ǐ"));
+
+            // 预置新鲜资产 → 注入 clip 且指纹一致。
+            seed_fresh_clip(&mut cfg);
+            apply_companion_overrides(&mut cfg);
+            let clip = cfg.welcome_clip.clone().unwrap();
+            assert_eq!(
+                clip.fingerprint,
+                crate::companion_welcome::clip_fingerprint(&cfg)
+            );
+        });
+    }
+
+    #[test]
+    fn test_apply_companion_overrides_wake_word_fallback_on_bad_name() {
+        run_with_temp_home(|home| {
+            import_active_character(home);
+            crate::companion::set_wake_word(
+                &crate::companion::active_model_fast().unwrap().id,
+                Some("😂😂"),
+            )
+            .unwrap();
+            let mut cfg = resolve(None, &CliOverrides::default()).unwrap();
+            seed_tokens(&mut cfg, home);
+            cfg.keywords = Some("全局词".to_string());
+            apply_companion_overrides(&mut cfg);
+            // 角色词不可编码 → 回退全局词（欢迎语照常生效）。
+            assert_eq!(cfg.keywords.as_deref(), Some("全局词"));
+            assert_eq!(cfg.welcome_text, "你好，我是芙宁娜。");
         });
     }
 

@@ -47,6 +47,13 @@ function model(id: string, name: string, valid = true): CompanionModelInfo {
     voice_id: null,
     voice_source: null,
     has_voice: false,
+    has_original_voice: false,
+    wake_word: null,
+    wake_word_effective: "",
+    wake_word_ok: true,
+    welcome_text: null,
+    welcome_text_effective: "",
+    welcome_ready: true,
   };
 }
 

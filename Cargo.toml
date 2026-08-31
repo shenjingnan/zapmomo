@@ -91,6 +91,9 @@ hex = "0.4"
 tar = { version = "0.4", default-features = false }
 bzip2 = "0.6"
 
+# 角色包分享（导出/导入 .zip）：仅 deflate 读写，不开 aes/lzma/zstd 等重特性
+zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
+
 # --- 可选依赖（按需取消注释） ---
 # url = "2"                                              # URL 解析
 futures-util = "0.3"                                     # 异步流处理（async-openai SSE 流）

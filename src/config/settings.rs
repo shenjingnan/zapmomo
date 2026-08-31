@@ -222,6 +222,9 @@ pub struct AppConfig {
     /// 仍留在 `~/.zapmomo`。缺省 = `~/.zapmomo`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_dir: Option<String>,
+    /// 「存储位置引导」已确认过（首次下载/导入前的一次性弹窗标记，确认后不再弹）。
+    #[serde(default)]
+    pub storage_prompt_acknowledged: bool,
     /// 唤醒词检测（KWS）配置
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kws: Option<KwsSettings>,
@@ -698,11 +701,9 @@ pub struct VoiceSettings {
 /// dsh 桥配置。
 ///
 /// 全部字段可缺省：未配置的项在解析时回退到 `dsh::config` 的内置默认值。
+/// 桥无独立开关，启停跟随插件安装状态（`dsh::integration` 的检测判定）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct DshSettings {
-    /// 是否启用桥服务（loopback HTTP 监听），缺省 true
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub enabled: Option<bool>,
     /// 监听端口，0 = 随机端口（默认，避免冲突），缺省 0
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
@@ -792,6 +793,7 @@ impl Default for AppConfig {
             custom: None,
             microphone: None,
             data_dir: None,
+            storage_prompt_acknowledged: false,
             kws: None,
             asr: None,
             tts: None,
@@ -985,6 +987,7 @@ mod tests {
             custom: Some(std::collections::HashMap::new()),
             microphone: Some("内置麦克风".to_string()),
             data_dir: None,
+            storage_prompt_acknowledged: false,
             kws: None,
             asr: None,
             tts: None,
@@ -1013,6 +1016,25 @@ mod tests {
             write_toml_settings(home, "debug = true\n");
             let result = load_settings().unwrap().unwrap();
             assert!(!result.hide_dock_icon);
+        });
+    }
+
+    #[test]
+    fn test_load_settings_without_storage_prompt_ack_defaults_false() {
+        // 旧配置文件没有 storage_prompt_acknowledged 时，应回退为 false（引导仍会弹）。
+        run_with_temp_home(|home| {
+            write_toml_settings(home, "debug = true\n");
+            let result = load_settings().unwrap().unwrap();
+            assert!(!result.storage_prompt_acknowledged);
+        });
+    }
+
+    #[test]
+    fn test_load_settings_with_storage_prompt_ack() {
+        run_with_temp_home(|home| {
+            write_toml_settings(home, "storage_prompt_acknowledged = true\n");
+            let result = load_settings().unwrap().unwrap();
+            assert!(result.storage_prompt_acknowledged);
         });
     }
 
@@ -1308,6 +1330,7 @@ mod tests {
                 custom: None,
                 microphone: None,
                 data_dir: None,
+                storage_prompt_acknowledged: false,
                 kws: None,
                 asr: None,
                 tts: None,
@@ -1508,6 +1531,8 @@ mod tests {
     fn test_parse_dsh_section() {
         run_with_temp_home(|_| {
             std::fs::create_dir_all(get_settings_dir()).unwrap();
+            // enabled 为旧版本遗留键：桥已无独立开关（跟随插件安装状态），
+            // 结构体不再有此字段，serde 须静默忽略、不阻塞整份配置解析
             std::fs::write(
                 get_settings_path(),
                 "[dsh]\nenabled = false\nport = 47800\nvoice_enabled = false\n",
@@ -1515,7 +1540,6 @@ mod tests {
             .unwrap();
             let cfg = load_settings().unwrap().unwrap();
             let dsh = cfg.dsh.expect("[dsh] 段应解析");
-            assert_eq!(dsh.enabled, Some(false));
             assert_eq!(dsh.port, Some(47800));
             assert_eq!(dsh.voice_enabled, Some(false));
             assert_eq!(dsh.record_to_history, None);

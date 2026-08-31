@@ -341,6 +341,8 @@ struct KwsConfigInfo {
     models_present: bool,
     model_downloading: bool,
     settings_path: String,
+    /// active 伙伴的生效唤醒词（Some = 前端提示「唤醒词由角色接管」）。
+    active_wake_word: Option<String>,
 }
 
 /// `set_kws_params` 载荷：可调整的 KWS 引擎/运行参数（snake_case 直传，缺省项不修改）。
@@ -441,6 +443,7 @@ fn get_kws_config(state: State<'_, DownloadState>) -> Result<KwsConfigInfo, Stri
         settings_path: zapmomo::config::settings::get_settings_path()
             .display()
             .to_string(),
+        active_wake_word: zapmomo::companion::active_wake_word(),
     })
 }
 
@@ -1084,7 +1087,13 @@ fn start_listen_impl(
     let kws_settings = settings.as_ref().and_then(|s| s.kws.clone());
     let cfg = zapmomo::kws::config::resolve(kws_settings.as_ref(), None)?;
 
-    // 同步校验/编码附加关键词（原始中文自动转 ppinyin），避免编码失败时空指针崩溃
+    // active 伙伴唤醒词优先（激活即换词）；不可编码回退调用方传入的全局词。
+    // 同步校验/编码（原始中文自动转 ppinyin），避免编码失败在后台线程才报错。
+    let resolution = zapmomo::companion::resolve_wake_word(keywords.as_deref(), &cfg.tokens);
+    if !resolution.companion_ok {
+        tracing::warn!("伙伴唤醒词无法编码为 KWS token，已回退全局唤醒词");
+    }
+    let keywords = resolution.word;
     if let Some(k) = keywords.as_deref() {
         zapmomo::kws::token::encode_custom_keywords(k, &cfg.tokens)?;
     }
@@ -3106,15 +3115,15 @@ fn dsh_announcer(
 }
 
 /// 启动 dsh 桥：解析配置 → spawn 服务线程（绑 loopback、写发现文件、事件走管线）。
+///
+/// 调用方负责启停时机（桥无独立开关，跟随插件安装状态）：app 启动时判定
+/// `plugin_activated`、卡片内安装完成后拉起。
 fn start_dsh_bridge_impl(app: AppHandle, state: &DshBridgeState) -> Result<(), String> {
     if state.is_running() {
         return Err("dsh 桥已在运行".to_string());
     }
     let settings = zapmomo::config::settings::load_settings()?;
     let cfg = zapmomo::dsh::config::resolve(settings.as_ref().and_then(|s| s.dsh.as_ref()));
-    if !cfg.enabled {
-        return Err("dsh 桥未启用".to_string());
-    }
     // 清陈旧发现文件（上次退出未清理的残留）
     zapmomo::dsh::remove_discovery();
 
@@ -3246,7 +3255,6 @@ fn stop_dsh_bridge_inner(state: &DshBridgeState) -> Result<(), String> {
 /// GUI 展示用的 dsh 桥配置信息。
 #[derive(Serialize)]
 struct DshConfigInfo {
-    enabled: bool,
     port: u16,
     voice_enabled: bool,
     llm_enabled: bool,
@@ -3265,7 +3273,6 @@ fn get_dsh_config(state: State<'_, DshBridgeState>) -> Result<DshConfigInfo, Str
     let cfg = zapmomo::dsh::config::resolve(settings.as_ref().and_then(|s| s.dsh.as_ref()));
     let actual = state.current_port();
     Ok(DshConfigInfo {
-        enabled: cfg.enabled,
         port: cfg.port,
         voice_enabled: cfg.voice_enabled,
         llm_enabled: cfg.llm_enabled,
@@ -3279,29 +3286,6 @@ fn get_dsh_config(state: State<'_, DshBridgeState>) -> Result<DshConfigInfo, Str
             .clone(),
         discovery_path: zapmomo::dsh::discovery_file().display().to_string(),
     })
-}
-
-#[tauri::command]
-fn set_dsh_enabled(
-    app: AppHandle,
-    state: State<'_, DshBridgeState>,
-    enabled: bool,
-) -> Result<(), String> {
-    let mut settings = zapmomo::config::settings::load_settings()?.unwrap_or_default();
-    settings.dsh.get_or_insert_with(Default::default).enabled = Some(enabled);
-    zapmomo::config::settings::save_settings(&settings)?;
-    if enabled {
-        if state.is_running() {
-            // 幂等：目标态已达成直接成功（避免重复开关弹错误提示）
-            Ok(())
-        } else {
-            start_dsh_bridge_impl(app, state.inner())
-        }
-    } else if state.is_running() {
-        stop_dsh_bridge_inner(state.inner())
-    } else {
-        Ok(())
-    }
 }
 
 /// `set_dsh_params` 载荷：可调整项（缺省不修改）。
@@ -3423,36 +3407,87 @@ impl Drop for DshInstallGuard {
     }
 }
 
-/// 安装全程超时：`dsh plugin add` 底层 pnpm 需要网络，宽限到 120s。
+/// 安装/卸载全程超时：`dsh plugin add/remove` 底层 pnpm 需要网络，宽限到 120s。
 const DSH_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// 插件管理动作：安装 / 卸载共用同一套 dsh 代跑机器，只差子命令与文案。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DshPluginOp {
+    Install,
+    Uninstall,
+}
+
+impl DshPluginOp {
+    /// 传给 `dsh plugin --profile web` 的子命令（dsh 侧是薄 pnpm 转发器，
+    /// 执行后自动 reconcile `dsh.profile.bundles`）。
+    fn verb(self) -> &'static str {
+        match self {
+            DshPluginOp::Install => "add",
+            DshPluginOp::Uninstall => "remove",
+        }
+    }
+
+    /// 文案用动词（安装 / 卸载）。
+    fn label(self) -> &'static str {
+        match self {
+            DshPluginOp::Install => "安装",
+            DshPluginOp::Uninstall => "卸载",
+        }
+    }
+}
 
 /// 一键安装 dsh 桥插件：定位 dsh 可执行文件并代跑安装命令。
 ///
 /// - `path` 为手动指认（自动发现失败后经文件选择器兜底）；两者皆无 → Err 带 searched
 /// - 命令参数写死（`plugin --profile web add <包名>`），无注入面
 /// - 进度逐行经 `dsh-install-progress` 推送；[`DSH_INSTALL_TIMEOUT`] 未退出则 kill
+/// - 成功后自动拉起 dsh 桥（启停跟随插件安装状态）
 #[tauri::command]
 async fn install_dsh_plugin(
     app: AppHandle,
     install: State<'_, DshInstallState>,
     path: Option<String>,
 ) -> Result<(), String> {
+    run_dsh_plugin_cmd(app, install, path, DshPluginOp::Install).await
+}
+
+/// 一键卸载 dsh 桥插件：与安装共用代跑机器（`plugin --profile web remove <包名>`）。
+/// 卸载成功后桥自动停止（桥启停跟随插件安装状态）。
+#[tauri::command]
+async fn uninstall_dsh_plugin(
+    app: AppHandle,
+    install: State<'_, DshInstallState>,
+) -> Result<(), String> {
+    run_dsh_plugin_cmd(app, install, None, DshPluginOp::Uninstall).await
+}
+
+/// 安装/卸载共用壳：防重入 + spawn_blocking 代跑。
+async fn run_dsh_plugin_cmd(
+    app: AppHandle,
+    install: State<'_, DshInstallState>,
+    path: Option<String>,
+    op: DshPluginOp,
+) -> Result<(), String> {
     if install.is_running() {
-        return Err("插件安装已在进行中".to_string());
+        return Err("dsh 插件操作已在进行中".to_string());
     }
     install.running.store(true, Ordering::SeqCst);
     let running = install.running.clone();
     let emit_app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = DshInstallGuard { running };
-        run_dsh_plugin_install(&emit_app, path.as_deref())
+        run_dsh_plugin_manage(&emit_app, path.as_deref(), op)
     })
     .await
-    .map_err(|e| format!("安装任务异常: {e}"))?
+    .map_err(|e| format!("{}任务异常: {e}", op.label()))?
 }
 
-/// 安装的阻塞实现（spawn_blocking 内执行）。
-fn run_dsh_plugin_install(app: &AppHandle, manual_path: Option<&str>) -> Result<(), String> {
+/// 安装/卸载的阻塞实现（spawn_blocking 内执行）。
+fn run_dsh_plugin_manage(
+    app: &AppHandle,
+    manual_path: Option<&str>,
+    op: DshPluginOp,
+) -> Result<(), String> {
     use std::io::{BufRead, BufReader};
     use std::sync::mpsc::RecvTimeoutError;
 
@@ -3489,7 +3524,11 @@ fn run_dsh_plugin_install(app: &AppHandle, manual_path: Option<&str>) -> Result<
                 dsh
             }
             Err(e) => {
-                let msg = format!("自动定位 dsh 失败（{e}），请手动指定。");
+                let hint = match op {
+                    DshPluginOp::Install => "请手动指定。",
+                    DshPluginOp::Uninstall => "可在终端执行手动卸载命令。",
+                };
+                let msg = format!("自动定位 dsh 失败（{e}），{hint}");
                 emit("failed", msg.clone());
                 return Err(msg);
             }
@@ -3499,8 +3538,11 @@ fn run_dsh_plugin_install(app: &AppHandle, manual_path: Option<&str>) -> Result<
     // 2) 代跑安装命令。PATH 增补全部 node bin 目录 + dsh 所在目录：pnpm 可能住在
     //    另一个 node 版本目录（实测如此），只补 dsh 目录会 pnpm not found。
     let pkg = zapmomo::dsh::integration::PLUGIN_PACKAGE;
-    let installing = format!("正在安装 {pkg}（可能需要下载依赖，请耐心等待）…");
-    emit("installing", installing);
+    let working = match op {
+        DshPluginOp::Install => format!("正在安装 {pkg}（可能需要下载依赖，请耐心等待）…"),
+        DshPluginOp::Uninstall => format!("正在卸载 {pkg}…"),
+    };
+    emit("installing", working);
     let mut cmd = if cfg!(windows) {
         // .cmd 垫片必须经 cmd 解释器启动
         let mut c = std::process::Command::new("cmd");
@@ -3509,7 +3551,7 @@ fn run_dsh_plugin_install(app: &AppHandle, manual_path: Option<&str>) -> Result<
     } else {
         std::process::Command::new(&dsh)
     };
-    cmd.args(["plugin", "--profile", "web", "add", pkg]);
+    cmd.args(["plugin", "--profile", "web", op.verb(), pkg]);
     {
         let mut dirs = zapmomo::dsh::discover::node_bin_dirs(&home);
         if let Some(parent) = dsh.parent() {
@@ -3534,7 +3576,10 @@ fn run_dsh_plugin_install(app: &AppHandle, manual_path: Option<&str>) -> Result<
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            let msg = format!("启动 dsh 安装命令失败：{e}。请改用手动命令在终端执行。");
+            let msg = format!(
+                "启动 dsh {}命令失败：{e}。请改用手动命令在终端执行。",
+                op.label()
+            );
             emit("failed", msg.clone());
             return Err(msg);
         }
@@ -3561,7 +3606,7 @@ fn run_dsh_plugin_install(app: &AppHandle, manual_path: Option<&str>) -> Result<
 
     let deadline = std::time::Instant::now() + DSH_INSTALL_TIMEOUT;
     // 提示语提取成短行（同上：避免两端 rustfmt 对中文长串折行口径分歧）
-    let timeout_msg = "安装超时已终止。请检查网络后重试，或改用手动命令。".to_string();
+    let timeout_msg = format!("{}超时已终止，请重试或改用手动命令。", op.label());
     let mut tail: std::collections::VecDeque<String> = std::collections::VecDeque::new();
     let outcome: Result<std::process::ExitStatus, String> = loop {
         match rx.recv_timeout(std::time::Duration::from_millis(100)) {
@@ -3595,11 +3640,38 @@ fn run_dsh_plugin_install(app: &AppHandle, manual_path: Option<&str>) -> Result<
 
     match outcome {
         Ok(status) if status.success() => {
-            emit(
-                "done",
-                "安装完成。重启 dsh web 后插件生效，桌宠即可联动。".to_string(),
-            );
-            tracing::info!("dsh 插件安装成功：{}", dsh.display());
+            // 桥启停跟随插件安装状态：装好即拉起，卸掉即停。失败仅降级告警，
+            // 不回滚插件操作结果（桥状态由下次启动/卡片刷新兜住）。
+            let bridge = app.state::<DshBridgeState>();
+            let bridge_result = match op {
+                DshPluginOp::Install => {
+                    if bridge.is_running() {
+                        Ok(())
+                    } else {
+                        start_dsh_bridge_impl(app.clone(), bridge.inner())
+                    }
+                }
+                DshPluginOp::Uninstall => {
+                    if bridge.is_running() {
+                        stop_dsh_bridge_inner(bridge.inner())
+                    } else {
+                        Ok(())
+                    }
+                }
+            };
+            if let Err(e) = bridge_result {
+                tracing::warn!("dsh 插件{}后同步桥状态失败: {e}", op.label());
+            }
+            let done_msg = match op {
+                DshPluginOp::Install => {
+                    "安装完成。重启 dsh web 后插件生效，桌宠即可联动。".to_string()
+                }
+                DshPluginOp::Uninstall => {
+                    "卸载完成。桌宠不再联动 dsh 任务事件，重启 dsh web 后插件彻底移除。".to_string()
+                }
+            };
+            emit("done", done_msg);
+            tracing::info!("dsh 插件{}成功：{}", op.label(), dsh.display());
             Ok(())
         }
         Ok(status) => {
@@ -3607,7 +3679,7 @@ fn run_dsh_plugin_install(app: &AppHandle, manual_path: Option<&str>) -> Result<
             let parts: Vec<&str> = tail.iter().map(String::as_str).collect();
             let tail_text = parts.join(" | ");
             let msg = format!(
-                "安装命令退出码异常（{status}）。{}",
+                "{}命令退出码异常（{status}）。",
                 if tail_text.is_empty() {
                     "请改用手动命令在终端执行。".to_string()
                 } else {
@@ -4046,6 +4118,22 @@ struct CompanionView {
     voice_source: Option<String>,
     /// 是否有生效音色（目录自带或绑定命中；绑定失效不算）。
     has_voice: bool,
+    /// 是否留有作者原版音色备份（voice/reference.original.* 成对；true = 可一键恢复）。
+    has_original_voice: bool,
+    /// 自定义唤醒词原始值（None = 跟随 name；编辑框初值）。
+    wake_word: Option<String>,
+    /// 生效唤醒词（自定义或角色名；编辑框 placeholder）。
+    wake_word_effective: String,
+    /// 生效唤醒词能否编码为 KWS token（false = 前端提示「已回退全局唤醒词」；
+    /// KWS 模型未安装时不提示，恒 true）。
+    wake_word_ok: bool,
+    /// 自定义欢迎语文本（None = 默认模板；编辑框初值）。
+    welcome_text: Option<String>,
+    /// 生效欢迎语文本（自定义或模板展开；编辑框 placeholder）。
+    welcome_text_effective: String,
+    /// 预合成欢迎语与该角色当前生效配置是否一致（false = 前端提示「生成中 /
+    /// 将回退实时合成」；TTS 配置不可用时不提示，恒 true）。
+    welcome_ready: bool,
 }
 
 #[derive(Serialize)]
@@ -4061,7 +4149,42 @@ struct ImportCompanionResult {
     already_imported: bool,
 }
 
+/// `export_companion_pack` 返回：实际写入路径与打包文件数。
+#[derive(Serialize)]
+struct ExportCompanionPackResult {
+    dest: String,
+    files: u32,
+}
+
 fn build_view(lib: &zapmomo::companion::CompanionLibrary) -> CompanionLibraryView {
+    // 唤醒词/欢迎语批量判定的共享准备（各算一次，避免逐 model 重复读盘）。
+    // KWS 模型未安装（token 集读不到）→ wake_word_ok 恒 true（不做回退提示）。
+    let token_ctx = zapmomo::config::settings::load_settings()
+        .ok()
+        .and_then(|s| {
+            zapmomo::kws::config::resolve(s.as_ref().and_then(|k| k.kws.clone()).as_ref(), None)
+                .ok()
+        })
+        .and_then(|cfg| {
+            let en_phone = cfg.tokens.with_file_name("en.phone");
+            zapmomo::kws::token::load_token_set(&cfg.tokens)
+                .ok()
+                .map(|tokens| (tokens, en_phone))
+        });
+    // TTS 配置解析失败（模型未配置）→ welcome_ready 恒 true（不做生成提示）。
+    let welcome_base = zapmomo::config::settings::load_settings()
+        .ok()
+        .and_then(|s| {
+            zapmomo::voice::config::resolve(
+                s.as_ref(),
+                &zapmomo::voice::config::CliOverrides::default(),
+            )
+            .ok()
+        })
+        .map(|mut cfg| {
+            zapmomo::voice::config::apply_companion_overrides(&mut cfg);
+            cfg
+        });
     CompanionLibraryView {
         models: lib
             .models
@@ -4077,6 +4200,27 @@ fn build_view(lib: &zapmomo::companion::CompanionLibrary) -> CompanionLibraryVie
                     }
                     None => None,
                 };
+                let wake_word_effective = zapmomo::companion::effective_wake_word(m);
+                let wake_word_ok = match &token_ctx {
+                    Some((tokens, en_phone)) => {
+                        zapmomo::kws::token::encode_keyword(&wake_word_effective, tokens, en_phone)
+                            .is_ok()
+                    }
+                    None => true,
+                };
+                let welcome_text_effective = zapmomo::companion::effective_welcome_text(m);
+                // 逐 model 用其生效文本与音色重算指纹（active 与非 active 口径一致）。
+                let welcome_ready = match &welcome_base {
+                    Some(base) => {
+                        let mut c = base.clone();
+                        c.welcome_text = welcome_text_effective.clone();
+                        c.character_voice =
+                            zapmomo::companion::companion_voice_in(m).map(|(v, _)| v);
+                        let fp = zapmomo::companion_welcome::clip_fingerprint(&c);
+                        zapmomo::companion_welcome::is_fresh(Path::new(&m.model_dir), &fp)
+                    }
+                    None => true,
+                };
                 CompanionView {
                     id: m.id.clone(),
                     name: m.name.clone(),
@@ -4091,7 +4235,14 @@ fn build_view(lib: &zapmomo::companion::CompanionLibrary) -> CompanionLibraryVie
                     has_persona: zapmomo::companion::has_persona(m),
                     voice_id: m.voice_id.clone(),
                     has_voice: voice_source.is_some(),
+                    has_original_voice: zapmomo::companion::has_original_voice(m),
                     voice_source,
+                    wake_word: m.wake_word.clone(),
+                    wake_word_ok,
+                    wake_word_effective,
+                    welcome_text: m.welcome_text.clone(),
+                    welcome_text_effective,
+                    welcome_ready,
                 }
             })
             .collect(),
@@ -4182,6 +4333,70 @@ fn restart_voice_session_if_running(app: &AppHandle) {
     }
 }
 
+/// 确保 active 伙伴的欢迎语预合成 wav 与当前 (文本/音色/TTS 模型/语速) 一致。
+///
+/// 新鲜则零开销返回；否则后台线程重新生成（best-effort，失败仅告警——唤醒时
+/// 自动降级实时合成，wav 只是加速优化）。生成**不持有 COMPANION_LOCK**（秒级
+/// 阻塞）；并发快速保存由 tmp+rename 原子性兜底（最后一次胜出）。
+///
+/// 配置解析走与会话启动完全相同的 `resolve + apply_companion_overrides` 路径，
+/// 保证指纹口径一致（文本/音色/模型/语速任一变化都能触发重生成）。
+fn ensure_active_welcome_wav() {
+    let Ok(lib) = zapmomo::companion::load_library_fast() else {
+        return;
+    };
+    let Some(model) = zapmomo::companion::active_model(&lib) else {
+        return;
+    };
+    let model_dir = PathBuf::from(&model.model_dir);
+    let settings = match zapmomo::config::settings::load_settings() {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("读取配置失败，跳过欢迎语预合成: {e}");
+            return;
+        }
+    };
+    let mut cfg = match zapmomo::voice::config::resolve(
+        settings.as_ref(),
+        &zapmomo::voice::config::CliOverrides::default(),
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("解析会话配置失败，跳过欢迎语预合成: {e}");
+            return;
+        }
+    };
+    zapmomo::voice::config::apply_companion_overrides(&mut cfg);
+    let fingerprint = zapmomo::companion_welcome::clip_fingerprint(&cfg);
+    if zapmomo::companion_welcome::is_fresh(&model_dir, &fingerprint) {
+        return;
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        match zapmomo::companion_welcome::generate(&cfg, &model_dir) {
+            Ok(_) => tracing::info!("欢迎语预合成完成"),
+            Err(e) => tracing::warn!("欢迎语预合成失败（唤醒时将走实时合成）: {e}"),
+        }
+    });
+}
+
+/// 独立 KWS 监听运行中 → 重启使新唤醒词立即生效。
+///
+/// keywords 传全局 `[kws].custom_keywords`（设备沿用持久化配置）；active 伙伴
+/// 唤醒词的优先级解析在 `start_listen_impl` 内部统一完成。
+fn restart_kws_listen_if_running(app: &AppHandle, listen: &ListenState) -> Result<(), String> {
+    if !listen.is_listening() {
+        return Ok(());
+    }
+    stop_listen_inner(listen)?;
+    let settings = zapmomo::config::settings::load_settings()?;
+    let kw = settings
+        .as_ref()
+        .and_then(|s| s.kws.as_ref())
+        .and_then(|k| k.custom_keywords.clone());
+    let mic = settings.as_ref().and_then(|s| s.microphone.clone());
+    start_listen_impl(app.clone(), listen, mic, kw)
+}
+
 /// 启动阶段同步 reconcile（毫秒级，不迁移）：让 settings 与伙伴库 active 一致，
 /// 使 `CompanionRoot` 挂载时 `get_live2d_config` 就读到正确的当前伙伴。
 ///
@@ -4264,7 +4479,16 @@ async fn import_companion(app: AppHandle, source: String) -> Result<ImportCompan
     })
     .await
     .map_err(|e| e.to_string())??;
+    finish_import(app, model, already_imported).await
+}
 
+/// 导入成功后的共同收尾（`import_companion` / `import_companion_zip` 共用，
+/// 避免复制 reconcile/托盘逻辑导致行为漂移）。
+async fn finish_import(
+    app: AppHandle,
+    model: zapmomo::companion::CompanionModel,
+    already_imported: bool,
+) -> Result<ImportCompanionResult, String> {
     app.asset_protocol_scope()
         .allow_directory(Path::new(&model.model_dir), true)
         .map_err(|e| format!("无法放行模型目录: {e}"))?;
@@ -4274,6 +4498,8 @@ async fn import_companion(app: AppHandle, source: String) -> Result<ImportCompan
     if became_active {
         let active = zapmomo::companion::active_model(&lib);
         reconcile_active(&app, active)?;
+        // 导入即当前伙伴 → 后台预合成欢迎语（唤醒免实时合成延迟）。
+        ensure_active_welcome_wav();
     }
     // 新导入条目要出现在托盘「切换伙伴」子菜单（无论是否成为 active）。
     rebuild_tray_menu_threadsafe(&app);
@@ -4285,6 +4511,110 @@ async fn import_companion(app: AppHandle, source: String) -> Result<ImportCompan
     })
 }
 
+/// 导出角色包为可分享的 .zip（仅 format="character"；打包白名单 + 合成
+/// character.json 预设，见 `companion_share` 模块文档）。
+#[tauri::command]
+async fn export_companion_pack(
+    id: String,
+    dest: String,
+) -> Result<ExportCompanionPackResult, String> {
+    let exported = tauri::async_runtime::spawn_blocking(move || {
+        zapmomo::companion_share::export_pack(&id, Path::new(&dest))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    Ok(ExportCompanionPackResult {
+        dest: exported.dest.display().to_string(),
+        files: exported.files,
+    })
+}
+
+/// 从 .zip 导入角色包（确定性解压路径保证同一 zip 重复导入不产生重复伙伴）。
+#[tauri::command]
+async fn import_companion_zip(
+    app: AppHandle,
+    source: String,
+) -> Result<ImportCompanionResult, String> {
+    let zip_path = PathBuf::from(source);
+    let (model, already_imported) = tauri::async_runtime::spawn_blocking(move || {
+        zapmomo::companion_share::import_zip(&zip_path)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    finish_import(app, model, already_imported).await
+}
+
+/// 上传自定义音色覆盖伙伴当前生效音色（作者原版自动备份，可恢复）。
+///
+/// active 伙伴 → 重启语音会话（新音色立即生效）+ 后台重生成欢迎语
+/// （音色 len/mtime 变化 → 指纹失效 → 自动用新音色重合成）。
+#[tauri::command]
+async fn upload_companion_voice(
+    app: AppHandle,
+    id: String,
+    wav_path: String,
+    reference_text: String,
+) -> Result<CompanionLibraryView, String> {
+    let cid = id.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        zapmomo::companion::upload_companion_voice(&cid, Path::new(&wav_path), &reference_text)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    let lib = zapmomo::companion::load_library_fast()?;
+    if lib.active_model_id.as_deref() == Some(&id) {
+        restart_voice_session_if_running(&app);
+        ensure_active_welcome_wav();
+    }
+    Ok(build_view(&lib))
+}
+
+/// 恢复作者原版音色（删除当前上传版本，不可逆；确认框由前端负责）。
+#[tauri::command]
+async fn restore_companion_voice(
+    app: AppHandle,
+    id: String,
+) -> Result<CompanionLibraryView, String> {
+    let cid = id.clone();
+    tauri::async_runtime::spawn_blocking(move || zapmomo::companion::restore_companion_voice(&cid))
+        .await
+        .map_err(|e| e.to_string())??;
+    let lib = zapmomo::companion::load_library_fast()?;
+    if lib.active_model_id.as_deref() == Some(&id) {
+        restart_voice_session_if_running(&app);
+        ensure_active_welcome_wav();
+    }
+    Ok(build_view(&lib))
+}
+
+/// 解析伙伴生效音色的参考音频（三级解析同合成链），放行 asset scope 供
+/// 前端 `<audio>` 试听；无生效音色返回 None。
+#[tauri::command]
+async fn preview_companion_voice(app: AppHandle, id: String) -> Result<Option<String>, String> {
+    let wav = tauri::async_runtime::spawn_blocking(move || {
+        let lib = zapmomo::companion::load_library_fast()?;
+        let model = lib
+            .models
+            .iter()
+            .find(|m| m.id == id)
+            .ok_or_else(|| "未找到该伙伴".to_string())?;
+        Ok::<_, String>(zapmomo::companion::companion_voice_in(model).map(|(voice, _)| voice.wav))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    let Some(wav) = wav else {
+        return Ok(None);
+    };
+    // 参考音频可能来自托管目录（导入时已放行）或音色库目录（~/.zapmomo/voices，
+    // 从未放行过），此处按需放行所在目录（对齐 synthesize_tts 的先例）。
+    if let Some(dir) = wav.parent() {
+        app.asset_protocol_scope()
+            .allow_directory(dir, true)
+            .map_err(|e| format!("无法放行音频目录: {e}"))?;
+    }
+    Ok(Some(wav.display().to_string()))
+}
+
 /// 设置「当前使用」伙伴（Library 先持久化成功，再 reconcile 同步 settings 与桌宠）。
 #[tauri::command]
 async fn set_active_companion(app: AppHandle, id: String) -> Result<CompanionLibraryView, String> {
@@ -4293,6 +4623,8 @@ async fn set_active_companion(app: AppHandle, id: String) -> Result<CompanionLib
         .map_err(|e| e.to_string())??;
     let active = zapmomo::companion::active_model(&lib);
     reconcile_active(&app, active)?;
+    // 切换即换词换欢迎语：后台 ensure 新 active 的预合成欢迎语。
+    ensure_active_welcome_wav();
     // 设置页切换后托盘「切换伙伴」勾选要移动。
     rebuild_tray_menu_threadsafe(&app);
     Ok(build_view(&lib))
@@ -4310,6 +4642,8 @@ async fn rename_companion(
         .map_err(|e| e.to_string())??;
     let active = zapmomo::companion::active_model(&lib);
     reconcile_active(&app, active)?;
+    // 未自定义欢迎语/唤醒词时跟随 name：改名后 ensure（指纹变化会重生成）。
+    ensure_active_welcome_wav();
     // 重命名后托盘「切换伙伴」label 要更新。
     rebuild_tray_menu_threadsafe(&app);
     Ok(build_view(&lib))
@@ -4336,6 +4670,64 @@ async fn set_companion_voice(
     .map_err(|e| e.to_string())??;
     if lib.active_model_id.as_deref() == Some(&id) {
         restart_voice_session_if_running(&app);
+        ensure_active_welcome_wav();
+    }
+    Ok(build_view(&lib))
+}
+
+/// 设置伙伴自定义唤醒词（`None` = 恢复跟随角色名）。
+///
+/// 保存前预校验可编码性——用与生效路径相同的编码器试转 token，让用户保存时
+/// 即知，而不是等下次启动会话才发现回退。改的是 active 伙伴 → 重启语音会话
+/// 与独立 KWS 监听（新词立即生效，旧词失效）。
+#[tauri::command]
+async fn set_companion_wake_word(
+    app: AppHandle,
+    listen: State<'_, ListenState>,
+    id: String,
+    wake_word: Option<String>,
+) -> Result<CompanionLibraryView, String> {
+    if let Some(word) = wake_word.as_deref().map(str::trim)
+        && !word.is_empty()
+    {
+        let settings = zapmomo::config::settings::load_settings()?;
+        let kws_settings = settings.as_ref().and_then(|s| s.kws.clone());
+        let cfg = zapmomo::kws::config::resolve(kws_settings.as_ref(), None)?;
+        zapmomo::kws::token::encode_custom_keywords(word, &cfg.tokens)
+            .map_err(|_| format!("「{word}」无法转为唤醒词 token，请换一个词"))?;
+    }
+    let cid = id.clone();
+    let lib = tauri::async_runtime::spawn_blocking(move || {
+        zapmomo::companion::set_wake_word(&cid, wake_word.as_deref())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    if lib.active_model_id.as_deref() == Some(&id) {
+        restart_voice_session_if_running(&app);
+        restart_kws_listen_if_running(&app, listen.inner())?;
+    }
+    Ok(build_view(&lib))
+}
+
+/// 设置伙伴自定义欢迎语（`None` = 恢复默认模板「你好，我是{name}。」）。
+///
+/// 改的是 active 伙伴 → 重启语音会话（新文案立即生效；wav 尚未跟上时唤醒自动
+/// 降级实时合成）→ 后台重生成预合成 wav（完成后下次唤醒走 wav）。
+#[tauri::command]
+async fn set_companion_welcome_text(
+    app: AppHandle,
+    id: String,
+    text: Option<String>,
+) -> Result<CompanionLibraryView, String> {
+    let cid = id.clone();
+    let lib = tauri::async_runtime::spawn_blocking(move || {
+        zapmomo::companion::set_welcome_text(&cid, text.as_deref())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    if lib.active_model_id.as_deref() == Some(&id) {
+        restart_voice_session_if_running(&app);
+        ensure_active_welcome_wav();
     }
     Ok(build_view(&lib))
 }
@@ -5862,12 +6254,40 @@ fn show_companion_menu(app: AppHandle, x: f64, y: f64) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-/// 显示设置窗口并聚焦。
+/// 显示设置窗口并聚焦（用户主动打开：托盘/右键菜单/全局快捷键/单实例回调）。
 fn show_settings_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("settings") {
         let _ = window.show();
         let _ = window.set_focus();
     }
+}
+
+/// 仅显示设置窗口、不抢键盘焦点（启动 2 秒后自动打开用）：自动弹出只为可发现性，
+/// 键盘焦点应留给输入条（ChatboxBar 挂载即聚焦，见 set_chatbox_visible）。
+///
+/// macOS 不走 tao 的 `window.show()`——其底层 makeKeyAndOrderFront 会把 key window
+/// 从输入条抢走；`orderFront:` 只调整 Z 序、不改变 key 归属。AppKit 调用须在主线程，
+/// 经 `run_on_main_thread` 跳板（与 `rebuild_tray_menu_threadsafe` 同款）。
+fn show_settings_window_unfocused(app: &AppHandle) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(window) = handle.get_webview_window("settings") {
+            #[cfg(target_os = "macos")]
+            {
+                use objc2_app_kit::NSWindow;
+                if let Ok(ns) = window.ns_window() {
+                    // SAFETY: ns_window 返回 tauri 持有的合法 NSWindow 指针，
+                    // 且本闭包经 run_on_main_thread 在主线程执行。
+                    let ns = unsafe { &*(ns.cast::<NSWindow>()) };
+                    ns.orderFront(None);
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = window.show();
+            }
+        }
+    });
 }
 
 /// 切换常驻角色窗口的显隐（文字输入条联动：显隐状态与角色保持一致）。
@@ -6584,6 +7004,27 @@ async fn get_storage_info(mig: State<'_, StorageMigrateState>) -> Result<Storage
     Ok(info)
 }
 
+/// 首次下载/导入前的存储位置引导信息（轻量查询，不做旧根全量遍历，可频繁调用）。
+#[tauri::command]
+async fn get_storage_prompt() -> Result<zapmomo::model_library::storage::StoragePromptView, String>
+{
+    tauri::async_runtime::spawn_blocking(zapmomo::model_library::storage::collect_prompt_info)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// 标记存储位置引导已确认（一次性标记，之后前端不再弹引导窗）。
+#[tauri::command]
+async fn acknowledge_storage_prompt() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        zapmomo::model_library::update_settings(|cfg| {
+            cfg.storage_prompt_acknowledged = true;
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// 设置（或清除）自定义数据目录。切换立即生效：新下载走新目录，存量模型保持可见可用。
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
@@ -6622,6 +7063,8 @@ async fn set_data_dir(
     };
     zapmomo::model_library::update_settings(|cfg| {
         cfg.data_dir = data_dir_value.clone();
+        // 用户已在设置里对存储位置做出明确选择（含恢复默认），引导不再弹
+        cfg.storage_prompt_acknowledged = true;
     })?;
     zapmomo::config::settings::refresh_data_dir_cache();
     let _ = app.emit("storage-dir-changed", ());
@@ -6946,12 +7389,12 @@ pub fn run() {
             set_voice_enabled,
             send_voice_text,
             get_dsh_config,
-            set_dsh_enabled,
             set_dsh_params,
             get_dsh_bridge_status,
             test_dsh_announce,
             detect_dsh_integration,
             install_dsh_plugin,
+            uninstall_dsh_plugin,
             get_conversation_records,
             list_model_library,
             get_system_resources,
@@ -6960,6 +7403,8 @@ pub fn run() {
             set_current_model,
             delete_model,
             get_storage_info,
+            get_storage_prompt,
+            acknowledge_storage_prompt,
             set_data_dir,
             migrate_storage,
             cancel_storage_migration,
@@ -6981,6 +7426,13 @@ pub fn run() {
             set_active_companion,
             rename_companion,
             set_companion_voice,
+            set_companion_wake_word,
+            set_companion_welcome_text,
+            export_companion_pack,
+            import_companion_zip,
+            preview_companion_voice,
+            upload_companion_voice,
+            restore_companion_voice,
             remove_companion,
             open_companion_dir,
             save_cover_image,
@@ -7096,9 +7548,11 @@ pub fn run() {
                 }
             }
 
-            // 启动 dsh 桥（若启用）：loopback HTTP 接收 deepseek-harness 插件推送的
-            // 任务事件，桌宠以气泡+语音播报。失败静默降级（不影响主流程）。
-            if zapmomo::dsh::config::resolve(loaded.as_ref().and_then(|s| s.dsh.as_ref())).enabled {
+            // 启动 dsh 桥（若插件已激活）：loopback HTTP 接收 deepseek-harness 插件
+            // 推送的任务事件，桌宠以气泡+语音播报。桥无独立开关，启停跟随插件安装
+            // 状态（已激活 ⇒ ~/.dsh 环境必然存在）。失败静默降级（不影响主流程）。
+            let dsh_home = settings::get_home_dir().join(".dsh");
+            if zapmomo::dsh::integration::detect(&dsh_home).plugin_activated {
                 let handle = app.handle().clone();
                 let state = app.state::<DshBridgeState>();
                 if let Err(e) = start_dsh_bridge_impl(handle, state.inner()) {
@@ -7153,6 +7607,8 @@ pub fn run() {
             // 启动同步 reconcile：让 settings 的 [live2d].model_dir 与伙伴库 active 一致，
             // 使 CompanionRoot 挂载时 get_live2d_config 直接读到正确的当前伙伴（毫秒级，不迁移）。
             reconcile_active_at_startup(app.handle());
+            // 启动时补齐 active 伙伴的欢迎语预合成（已有新鲜 wav 则零开销）。
+            ensure_active_welcome_wav();
 
             let mut companion = WebviewWindowBuilder::new(
                 app,
@@ -7321,11 +7777,14 @@ pub fn run() {
                     panel.set_level(MACOS_OVERLAY_PANEL_LEVEL);
                 }
             }
-            // 恢复持久化的可见性（缺省显示：首次启动输入条随角色一同出现）
-            if resolve_chatbox_visible(chatbox_cfg.as_ref())
-                && let Some(window) = app.get_webview_window("chatbox")
-            {
-                let _ = window.show();
+            // 恢复持久化的可见性（缺省显示：首次启动输入条随角色一同出现）。
+            // 走与显隐快捷键相同的单一写点并聚焦：macOS 经 NSPanel show_and_make_key
+            // 使输入条持有 key window，配合前端挂载时的 textarea.focus()，启动即可直接
+            // 打字；自启动（--autostart）不聚焦——桌宠静默出现，不抢其它应用的键盘输入
+            // （与设置窗自启动不弹出同一原则）。
+            let launched_by_autostart = is_launched_by_autostart(std::env::args());
+            if resolve_chatbox_visible(chatbox_cfg.as_ref()) {
+                set_chatbox_visible(app.handle(), true, !launched_by_autostart);
             }
 
             // 语音回复气泡窗口：纯展示（流式回复打字机），显隐跟随角色窗口
@@ -7414,18 +7873,18 @@ pub fn run() {
 
             // 自动打开设置窗口：仅用于「无全局菜单栏」的场景（macOS Accessory 模式或非 macOS），
             // 否则 Cmd+, 快捷键不可靠，自动打开可避免「找不到设置」；普通模式有菜单栏，无需自动弹出。
+            // 弹出走 show_settings_window_unfocused：自动打开只为可发现性，键盘焦点留给输入条。
             // 自启动拉起（--autostart）时跳过：桌宠静默出现，设置窗不自动弹出；
             // 手动启动行为不变。
-            let launched_by_autostart = is_launched_by_autostart(std::env::args());
             #[cfg(target_os = "macos")]
-            let auto_open_settings = !hide_dock_icon && !launched_by_autostart;
+            let auto_open_settings = hide_dock_icon;
             #[cfg(not(target_os = "macos"))]
-            let auto_open_settings = !launched_by_autostart;
-            if auto_open_settings {
+            let auto_open_settings = true;
+            if auto_open_settings && !launched_by_autostart {
                 let app_handle = app.handle().clone();
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_secs(2));
-                    show_settings_window(&app_handle);
+                    show_settings_window_unfocused(&app_handle);
                 });
             }
 

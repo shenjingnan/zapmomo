@@ -142,7 +142,7 @@ pub fn collect_storage_info() -> Result<StorageInfoView, String> {
         .as_deref()
         .is_some_and(|l| same_volume(l, &models_dir));
 
-    let (disk_total, disk_available) = disk_space(&models_dir);
+    let (disk_total, disk_available) = super::sysinfo::disk_space(&models_dir);
 
     Ok(StorageInfoView {
         data_dir,
@@ -160,23 +160,72 @@ pub fn collect_storage_info() -> Result<StorageInfoView, String> {
     })
 }
 
-/// 目标卷总/可用空间（复用 sysinfo 的挂载点匹配逻辑）。
-fn disk_space(dir: &Path) -> (u64, u64) {
-    let mut best_len: Option<u64> = None;
-    let mut total = 0u64;
-    let mut available = 0u64;
-    for d in sysinfo::Disks::new_with_refreshed_list().iter() {
-        let mount = d.mount_point();
-        if dir.starts_with(mount) {
-            let len = mount.as_os_str().to_string_lossy().len() as u64;
-            if best_len.is_none_or(|b| len > b) {
-                best_len = Some(len);
-                total = d.total_space();
-                available = d.available_space();
-            }
-        }
-    }
-    (total, available)
+/// 首次下载/导入前的「存储位置引导」信息（快路径，可频繁调用）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoragePromptView {
+    /// 是否建议弹引导（`data_dir` 未设置 && 无已装模型 && 用户未确认过）。
+    pub prompt_recommended: bool,
+    /// 默认数据根展示值（`~/.zapmomo` 展开后的绝对路径）。
+    pub default_dir: String,
+    /// 当前生效模型根目录。
+    pub models_dir: String,
+    /// 当前生效伙伴载荷根目录。
+    pub companions_dir: String,
+    /// 建议目录（非默认卷中剩余空间最大的固定盘，单盘机器 → `None`）。
+    pub suggested_dir: Option<String>,
+    /// 建议卷可用字节。
+    pub suggested_available: Option<u64>,
+    /// 默认卷可用字节。
+    pub default_available: u64,
+}
+
+/// models 根（双根）是否已有托管安装（`.zapmomo-lib.json`；staging 不算）。
+fn has_installed_models() -> bool {
+    !super::install::ModelStorage::scan_installs().is_empty()
+}
+
+/// 收集引导信息（快路径：不做旧根 `dir_size` 全量遍历）。
+///
+/// 仅在 `prompt_recommended` 时才枚举磁盘算建议目录，未推荐时近似零开销。
+pub fn collect_prompt_info() -> Result<StoragePromptView, String> {
+    let data_dir = settings::get_data_dir();
+    let acknowledged = settings::load_settings()
+        .map_err(|e| format!("读取设置失败：{e}"))?
+        .is_some_and(|c| c.storage_prompt_acknowledged);
+
+    let prompt_recommended = data_dir.is_none() && !has_installed_models() && !acknowledged;
+
+    let default_dir = settings::get_settings_dir().display().to_string();
+    let models_dir = settings::get_models_dir();
+    let companions_dir = settings::get_companions_store_dir();
+    let default_available = super::sysinfo::available_space(&models_dir);
+
+    let (suggested_dir, suggested_available) = if prompt_recommended {
+        let home = settings::get_home_dir();
+        super::sysinfo::pick_suggested_dir(&super::sysinfo::list_disks(), &home).map_or(
+            (None, None),
+            |dir| {
+                let available = super::sysinfo::available_space(&dir);
+                (
+                    Some(dir.display().to_string()),
+                    (available > 0).then_some(available),
+                )
+            },
+        )
+    } else {
+        (None, None)
+    };
+
+    Ok(StoragePromptView {
+        prompt_recommended,
+        default_dir,
+        models_dir: models_dir.display().to_string(),
+        companions_dir: companions_dir.display().to_string(),
+        suggested_dir,
+        suggested_available,
+        default_available,
+    })
 }
 
 /// 两个路径是否同卷（Windows 比较根前缀/盘符；其它平台视为同卷）。
@@ -663,6 +712,54 @@ mod tests {
         });
     }
 
+    // ---- collect_prompt_info ----
+
+    #[test]
+    fn test_prompt_recommended_on_fresh_home() {
+        run_with_temp_home(|_home| {
+            let info = collect_prompt_info().unwrap();
+            assert!(info.prompt_recommended);
+            // 默认根 = ~/.zapmomo（temp home 展开）
+            assert!(info.models_dir.ends_with(".zapmomo/models"));
+            assert!(info.companions_dir.ends_with(".zapmomo/companions"));
+            // 建议目录依赖真实磁盘（单盘机器为 None）；有值则必以 ZapMomo 结尾
+            if let Some(dir) = &info.suggested_dir {
+                assert!(dir.ends_with("ZapMomo"), "{dir}");
+            }
+        });
+    }
+
+    #[test]
+    fn test_prompt_not_recommended_when_data_dir_set() {
+        run_with_temp_home(|home| {
+            set_custom_data_dir(home);
+            assert!(!collect_prompt_info().unwrap().prompt_recommended);
+        });
+    }
+
+    #[test]
+    fn test_prompt_not_recommended_when_models_installed() {
+        run_with_temp_home(|home| {
+            // scan_installs 只认可解析的 meta（meta 键为 camelCase），`{}` 不算已装
+            let dir = home.join(".zapmomo/models/a");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(".zapmomo-lib.json"), r#"{"schemaVersion":2}"#).unwrap();
+            assert!(!collect_prompt_info().unwrap().prompt_recommended);
+        });
+    }
+
+    #[test]
+    fn test_prompt_not_recommended_when_acknowledged() {
+        run_with_temp_home(|_home| {
+            crate::config::settings::save_settings(&AppConfig {
+                storage_prompt_acknowledged: true,
+                ..Default::default()
+            })
+            .unwrap();
+            assert!(!collect_prompt_info().unwrap().prompt_recommended);
+        });
+    }
+
     #[test]
     fn test_plan_skips_install_and_library_json() {
         run_with_temp_home(|home| {
@@ -814,6 +911,8 @@ mod tests {
                     imported_at: "t".into(),
                     voice_id: None,
                     layout: None,
+                    wake_word: None,
+                    welcome_text: None,
                 }],
                 active_model_id: Some(id.to_string()),
                 completed_migrations: Vec::new(),

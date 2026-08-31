@@ -1068,6 +1068,13 @@ pub fn install_managed_model(
     }
 
     let (assets, total_bytes) = staged_assets(model)?;
+    // 下载前置空间校验：所需 = 载荷×2（下载包与解压产物共存 staging）+ 底量。
+    // 失败时 staging 尚未创建，无残留。可用空间依赖真实磁盘，纯函数部分在 sysinfo.rs 单测。
+    sysinfo::check_disk_space(
+        sysinfo::available_space(&settings::get_models_dir()),
+        sysinfo::required_bytes_for_download(total_bytes),
+    )
+    .map_err(ModelError::InsufficientSpace)?;
     let final_dir = stage_and_commit(model, &assets, total_bytes, on_progress, cancel)?;
 
     // optional assets best-effort（独立目录，失败仅 warn，不回滚主模型）

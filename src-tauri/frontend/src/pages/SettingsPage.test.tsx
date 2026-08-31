@@ -87,7 +87,12 @@ describe("SettingsPage 存储位置", () => {
   it("渲染数据目录与迁移行", async () => {
     renderPage();
     expect(await screen.findByText("存储位置")).toBeInTheDocument();
+    // 双路径各占独立文本节点（模型 / 伙伴）
     expect(await screen.findByText("/zap/.zapmomo/models")).toBeInTheDocument();
+    expect(await screen.findByText("/zap/.zapmomo/companions")).toBeInTheDocument();
+    expect(screen.getByText("数据目录（模型 / 伙伴）")).toBeInTheDocument();
+    // 小文件不迁移的说明
+    expect(screen.getByText(/仍保留在 ~\/.zapmomo/)).toBeInTheDocument();
     expect(await screen.findByText("开始迁移")).toBeInTheDocument();
     expect(screen.getByText(/旧目录占用/)).toBeInTheDocument();
   });

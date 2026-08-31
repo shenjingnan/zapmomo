@@ -6,6 +6,7 @@ import type {
   SetCurrentResult,
   StorageInfo,
   StorageMigrateProgress,
+  StoragePrompt,
   SystemResources,
 } from "@/types/modelLibrary";
 import type {
@@ -26,6 +27,7 @@ import type {
   DshIntegrationInfo,
   DshParamsPatch,
   DshSpeakPayload,
+  ExportCompanionPackResult,
   HitRect,
   ImportCompanionResult,
   KwsConfigInfo,
@@ -117,6 +119,21 @@ export const api = {
   // 源可以是 Live2D 模型目录或 GIF 动图文件（后端 import_source 分派）。
   importCompanion: (args: { source: string }) =>
     invoke<ImportCompanionResult>("import_companion", args),
+  /** 从 .zip 导入角色包（同一 zip 重复导入提示已导入，不产生重复伙伴） */
+  importCompanionZip: (args: { source: string }) =>
+    invoke<ImportCompanionResult>("import_companion_zip", args),
+  /** 导出角色包为可分享 .zip（仅 format="character"；打包含 character.json 预设） */
+  exportCompanionPack: (args: { id: string; dest: string }) =>
+    invoke<ExportCompanionPackResult>("export_companion_pack", args),
+  /** 试听伙伴生效音色：返回参考音频 wav 绝对路径（None = 无生效音色），已放行 asset scope */
+  previewCompanionVoice: (args: { id: string }) =>
+    invoke<string | null>("preview_companion_voice", args),
+  /** 上传自定义音色覆盖当前生效音色（作者原版自动备份，可 restoreCompanionVoice 恢复） */
+  uploadCompanionVoice: (args: { id: string; wavPath: string; referenceText: string }) =>
+    invoke<CompanionLibraryView>("upload_companion_voice", args),
+  /** 恢复作者原版音色（删除当前上传版本，不可逆） */
+  restoreCompanionVoice: (args: { id: string }) =>
+    invoke<CompanionLibraryView>("restore_companion_voice", args),
   setActiveCompanion: (args: { id: string }) =>
     invoke<CompanionLibraryView>("set_active_companion", args),
   renameCompanion: (args: { id: string; name: string }) =>
@@ -125,6 +142,12 @@ export const api = {
   /** 绑定/解绑伙伴音色（voiceId 传 null 解绑）；注意 camelCase，snake_case 会被后端静默丢参 */
   setCompanionVoice: (args: { id: string; voiceId: string | null }) =>
     invoke<CompanionLibraryView>("set_companion_voice", args),
+  /** 设置伙伴自定义唤醒词（wakeWord 传 null 恢复跟随角色名；active 伙伴立即生效） */
+  setCompanionWakeWord: (args: { id: string; wakeWord: string | null }) =>
+    invoke<CompanionLibraryView>("set_companion_wake_word", args),
+  /** 设置伙伴自定义欢迎语（text 传 null 恢复默认模板；后台自动重生成预合成语音） */
+  setCompanionWelcomeText: (args: { id: string; text: string | null }) =>
+    invoke<CompanionLibraryView>("set_companion_welcome_text", args),
   /** 音色库全量自定义音色（模型无关，供伙伴页音色绑定选择器；区别于按 TTS 模型过滤的 listTtsVoices） */
   listVoiceLibrary: () => invoke<TtsVoice[]>("list_voice_library"),
   /** 在文件管理器中打开伙伴的托管资产目录（可自行调整音色参考等资产）。 */
@@ -188,18 +211,20 @@ export const api = {
   clearConversationRecords: () => invoke<void>("clear_conversation_records"),
   // ---- dsh 桥（deepseek-harness 任务事件 → 桌宠说话）----
   getDshConfig: () => invoke<DshConfigInfo>("get_dsh_config"),
-  setDshEnabled: (args: { enabled: boolean }) => invoke<void>("set_dsh_enabled", args),
   setDshParams: (args: { params: DshParamsPatch }) => invoke<void>("set_dsh_params", args),
   getDshBridgeStatus: () => invoke<DshBridgeStatus>("get_dsh_bridge_status"),
   testDshAnnounce: () => invoke<void>("test_dsh_announce"),
-  // ---- dsh 集成（插件检测 / 一键安装；「插件集成」页）----
+  // ---- dsh 集成（插件检测 / 一键安装 / 卸载；「插件集成」页）----
   detectDshIntegration: () => invoke<DshIntegrationInfo>("detect_dsh_integration"),
   installDshPlugin: (args: { path?: string | null }) => invoke<void>("install_dsh_plugin", args),
+  uninstallDshPlugin: () => invoke<void>("uninstall_dsh_plugin"),
   // ---- 模型列表（registry 预设 + 安装状态；供各「选择模型」弹窗）----
   listModelLibrary: () => invoke<LibraryModel[]>("list_model_library"),
   getSystemResources: () => invoke<SystemResources>("get_system_resources"),
   // ---- 存储位置（数据目录）----
   getStorageInfo: () => invoke<StorageInfo>("get_storage_info"),
+  getStoragePrompt: () => invoke<StoragePrompt>("get_storage_prompt"),
+  acknowledgeStoragePrompt: () => invoke<void>("acknowledge_storage_prompt"),
   setStorageDir: (args: { path: string | null }) => invoke<StorageInfo>("set_data_dir", args),
   migrateStorage: () => invoke<void>("migrate_storage"),
   cancelStorageMigration: () => invoke<void>("cancel_storage_migration"),
@@ -382,6 +407,11 @@ export function onStorageMigrateProgress(
   handler: (p: StorageMigrateProgress) => void,
 ): Promise<UnlistenFn> {
   return listen<StorageMigrateProgress>("storage-migrate-progress", (e) => handler(e.payload));
+}
+
+/** 数据目录已变更（`set_data_dir` / 迁移完成后 emit），订阅方应刷新缓存。 */
+export function onStorageDirChanged(handler: () => void): Promise<UnlistenFn> {
+  return listen<null>("storage-dir-changed", () => handler());
 }
 
 export function onLlmToken(handler: (delta: LlmToken) => void): Promise<UnlistenFn> {
