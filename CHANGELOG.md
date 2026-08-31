@@ -1,5 +1,47 @@
 # Changelog
 
+## [0.1.20](https://github.com/shenjingnan/zapmomo/compare/v0.1.19...v0.1.20) - 2026-08-31
+
+### Added
+
+- *(voice)* 语音会话开关迁移设置页、状态收敛与麦克风互斥 ([#253](https://github.com/shenjingnan/zapmomo/pull/253))
+- *(storage)* 首次下载引导选存储位置 + 下载/导入前磁盘空间校验 ([#242](https://github.com/shenjingnan/zapmomo/pull/242))
+- *(dsh)* 桥启停跟随插件安装状态，移除手动开关并新增卸载入口 ([#240](https://github.com/shenjingnan/zapmomo/pull/240))
+- *(companion)* 音色行内嵌播放条与文字按钮，移除音色库下拉 ([#239](https://github.com/shenjingnan/zapmomo/pull/239))
+- *(voice)* 形象切换 subagent——回复结束后台单次调用自动决策切形象 ([#234](https://github.com/shenjingnan/zapmomo/pull/234))
+- *(companion)* 右键菜单「表演」改为「状态切换」，表演功能下线 ([#235](https://github.com/shenjingnan/zapmomo/pull/235))
+- *(speaker)* 声纹识别完整落地——CAM++ 声纹引擎、GUI 注册管理、响应门控 ([#233](https://github.com/shenjingnan/zapmomo/pull/233))
+- *(bubble)* 语音对话 ASR 识别逐字上屏聊天气泡（流式 partial 聆听通道） ([#232](https://github.com/shenjingnan/zapmomo/pull/232))
+- *(integrations)* 插件集成页——dsh 集成插件化（检测/一键安装/心跳在线） ([#231](https://github.com/shenjingnan/zapmomo/pull/231))
+- *(voice)* ASR 说完判定接入 Silero VAD 门控，超长句强制断句兜底 ([#230](https://github.com/shenjingnan/zapmomo/pull/230))
+- *(llm)* 工具调用结果跨轮回传 LLM(history 持久化工具轮) ([#229](https://github.com/shenjingnan/zapmomo/pull/229))
+- *(companion)* 拖动角色窗口时聊天气泡联动跟随（macOS 子窗口丝滑方案） ([#227](https://github.com/shenjingnan/zapmomo/pull/227))
+- *(voice)* 播报中的语音打断（ASR barge-in）——说话即打断进入新一轮 ([#226](https://github.com/shenjingnan/zapmomo/pull/226))
+- *(companion)* 每角色独立音色，三级解析（目录自带 > 音色库绑定 > 全局默认） ([#225](https://github.com/shenjingnan/zapmomo/pull/225))
+- *(dsh)* 事件播报接入 LLM 文案生成（LLM 总结→气泡→TTS 播报） ([#224](https://github.com/shenjingnan/zapmomo/pull/224))
+- *(companion)* LLM 工具切换角色形象（set_character_sprite） ([#223](https://github.com/shenjingnan/zapmomo/pull/223))
+- *(models)* 移除 8 个 ASR 模型，模型库精简为默认 Zipformer + Qwen3-ASR (audio.cpp) ([#222](https://github.com/shenjingnan/zapmomo/pull/222))
+- *(bubble)* 聊天气泡展示用户输入，先用户句后角色回复 ([#220](https://github.com/shenjingnan/zapmomo/pull/220))
+- *(chatbox)* 输入条缺省改为显示，首次启动随角色一同出现 ([#219](https://github.com/shenjingnan/zapmomo/pull/219))
+- *(companion)* 角色窗口智能穿透（按光标位置动态切换） ([#217](https://github.com/shenjingnan/zapmomo/pull/217))
+- *(tts)* 合成前清洗 markdown/emoji 等无意义符号，提升播报速度与准确性 ([#216](https://github.com/shenjingnan/zapmomo/pull/216))
+- *(bubble)* 聊天气泡改为手动点击关闭，不再自动消失 ([#215](https://github.com/shenjingnan/zapmomo/pull/215))
+
+### Fixed
+
+- *(release)* 安装说明提取适配 README「应用下载」新锚点 ([#228](https://github.com/shenjingnan/zapmomo/pull/228))
+
+### Other
+
+- *(deps)* bump fumadocs-ui from 16.15.1 to 16.15.4 ([#246](https://github.com/shenjingnan/zapmomo/pull/246))
+- *(deps)* bump fumadocs-core from 16.15.1 to 16.15.4 ([#245](https://github.com/shenjingnan/zapmomo/pull/245))
+- *(deps)* bump next from 16.3.2 to 16.3.3 ([#249](https://github.com/shenjingnan/zapmomo/pull/249))
+- 清理根目录设计文档，归档仍被引用方案至 docs/plans ([#238](https://github.com/shenjingnan/zapmomo/pull/238))
+- *(readme)* 新增免费 LLM 推荐表格（智谱 glm-4.7-flash） ([#237](https://github.com/shenjingnan/zapmomo/pull/237))
+- *(dev)* .taurignore 排除 frontend 与纯文档目录，修复 dev 监听风暴 ([#221](https://github.com/shenjingnan/zapmomo/pull/221))
+- *(readme)* 简化下载按钮为系统图标 + 立即下载 ([#212](https://github.com/shenjingnan/zapmomo/pull/212))
+- *(asr)* 移除三个纯英文 Streaming Zipformer ASR 模型 ([#206](https://github.com/shenjingnan/zapmomo/pull/206))
+
 ## [0.1.19](https://github.com/shenjingnan/zapmomo/compare/v0.1.18...v0.1.19) - 2026-08-28
 
 ### Added
