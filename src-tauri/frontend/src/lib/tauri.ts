@@ -193,6 +193,9 @@ export const api = {
   startVoiceSession: () => invoke<void>("start_voice_session"),
   stopVoiceSession: () => invoke<void>("stop_voice_session"),
   isVoiceSessionRunning: () => invoke<boolean>("is_voice_session_running"),
+  /** 持久化启用态（`[voice].enabled`，决定启动是否自动进入待唤醒）；set 同时立即启停 */
+  getVoiceEnabled: () => invoke<boolean>("get_voice_enabled"),
+  setVoiceEnabled: (args: { enabled: boolean }) => invoke<void>("set_voice_enabled", args),
   // ---- 文字输入条（chatbox 窗口）----
   sendVoiceText: (args: { text: string }) => invoke<void>("send_voice_text", args),
   saveChatboxPosition: (args: { x: number; y: number }) =>

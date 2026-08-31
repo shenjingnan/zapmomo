@@ -1,31 +1,31 @@
-import { BellRing, CircleAlert, Download, FolderOpen, Repeat2, Settings2 } from "lucide-react";
+import { CircleAlert, Download, FolderOpen, Repeat2, Settings2 } from "lucide-react";
 import { useState } from "react";
 import { DeviceSelect } from "@/components/DeviceSelect";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
 import { useRuntime } from "@/providers/RuntimeContext";
 import { isDefaultKwsModelDir, modelNameFromDir } from "./kwsMeta";
 
 interface KwsBasicConfigProps {
-  onTestOpen: () => void;
   /** 打开「选择唤醒词模型」弹窗（由 KwsPage 持有弹窗状态） */
   onSwitchOpen: () => void;
 }
 
 /**
  * 基础配置（macOS 设置行）：
- * 当前模型（名称 + 就绪/未下载 Badge + 切换模型 + 可展开完整路径）/ 麦克风来源 /
- * 自定义唤醒词 + 底部「下载模型 / 选择模型 / 测试唤醒词」操作按钮。
+ * 当前模型（名称 + 就绪/未下载 Badge + 切换模型 + 可展开完整路径）/ 麦克风来源 +
+ * 底部「下载模型 / 选择模型」操作按钮。
+ *
+ * 全局自定义唤醒词输入与「测试唤醒词」入口已移除：唤醒词由伙伴在「伙伴」页
+ * 按角色设置并在该处测试（角色词压过全局词，见 `companion::resolve_wake_word`）；
+ * `[kws].custom_keywords` 保留为无伙伴接管时的回退（存量配置继续生效，仅无 UI 入口）。
  */
-export function KwsBasicConfig({ onTestOpen, onSwitchOpen }: KwsBasicConfigProps) {
+export function KwsBasicConfig({ onSwitchOpen }: KwsBasicConfigProps) {
   const {
     kws,
     devices: { error: devicesError },
-    sessionKeywords,
-    setSessionKeywords,
   } = useRuntime();
   const { config, error } = kws.config;
   const { downloading, progress, error: downloadError, download } = kws.download;
@@ -137,29 +137,6 @@ export function KwsBasicConfig({ onTestOpen, onSwitchOpen }: KwsBasicConfigProps
           </div>
           <DeviceSelect />
         </div>
-        <div className="flex items-center justify-between gap-3.5 px-3.5 py-2.5">
-          <div className="min-w-0">
-            <dt className="text-sm text-text-primary">自定义唤醒词</dt>
-            <dd className="mt-0.5 text-xs text-text-muted">
-              提供后将仅监听这些关键词（会话级），留空使用模型内置关键词。
-              {config?.active_wake_word != null && (
-                <>
-                  当前唤醒词由伙伴「接管」（
-                  {config.active_wake_word}
-                  ），此处的词仅在无伙伴接管时生效。
-                </>
-              )}
-            </dd>
-          </div>
-          <Input
-            className="w-64 shrink-0"
-            value={sessionKeywords}
-            onChange={(e) => setSessionKeywords(e.target.value)}
-            placeholder="多个用 / 分隔"
-            aria-label="自定义唤醒词"
-            disabled={kws.listening.isListening || kws.listening.pending}
-          />
-        </div>
       </dl>
 
       {devicesError && (
@@ -184,15 +161,6 @@ export function KwsBasicConfig({ onTestOpen, onSwitchOpen }: KwsBasicConfigProps
               选择模型
             </Button>
           ))}
-        <Button
-          variant="secondary"
-          className="shadow-none"
-          disabled={!modelsPresent}
-          onClick={onTestOpen}
-        >
-          <BellRing className="h-4 w-4" />
-          测试唤醒词
-        </Button>
       </div>
 
       {progress && (

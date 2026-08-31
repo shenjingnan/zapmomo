@@ -36,7 +36,7 @@ use zapmomo::companion_click_through::{
 use zapmomo::companion_sprites::SpriteEvent;
 use zapmomo::config::settings::{
     self, AsrSettings, BubbleSettings, ChatboxSettings, CompanionDragMode, CompanionWindowLayer,
-    CompanionWindowPosition, KwsSettings, Live2dSettings, LlmSettings, TtsSettings,
+    CompanionWindowPosition, KwsSettings, Live2dSettings, LlmSettings, TtsSettings, VoiceSettings,
 };
 use zapmomo::datetime::iso_timestamp_now;
 use zapmomo::kws::{KwsResult, Reaction, ReactionOutcome};
@@ -120,6 +120,9 @@ struct ListenState {
     handle: Mutex<Option<std::thread::JoinHandle<()>>>,
     /// 当前会话真正使用的模型目录（启动监听时固化；停止/线程退出时清空）
     active_model_dir: Arc<Mutex<Option<PathBuf>>>,
+    /// 本次独立监听启动时是否挂起了语音会话（互斥：麦克风同一时刻只归一方）。
+    /// 线程退出时据此恢复语音会话。
+    voice_suspended_by_listen: Mutex<bool>,
 }
 
 impl ListenState {
@@ -128,6 +131,7 @@ impl ListenState {
             running: Arc::new(AtomicBool::new(false)),
             handle: Mutex::new(None),
             active_model_dir: Arc::new(Mutex::new(None)),
+            voice_suspended_by_listen: Mutex::new(false),
         }
     }
 
@@ -1113,6 +1117,24 @@ fn start_listen_impl(
         ));
     }
 
+    // 互斥：独立监听持有麦克风期间挂起语音会话（内部 KWS/ASR 与本监听抢同一设备），
+    // 线程退出时按快照恢复。放在所有可 Err 的校验之后——拒绝启动时不误挂起。
+    // 标记可继承：上一任监听在声纹录音挂起期退出时留下标记，由本任监听退出时代为恢复。
+    let voice_state = app.state::<VoiceSessionState>();
+    let voice_was_running = voice_state.is_running();
+    let inherited = *state
+        .voice_suspended_by_listen
+        .lock()
+        .expect("listen voice_suspended lock poisoned");
+    if voice_was_running {
+        tracing::info!("独立 KWS 监听启动：挂起语音会话（监听退出后自动恢复）");
+        stop_voice_session_inner(voice_state.inner())?;
+    }
+    *state
+        .voice_suspended_by_listen
+        .lock()
+        .expect("listen voice_suspended lock poisoned") = voice_was_running || inherited;
+
     let running = state.running.clone();
     running.store(true, Ordering::Relaxed);
     // RuntimeActual：记录本次会话使用的模型目录；随线程退出（RAII）自动清空
@@ -1139,6 +1161,35 @@ fn start_listen_impl(
             error: result.err(),
         };
         let _ = reaction.app.emit("kws-stopped", payload);
+        // 恢复被本次监听挂起的语音会话（clean/错误退出统一在此收敛；
+        // stop_listen_inner 的 join 会等本线程完成后才返回）
+        let app = reaction.app;
+        let listen = app.state::<ListenState>();
+        let mut suspended = listen
+            .voice_suspended_by_listen
+            .lock()
+            .expect("listen voice_suspended lock poisoned");
+        if *suspended {
+            // 声纹录音挂起期内不恢复（录音正独占麦克风）：保留标记——
+            // speaker_resume 随后会重启本监听（start_listen_impl 继承标记），
+            // 监听最终退出时再恢复语音会话。
+            let speaker_suspended = app
+                .state::<SpeakerState>()
+                .suspended
+                .lock()
+                .map(|g| g.is_some())
+                .unwrap_or(false);
+            if speaker_suspended {
+                tracing::info!("独立 KWS 监听退出：处于声纹录音挂起期，语音会话恢复顺延");
+            } else {
+                *suspended = false;
+                drop(suspended);
+                let voice = app.state::<VoiceSessionState>();
+                if let Err(e) = start_voice_session_impl(app.clone(), voice.inner()) {
+                    tracing::warn!("独立 KWS 监听退出后恢复语音会话失败: {e}");
+                }
+            }
+        }
     });
     *state.handle.lock().expect("listen handle lock poisoned") = Some(handle);
     // 通知前端监听已启动（含切换设备后的自动重启；启动瞬间前端未订阅时静默丢弃）
@@ -2414,6 +2465,14 @@ fn start_voice_session_impl(app: AppHandle, state: &VoiceSessionState) -> Result
     if state.is_running() {
         return Err("语音会话已在运行中".to_string());
     }
+    // 互斥（与 start_listen_impl 的挂起配对）：独立 KWS 监听持有麦克风时拒绝开启
+    // 语音会话，用户按提示先关监听（监听退出不会恢复未成功挂起的会话）。
+    if app.state::<ListenState>().is_listening() {
+        return Err(
+            "独立 KWS 监听运行中：请先在「唤醒词（KWS）配置」页停止监听，再开启语音会话"
+                .to_string(),
+        );
+    }
     let settings = zapmomo::config::settings::load_settings()?;
     let mut cfg =
         zapmomo::voice::config::resolve(settings.as_ref(), &VoiceCliOverrides::default())?;
@@ -2703,6 +2762,49 @@ fn is_voice_session_running(state: State<'_, VoiceSessionState>) -> bool {
     state.is_running()
 }
 
+/// 读取语音会话持久化启用态（`[voice].enabled`，缺省 true），供「模型与能力」页开关回显。
+#[tauri::command]
+fn get_voice_enabled() -> Result<bool, String> {
+    let settings = settings::load_settings()?;
+    Ok(settings
+        .as_ref()
+        .and_then(|s| s.voice.as_ref())
+        .and_then(|v| v.enabled)
+        .unwrap_or(true))
+}
+
+/// 启用/停用语音会话：持久化 `[voice].enabled`（决定下次启动是否自动进入待唤醒）
+/// 并立即生效（启用→启动会话，停用→停止会话）。
+///
+/// 两侧均幂等：已在运行时再启用只持久化不重复启动；未运行时停用只持久化。
+/// 启动失败（如缺模型/前置能力未启用）错误向调用方传播，持久化保持 on——
+/// 修复前置后重新开关或重启应用即可（与启动自动拉起的「静默降级」同语义）。
+#[tauri::command]
+fn set_voice_enabled(
+    app: AppHandle,
+    state: State<'_, VoiceSessionState>,
+    enabled: bool,
+) -> Result<(), String> {
+    tracing::info!("set_voice_enabled 命令被调用: enabled={enabled}");
+    let mut settings = settings::load_settings()?.unwrap_or_default();
+    settings
+        .voice
+        .get_or_insert_with(VoiceSettings::default)
+        .enabled = Some(enabled);
+    settings::save_settings(&settings)?;
+    if enabled {
+        if state.is_running() {
+            return Ok(());
+        }
+        start_voice_session_impl(app, state.inner())
+    } else {
+        if !state.is_running() {
+            return Ok(());
+        }
+        stop_voice_session_inner(state.inner())
+    }
+}
+
 /// 发送文字消息（输入条窗口）：经 mpsc 送进会话编排循环，与 ASR 最终文本等价
 /// 走 LLM → TTS → 落盘的完整对话链路。会话未运行时拒绝（不隐式启动/开麦克风）。
 #[tauri::command]
@@ -2715,7 +2817,7 @@ fn send_voice_text(state: State<'_, VoiceSessionState>, text: String) -> Result<
         .lock()
         .expect("voice text_tx lock poisoned")
         .clone()
-        .ok_or("语音互动未运行：请先在「对话记录」页开启语音互动，再发送文字消息".to_string())?;
+        .ok_or("语音互动未运行：请先在「模型与能力」页启用「语音会话」后再发文字".to_string())?;
     tx.send(text).map_err(|_| "语音会话已停止".to_string())
 }
 
@@ -7342,6 +7444,8 @@ pub fn run() {
             start_voice_session,
             stop_voice_session,
             is_voice_session_running,
+            get_voice_enabled,
+            set_voice_enabled,
             send_voice_text,
             get_dsh_config,
             set_dsh_params,

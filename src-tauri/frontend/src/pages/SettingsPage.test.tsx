@@ -5,9 +5,22 @@ import { ToastProvider } from "@/components/ui/toast";
 import type { StorageInfo, StorageMigrateProgress } from "@/types/modelLibrary";
 import { SettingsPage } from "./SettingsPage";
 
-const { invokeMock, openMock } = vi.hoisted(() => ({
+const { invokeMock, openMock, state } = vi.hoisted(() => ({
   invokeMock: vi.fn(),
   openMock: vi.fn(),
+  state: {
+    kwsEnabled: true,
+    asrEnabled: true,
+    voiceEnabled: true,
+    voiceRunning: false,
+    voicePending: false,
+  } as {
+    kwsEnabled: boolean;
+    asrEnabled: boolean;
+    voiceEnabled: boolean;
+    voiceRunning: boolean;
+    voicePending: boolean;
+  },
 }));
 
 /** 事件处理器缓存：测试可向组件推事件（如迁移进度）。 */
@@ -34,6 +47,21 @@ vi.mock("@/providers/RuntimeContext", () => ({
     device: null,
     setDevice: vi.fn(),
     anyListening: false,
+    // 语音互动开关切片：个别用例可改写 state 翻转前置/状态
+    kws: { config: { config: { enabled: state.kwsEnabled, models_present: true } } },
+    asr: { config: { config: { enabled: state.asrEnabled, models_present: true } } },
+    llm: { ready: true, loading: false },
+    voice: {
+      running: state.voiceRunning,
+      phase: state.voiceRunning ? "armed" : "idle",
+      enabled: state.voiceEnabled,
+      error: null,
+      pending: state.voicePending,
+      setEnabled: (on: boolean) => {
+        state.voiceEnabled = on;
+        return Promise.resolve(invokeMock("set_voice_enabled", { enabled: on }));
+      },
+    },
   }),
 }));
 
@@ -59,6 +87,11 @@ beforeEach(() => {
   invokeMock.mockReset();
   openMock.mockReset();
   listenHandlers.clear();
+  state.kwsEnabled = true;
+  state.asrEnabled = true;
+  state.voiceEnabled = true;
+  state.voiceRunning = false;
+  state.voicePending = false;
   invokeMock.mockImplementation((cmd: string) => {
     switch (cmd) {
       case "get_hide_dock_icon":
@@ -250,5 +283,44 @@ describe("SettingsPage 开机自启动", () => {
       listenHandlers.get("autostart-changed")?.(true);
     });
     expect(toggle).toHaveAttribute("aria-checked", "true");
+  });
+});
+
+describe("SettingsPage 语音互动", () => {
+  it("渲染语音会话开关与当前状态", async () => {
+    renderPage();
+    expect(await screen.findByText("语音互动")).toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: "语音会话开关" })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    // 状态文案来自 voiceSessionStatus（未运行 + 已启用 → 已启用）
+    expect(screen.getByText(/当前状态：已启用/)).toBeInTheDocument();
+  });
+
+  it("关闭开关调用 set_voice_enabled(false)", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(await screen.findByRole("switch", { name: "语音会话开关" }));
+
+    expect(invokeMock).toHaveBeenCalledWith("set_voice_enabled", { enabled: false });
+  });
+
+  it("KWS 或 ASR 未启用时开关置灰并提示去模型页开启", async () => {
+    state.kwsEnabled = false;
+    renderPage();
+
+    expect(await screen.findByRole("switch", { name: "语音会话开关" })).toBeDisabled();
+    expect(
+      screen.getByText(/需要先在「模型与能力」页启用「唤醒词」.*「语音识别」/),
+    ).toBeInTheDocument();
+  });
+
+  it("启停在途时开关置灰（pending）", async () => {
+    state.voicePending = true;
+    renderPage();
+
+    expect(await screen.findByRole("switch", { name: "语音会话开关" })).toBeDisabled();
   });
 });

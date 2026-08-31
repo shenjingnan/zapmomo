@@ -27,7 +27,9 @@ export function useListening(): ListeningState {
 
     const unlisten = onListenStopped((payload) => {
       setIsListening(false);
-      if (payload.error) setError(payload.error);
+      // 干净停止（error 空）同时清掉陈旧错误：错误态只在真正出错时存续，
+      // 否则一次历史错误会永远挂在模型页状态上误导（仅下次启动成功才清）
+      setError(payload.error ?? null);
     });
     const unlistenStarted = onListenStarted(() => {
       setIsListening(true);

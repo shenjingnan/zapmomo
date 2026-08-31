@@ -11,14 +11,23 @@ const EXIT_MS = 200;
 interface KwsTestDialogProps {
   open: boolean;
   onClose: () => void;
+  /** 测试目标关键词；缺省回退全局自定义唤醒词（会话级）→ 模型内置词 */
+  keywords?: string | null;
+  /** 对话框标题（伙伴页按角色测试时显示「测试伙伴唤醒词」等） */
+  title?: string;
 }
 
 /**
  * 测试唤醒词对话框：只展示实时检测结果（配置字段在主页面，不在此重复）。
- * 打开时若未在监听则自动开始一次测试监听；关闭时自动停止本次测试监听。
- * 打开前已监听（顶部开关开启）→ 关闭绝不停止。
+ * 打开时若未在监听则自动开始一次测试监听（关键词由调用方指定）；关闭时自动停止
+ * 本次测试监听。打开前已监听（顶部开关开启）→ 关闭绝不停止。
  */
-export function KwsTestDialog({ open, onClose }: KwsTestDialogProps) {
+export function KwsTestDialog({
+  open,
+  onClose,
+  keywords,
+  title = "测试唤醒词",
+}: KwsTestDialogProps) {
   const { kws, device, sessionKeywords } = useRuntime();
   const [mounted, setMounted] = useState(open);
   const [closing, setClosing] = useState(false);
@@ -52,7 +61,7 @@ export function KwsTestDialog({ open, onClose }: KwsTestDialogProps) {
     if (kws.listening.pending) return; // 等正在进行的操作完成
     autoStartHandled.current = true;
     startedByDialog.current = true;
-    void kws.listening.start(device || null, sessionKeywords || null);
+    void kws.listening.start(device || null, keywords ?? sessionKeywords ?? null);
   }, [
     open,
     mounted,
@@ -60,6 +69,7 @@ export function KwsTestDialog({ open, onClose }: KwsTestDialogProps) {
     kws.listening.isListening,
     kws.listening.pending,
     device,
+    keywords,
     sessionKeywords,
     kws.listening.start,
   ]);
@@ -108,7 +118,7 @@ export function KwsTestDialog({ open, onClose }: KwsTestDialogProps) {
       className="fixed inset-0 z-50 flex items-center justify-center p-4"
       role="dialog"
       aria-modal="true"
-      aria-label="测试唤醒词"
+      aria-label={title}
     >
       <button
         type="button"
@@ -129,7 +139,7 @@ export function KwsTestDialog({ open, onClose }: KwsTestDialogProps) {
         )}
       >
         <div className="flex items-center justify-between gap-4 border-b border-divider px-5 py-4">
-          <h3 className="text-sm font-semibold text-text-primary">测试唤醒词</h3>
+          <h3 className="text-sm font-semibold text-text-primary">{title}</h3>
           <Button
             variant="ghost"
             size="icon"

@@ -719,9 +719,9 @@ mod tests {
         run_with_temp_home(|_home| {
             let info = collect_prompt_info().unwrap();
             assert!(info.prompt_recommended);
-            // 默认根 = ~/.zapmomo（temp home 展开）
-            assert!(info.models_dir.ends_with(".zapmomo/models"));
-            assert!(info.companions_dir.ends_with(".zapmomo/companions"));
+            // 默认根 = ~/.zapmomo（temp home 展开）；路径感知比较（Windows 分隔符为 \）
+            assert!(Path::new(&info.models_dir).ends_with(".zapmomo/models"));
+            assert!(Path::new(&info.companions_dir).ends_with(".zapmomo/companions"));
             // 建议目录依赖真实磁盘（单盘机器为 None）；有值则必以 ZapMomo 结尾
             if let Some(dir) = &info.suggested_dir {
                 assert!(dir.ends_with("ZapMomo"), "{dir}");
