@@ -235,7 +235,7 @@ describe("App（KWS 控制面板）", () => {
     // 「插件集成」同时出现在侧栏与页标题，这里用 heading role 消歧
     expect(screen.getByRole("heading", { name: "插件集成" })).toBeInTheDocument();
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("detect_dsh_integration"));
-    expect(screen.getByText("deepseek-harness（dsh 桥）")).toBeInTheDocument();
+    expect(screen.getByText("deepseek-harness")).toBeInTheDocument();
     expect(screen.getByTestId("dsh-integration-state").textContent).toContain("未检测到 dsh");
   });
 

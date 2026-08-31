@@ -698,11 +698,9 @@ pub struct VoiceSettings {
 /// dsh 桥配置。
 ///
 /// 全部字段可缺省：未配置的项在解析时回退到 `dsh::config` 的内置默认值。
+/// 桥无独立开关，启停跟随插件安装状态（`dsh::integration` 的检测判定）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct DshSettings {
-    /// 是否启用桥服务（loopback HTTP 监听），缺省 true
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub enabled: Option<bool>,
     /// 监听端口，0 = 随机端口（默认，避免冲突），缺省 0
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
@@ -1508,6 +1506,8 @@ mod tests {
     fn test_parse_dsh_section() {
         run_with_temp_home(|_| {
             std::fs::create_dir_all(get_settings_dir()).unwrap();
+            // enabled 为旧版本遗留键：桥已无独立开关（跟随插件安装状态），
+            // 结构体不再有此字段，serde 须静默忽略、不阻塞整份配置解析
             std::fs::write(
                 get_settings_path(),
                 "[dsh]\nenabled = false\nport = 47800\nvoice_enabled = false\n",
@@ -1515,7 +1515,6 @@ mod tests {
             .unwrap();
             let cfg = load_settings().unwrap().unwrap();
             let dsh = cfg.dsh.expect("[dsh] 段应解析");
-            assert_eq!(dsh.enabled, Some(false));
             assert_eq!(dsh.port, Some(47800));
             assert_eq!(dsh.voice_enabled, Some(false));
             assert_eq!(dsh.record_to_history, None);
