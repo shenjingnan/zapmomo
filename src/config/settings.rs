@@ -222,6 +222,9 @@ pub struct AppConfig {
     /// 仍留在 `~/.zapmomo`。缺省 = `~/.zapmomo`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_dir: Option<String>,
+    /// 「存储位置引导」已确认过（首次下载/导入前的一次性弹窗标记，确认后不再弹）。
+    #[serde(default)]
+    pub storage_prompt_acknowledged: bool,
     /// 唤醒词检测（KWS）配置
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kws: Option<KwsSettings>,
@@ -790,6 +793,7 @@ impl Default for AppConfig {
             custom: None,
             microphone: None,
             data_dir: None,
+            storage_prompt_acknowledged: false,
             kws: None,
             asr: None,
             tts: None,
@@ -983,6 +987,7 @@ mod tests {
             custom: Some(std::collections::HashMap::new()),
             microphone: Some("内置麦克风".to_string()),
             data_dir: None,
+            storage_prompt_acknowledged: false,
             kws: None,
             asr: None,
             tts: None,
@@ -1011,6 +1016,25 @@ mod tests {
             write_toml_settings(home, "debug = true\n");
             let result = load_settings().unwrap().unwrap();
             assert!(!result.hide_dock_icon);
+        });
+    }
+
+    #[test]
+    fn test_load_settings_without_storage_prompt_ack_defaults_false() {
+        // 旧配置文件没有 storage_prompt_acknowledged 时，应回退为 false（引导仍会弹）。
+        run_with_temp_home(|home| {
+            write_toml_settings(home, "debug = true\n");
+            let result = load_settings().unwrap().unwrap();
+            assert!(!result.storage_prompt_acknowledged);
+        });
+    }
+
+    #[test]
+    fn test_load_settings_with_storage_prompt_ack() {
+        run_with_temp_home(|home| {
+            write_toml_settings(home, "storage_prompt_acknowledged = true\n");
+            let result = load_settings().unwrap().unwrap();
+            assert!(result.storage_prompt_acknowledged);
         });
     }
 
@@ -1306,6 +1330,7 @@ mod tests {
                 custom: None,
                 microphone: None,
                 data_dir: None,
+                storage_prompt_acknowledged: false,
                 kws: None,
                 asr: None,
                 tts: None,

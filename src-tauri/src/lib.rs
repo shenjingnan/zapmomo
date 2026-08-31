@@ -6961,6 +6961,27 @@ async fn get_storage_info(mig: State<'_, StorageMigrateState>) -> Result<Storage
     Ok(info)
 }
 
+/// 首次下载/导入前的存储位置引导信息（轻量查询，不做旧根全量遍历，可频繁调用）。
+#[tauri::command]
+async fn get_storage_prompt() -> Result<zapmomo::model_library::storage::StoragePromptView, String>
+{
+    tauri::async_runtime::spawn_blocking(zapmomo::model_library::storage::collect_prompt_info)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// 标记存储位置引导已确认（一次性标记，之后前端不再弹引导窗）。
+#[tauri::command]
+async fn acknowledge_storage_prompt() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        zapmomo::model_library::update_settings(|cfg| {
+            cfg.storage_prompt_acknowledged = true;
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// 设置（或清除）自定义数据目录。切换立即生效：新下载走新目录，存量模型保持可见可用。
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
@@ -6999,6 +7020,8 @@ async fn set_data_dir(
     };
     zapmomo::model_library::update_settings(|cfg| {
         cfg.data_dir = data_dir_value.clone();
+        // 用户已在设置里对存储位置做出明确选择（含恢复默认），引导不再弹
+        cfg.storage_prompt_acknowledged = true;
     })?;
     zapmomo::config::settings::refresh_data_dir_cache();
     let _ = app.emit("storage-dir-changed", ());
@@ -7335,6 +7358,8 @@ pub fn run() {
             set_current_model,
             delete_model,
             get_storage_info,
+            get_storage_prompt,
+            acknowledge_storage_prompt,
             set_data_dir,
             migrate_storage,
             cancel_storage_migration,

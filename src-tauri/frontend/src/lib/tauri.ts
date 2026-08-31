@@ -6,6 +6,7 @@ import type {
   SetCurrentResult,
   StorageInfo,
   StorageMigrateProgress,
+  StoragePrompt,
   SystemResources,
 } from "@/types/modelLibrary";
 import type {
@@ -219,6 +220,8 @@ export const api = {
   getSystemResources: () => invoke<SystemResources>("get_system_resources"),
   // ---- 存储位置（数据目录）----
   getStorageInfo: () => invoke<StorageInfo>("get_storage_info"),
+  getStoragePrompt: () => invoke<StoragePrompt>("get_storage_prompt"),
+  acknowledgeStoragePrompt: () => invoke<void>("acknowledge_storage_prompt"),
   setStorageDir: (args: { path: string | null }) => invoke<StorageInfo>("set_data_dir", args),
   migrateStorage: () => invoke<void>("migrate_storage"),
   cancelStorageMigration: () => invoke<void>("cancel_storage_migration"),
@@ -401,6 +404,11 @@ export function onStorageMigrateProgress(
   handler: (p: StorageMigrateProgress) => void,
 ): Promise<UnlistenFn> {
   return listen<StorageMigrateProgress>("storage-migrate-progress", (e) => handler(e.payload));
+}
+
+/** 数据目录已变更（`set_data_dir` / 迁移完成后 emit），订阅方应刷新缓存。 */
+export function onStorageDirChanged(handler: () => void): Promise<UnlistenFn> {
+  return listen<null>("storage-dir-changed", () => handler());
 }
 
 export function onLlmToken(handler: (delta: LlmToken) => void): Promise<UnlistenFn> {

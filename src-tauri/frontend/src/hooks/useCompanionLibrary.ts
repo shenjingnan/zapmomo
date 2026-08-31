@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useToast } from "@/components/ui/toast";
 import { api, onLive2dModelChanged } from "@/lib/tauri";
+import { useStorageGate } from "@/providers/StorageGateProvider";
 import type {
   CompanionLibraryView,
   CompanionModelInfo,
@@ -48,6 +49,7 @@ export interface CompanionLibraryState {
  */
 export function useCompanionLibrary(): CompanionLibraryState {
   const toast = useToast();
+  const gate = useStorageGate();
   const [library, setLibrary] = useState<CompanionLibraryView | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -99,6 +101,8 @@ export function useCompanionLibrary(): CompanionLibraryState {
 
   const importModel = useCallback(
     async (source: string): Promise<CompanionModelInfo | null> => {
+      // 首次导入引导（选存储位置）；用户取消则静默中止（不进 catch、不报错误 toast）
+      if (!(await gate.ensureStorageReady())) return null;
       try {
         const result = await api.importCompanion({ source });
         return await applyImportResult(result);
@@ -107,11 +111,13 @@ export function useCompanionLibrary(): CompanionLibraryState {
         return null;
       }
     },
-    [toast, applyImportResult],
+    [gate, toast, applyImportResult],
   );
 
   const importZip = useCallback(
     async (source: string): Promise<CompanionModelInfo | null> => {
+      // 首次导入引导（选存储位置）；用户取消则静默中止（不进 catch、不报错误 toast）
+      if (!(await gate.ensureStorageReady())) return null;
       try {
         const result = await api.importCompanionZip({ source });
         return await applyImportResult(result);
@@ -120,7 +126,7 @@ export function useCompanionLibrary(): CompanionLibraryState {
         return null;
       }
     },
-    [toast, applyImportResult],
+    [gate, toast, applyImportResult],
   );
 
   const exportPack = useCallback(

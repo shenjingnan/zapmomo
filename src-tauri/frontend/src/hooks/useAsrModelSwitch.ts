@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useToast } from "@/components/ui/toast";
 import { api, onModelLibraryDownloadProgress } from "@/lib/tauri";
 import { useRuntime } from "@/providers/RuntimeContext";
+import { useStorageGate } from "@/providers/StorageGateProvider";
 import type { LibraryModel, ModelLibraryProgress, SetCurrentResult } from "@/types/modelLibrary";
 
 /** ASR 切换弹窗的内置预设（id = models/model_registry.json 的 registry id）。 */
@@ -45,6 +46,7 @@ export interface AsrModelSwitchState {
 export function useAsrModelSwitch(): AsrModelSwitchState {
   const runtime = useRuntime();
   const toast = useToast();
+  const gate = useStorageGate();
   const [models, setModels] = useState<LibraryModel[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -86,6 +88,8 @@ export function useAsrModelSwitch(): AsrModelSwitchState {
 
   const download = useCallback(
     async (id: string) => {
+      // 首次下载引导（选存储位置）；用户取消则静默中止（不置忙碌态）
+      if (!(await gate.ensureStorageReady())) return;
       setDownloadingId(id);
       setProgress(null);
       terminalStage.current = null;
@@ -107,7 +111,7 @@ export function useAsrModelSwitch(): AsrModelSwitchState {
         await refresh();
       }
     },
-    [toast, refresh],
+    [gate, toast, refresh],
   );
 
   const setCurrent = useCallback(

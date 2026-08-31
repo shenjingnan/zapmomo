@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, onSpeakerModelDownloadProgress } from "@/lib/tauri";
+import { useStorageGate } from "@/providers/StorageGateProvider";
 import type { DownloadProgress } from "@/types/tauri";
 
 export interface SpeakerModelDownloadState {
@@ -14,6 +15,7 @@ export interface SpeakerModelDownloadState {
  * raw 单文件资产：后端只发 downloading/verifying/done 三阶段，无 extracting。
  */
 export function useSpeakerModelDownload(onSuccess: () => void): SpeakerModelDownloadState {
+  const gate = useStorageGate();
   const [downloading, setDownloading] = useState(false);
   const [progress, setProgress] = useState<DownloadProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -26,6 +28,8 @@ export function useSpeakerModelDownload(onSuccess: () => void): SpeakerModelDown
   }, []);
 
   const download = useCallback(async () => {
+    // 首次下载引导（选存储位置）；用户取消则静默中止
+    if (!(await gate.ensureStorageReady())) return;
     setDownloading(true);
     setError(null);
     setProgress(null);
@@ -37,7 +41,7 @@ export function useSpeakerModelDownload(onSuccess: () => void): SpeakerModelDown
     } finally {
       setDownloading(false);
     }
-  }, [onSuccess]);
+  }, [gate, onSuccess]);
 
   return { downloading, progress, error, download };
 }

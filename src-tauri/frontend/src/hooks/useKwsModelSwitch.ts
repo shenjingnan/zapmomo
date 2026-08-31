@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useToast } from "@/components/ui/toast";
 import { api, onModelLibraryDownloadProgress } from "@/lib/tauri";
 import { useRuntime } from "@/providers/RuntimeContext";
+import { useStorageGate } from "@/providers/StorageGateProvider";
 import type { LibraryModel, ModelLibraryProgress, SetCurrentResult } from "@/types/modelLibrary";
 
 /** 默认（legacy 一键下载按钮所装）的 zh-en 模型 registry id。 */
@@ -40,6 +41,7 @@ export interface KwsModelSwitchState {
 export function useKwsModelSwitch(): KwsModelSwitchState {
   const runtime = useRuntime();
   const toast = useToast();
+  const gate = useStorageGate();
   const [models, setModels] = useState<LibraryModel[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -81,6 +83,8 @@ export function useKwsModelSwitch(): KwsModelSwitchState {
 
   const download = useCallback(
     async (id: string) => {
+      // 首次下载引导（选存储位置）；用户取消则静默中止（不置忙碌态）
+      if (!(await gate.ensureStorageReady())) return;
       setDownloadingId(id);
       setProgress(null);
       terminalStage.current = null;
@@ -102,7 +106,7 @@ export function useKwsModelSwitch(): KwsModelSwitchState {
         await refresh();
       }
     },
-    [toast, refresh],
+    [gate, toast, refresh],
   );
 
   const setCurrent = useCallback(
