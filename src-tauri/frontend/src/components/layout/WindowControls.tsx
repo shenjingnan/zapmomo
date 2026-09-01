@@ -7,11 +7,12 @@ const windowButtonClass =
 
 /** 非 macOS 平台的自绘窗口三键（最小化/最大化/关闭）。
  *
- * 宿主容器决定摆放位置：Linux/Windows 均在 AppShell 右上角悬浮条。
+ * 自带 flex 容器聚合成单个 flex 子项：AppShell 顶栏为 justify-between，
+ * 若三键以 Fragment 平铺会成为多个子项被均匀摊开（三键间出现大间距）。
  */
 export function WindowControls() {
   return (
-    <>
+    <div className="flex h-full shrink-0">
       <button
         type="button"
         aria-label="最小化"
@@ -36,6 +37,6 @@ export function WindowControls() {
       >
         <X className="h-4 w-4" />
       </button>
-    </>
+    </div>
   );
 }
