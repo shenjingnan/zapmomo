@@ -516,15 +516,15 @@ window_scale = 1.0                       # 窗口缩放（0.25 ~ 2.0）
 每次发布新版本会自动构建 **Windows / macOS（Intel+Apple Silicon）/ Linux** 安装包并合并到一个 GitHub Release：
 
 1. 合入 `main` 后，`publish.yml` 中的 release-plz 自动 bump 版本、更新 changelog，打出 `vX.Y.Z` tag 并发布到 crates.io，同时维护「版本发布 PR」。
-2. tag push 触发 `release.yml`：在三个平台的原生 runner 上运行 `tauri-action` 构建安装包（`.dmg` / `.app.tar.gz` / `.msi` / `.exe` / `.deb` / `.rpm` / `.AppImage`）。
+2. tag push 触发 `release.yml`：在三个平台的原生 runner 上运行 `tauri-action` 构建安装包（`.dmg` / `.msi` / `.exe` / `.deb` / `.rpm` / `.AppImage`）。macOS 的 `.dmg` 在上传前由 `scripts/patch-dmg-gatekeeper.sh` 注入「首次打开修复.command」——未签名应用被 Gatekeeper 报「已损坏」，用户双击该脚本即可自动安装 + 修复（详见 README「macOS 首次打开」）。
 3. 构建成功后自动发布为正式 Release（`draft: false`，不再停留在草稿）。
 
 发布产物矩阵：
 
 | 平台 | 安装包 |
 |------|--------|
-| macOS (Apple Silicon) | `.dmg` + `.app.tar.gz` |
-| macOS (Intel) | `.dmg` + `.app.tar.gz` |
+| macOS (Apple Silicon) | `.dmg` |
+| macOS (Intel) | `.dmg` |
 | Windows x64 | `.msi` + `.exe`（NSIS） |
 | Linux x64 | `.deb` + `.rpm` + `.AppImage` |
 

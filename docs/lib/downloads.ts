@@ -66,7 +66,7 @@ export const PLATFORMS: Platform[] = [
         url: `${RELEASE_BASE}ZapMomo_macOS_arm64.dmg`,
       },
     ],
-    note: '未签名：首次打开前请执行 xattr -cr "/Applications/ZapMomo.app"',
+    note: '未签名：首次打开提示「已损坏」？双击 dmg 内「首次打开修复.command」自动安装并修复',
   },
   {
     key: 'macos-x64',
@@ -79,7 +79,7 @@ export const PLATFORMS: Platform[] = [
         url: `${RELEASE_BASE}ZapMomo_macOS_x64.dmg`,
       },
     ],
-    note: '未签名：首次打开前请执行 xattr -cr "/Applications/ZapMomo.app"',
+    note: '未签名：首次打开提示「已损坏」？双击 dmg 内「首次打开修复.command」自动安装并修复',
   },
   {
     key: 'linux-x64',

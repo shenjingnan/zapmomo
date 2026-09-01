@@ -20,8 +20,10 @@ pnpm tauri build
 
 > 打包版内置「下载模型」按钮：首次监听时若缺模型，在「配置」面板点击即可自动
 > 下载到 `~/.zapmomo/models/<模型名>`（也可用 `zapmomo kws install-model`）。
-> macOS 未签名 dmg 首次打开若被 Gatekeeper 拦截，右键 →「打开」，或执行
-> `xattr -dr com.apple.quarantine <应用路径>`。
+> macOS 未签名 dmg 首次打开若被 Gatekeeper 拦截（提示「已损坏，无法打开」）：
+> Release 产物已内置「首次打开修复.command」，双击即可自动安装并修复（见 README
+> 「macOS 首次打开」）；本地 `pnpm tauri build` 出的 dmg 未经注入，需右键 →「打开」，
+> 或执行 `xattr -dr com.apple.quarantine <应用路径>`。
 
 ## 相关页面
 
