@@ -16,6 +16,7 @@ pub mod asr_families;
 pub mod client;
 pub mod families;
 pub mod locator;
+pub mod provider;
 pub mod server;
 pub mod server_config;
 
@@ -28,6 +29,12 @@ pub enum AudiocppError {
     EngineNotFound { searched: Vec<std::path::PathBuf> },
     /// 进程启动失败（spawn 报错）
     SpawnFailed(String),
+    /// 引擎启动后立即退出——典型原因：请求的 backend 未被该引擎构建编入
+    /// （如 CPU-only 引擎收到 cuda）、无 NVIDIA GPU、驱动过旧。
+    EngineExitedImmediately {
+        backend: String,
+        stderr_tail: String,
+    },
     /// 健康检查超时（携带 server stderr 末尾若干行辅助诊断）
     StartupTimeout {
         timeout_secs: u32,
@@ -65,6 +72,14 @@ impl AudiocppError {
                     .join(", ")
             ),
             Self::SpawnFailed(e) => format!("启动 audiocpp_server 失败: {e}"),
+            Self::EngineExitedImmediately {
+                backend,
+                stderr_tail,
+            } => format!(
+                "audiocpp_server 以 {backend} 后端启动后立即退出\
+                 （常见原因：该后端未被引擎构建支持、无 NVIDIA GPU 或驱动过旧）。\
+                 引擎输出末尾：\n{stderr_tail}"
+            ),
             Self::StartupTimeout {
                 timeout_secs,
                 stderr_tail,

@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -92,13 +92,68 @@ pub fn set_idle_keepalive(keepalive: Option<Duration>) {
     );
 }
 
+/// 无法以 GPU 后端启动的配置指纹（进程级记忆）。
+///
+/// cuda 指纹实例失败后从不进 manager 表；不记忆的话 GUI 每次合成构造引擎
+/// 都会先试一次注定失败的 spawn（引擎毫秒级退出，但日志噪声 + 无谓延迟）。
+/// 进程生命周期内有效——驱动不会在运行中途凭空出现。
+static GPU_FALLBACK_HASHES: OnceLock<Mutex<std::collections::HashSet<u64>>> = OnceLock::new();
+
+fn gpu_fallback_hashes() -> &'static Mutex<std::collections::HashSet<u64>> {
+    GPU_FALLBACK_HASHES.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
 /// 获取 server 租约：按配置指纹复用健康实例或 spawn（同指纹崩溃懒重启）。
 ///
 /// manager 互斥锁串行化，避免并发 lease 双 spawn。**不同指纹的实例互不影响**
 /// （并存直至各自租约归零回收）——切换模型时旧 server 继续服务在途请求，
 /// 新 server 独立启动，热切换零中断。TTS 与 ASR 任务的指纹含 task 维度，
 /// 两任务各自独立实例并存（路线 A，技术方案 §3.2）。
+///
+/// GPU 后端回退：请求的 provider 非 cpu 且引擎启动后立即退出（后端未编入 /
+/// 无 NVIDIA GPU / 驱动过旧）时，自动以 cpu 指纹重试一次。回退封装在本函数
+/// 内——调用方（TtsSwap 热切换事务 / AudiocppTts 构造）只看到最终结果；
+/// settings.toml 不回写（每次冷启动重试一次 cuda，成本为引擎毫秒级退出）。
 pub fn lease(spec: &ServerInstanceSpec) -> Result<ServerLease, AudiocppError> {
+    // 曾经回退过的指纹直接用 cpu spec，跳过注定失败的 spawn
+    let already_fallback = spec.provider != "cpu" && {
+        let engine = super::locator::locate_engine(spec.engine_path.as_deref())?;
+        gpu_fallback_hashes()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&config_hash(spec, &engine))
+    };
+    if already_fallback {
+        let mut cpu_spec = spec.clone();
+        cpu_spec.provider = "cpu".to_string();
+        return lease_once(&cpu_spec);
+    }
+
+    match lease_once(spec) {
+        Ok(l) => Ok(l),
+        Err(AudiocppError::EngineExitedImmediately {
+            backend,
+            stderr_tail,
+        }) if spec.provider != "cpu" => {
+            tracing::warn!(
+                target: "audiocpp",
+                "后端 {backend} 启动失败（无 GPU 或驱动不满足），自动回退 CPU。引擎输出：\n{stderr_tail}"
+            );
+            let engine = super::locator::locate_engine(spec.engine_path.as_deref())?;
+            gpu_fallback_hashes()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(config_hash(spec, &engine));
+            let mut cpu_spec = spec.clone();
+            cpu_spec.provider = "cpu".to_string();
+            lease_once(&cpu_spec)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// 按 spec 直接获取/创建实例（不含 GPU 回退包装）。
+fn lease_once(spec: &ServerInstanceSpec) -> Result<ServerLease, AudiocppError> {
     let engine = super::locator::locate_engine(spec.engine_path.as_deref())?;
     let hash = config_hash(spec, &engine);
 
@@ -219,6 +274,31 @@ fn allocate_port() -> Result<u16, AudiocppError> {
         .map_err(|e| AudiocppError::SpawnFailed(format!("读取端口失败: {e}")))
 }
 
+/// 子进程 PATH：引擎目录 + 注入的搜索目录 + 现有 PATH（去重保序）。
+///
+/// Windows CUDA 运行时 DLL 随 resources 落 `resource_dir\cuda\`，与引擎 exe
+/// 不同目录——Windows loader 在标准搜索序**末位**查 PATH，前置我们的目录既
+/// 让 DLL 可解析，又压过 system32 里可能存在的旧版 cudart。跨平台设置无害。
+fn augmented_child_path(
+    engine_dir: &std::path::Path,
+    search_dirs: &[std::path::PathBuf],
+    current: &std::ffi::OsStr,
+) -> std::ffi::OsString {
+    let mut dirs: Vec<std::path::PathBuf> = Vec::with_capacity(search_dirs.len() + 2);
+    dirs.push(engine_dir.to_path_buf());
+    for d in search_dirs {
+        if !dirs.contains(d) {
+            dirs.push(d.clone());
+        }
+    }
+    for d in std::env::split_paths(current) {
+        if !dirs.contains(&d) {
+            dirs.push(d);
+        }
+    }
+    std::env::join_paths(&dirs).unwrap_or_else(|_| current.to_os_string())
+}
+
 fn spawn_instance(
     spec: &ServerInstanceSpec,
     engine: &std::path::Path,
@@ -230,6 +310,14 @@ fn spawn_instance(
 
     let mut cmd = Command::new(engine);
     cmd.arg("--config").arg(&config_path);
+    // DLL 搜索路径前置（CUDA 运行时不在引擎旁时依赖子进程 PATH 解析）
+    let search_dirs = super::locator::search_dirs();
+    let engine_dir = engine.parent().map(Path::to_path_buf).unwrap_or_default();
+    let current_path = std::env::var_os("PATH").unwrap_or_default();
+    cmd.env(
+        "PATH",
+        augmented_child_path(&engine_dir, &search_dirs, &current_path),
+    );
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     // Windows：不弹控制台窗口
     #[cfg(target_os = "windows")]
@@ -277,7 +365,7 @@ fn spawn_instance(
     };
 
     // 健康检查失败 → 回收进程再返回错误（不留半启动实例）
-    if let Err(e) = wait_until_ready(&mut instance, &spec.model_id) {
+    if let Err(e) = wait_until_ready(&mut instance, &spec.model_id, &spec.provider) {
         kill_instance(&mut instance);
         return Err(e);
     }
@@ -286,8 +374,13 @@ fn spawn_instance(
 }
 
 /// 轮询直到 `/health` 200 且 `/v1/models` 列出目标模型（eager 模式下含模型加载），
-/// 或超时/进程退出。`model_id` 来自模型族描述表（多族下按实例校验）。
-fn wait_until_ready(inst: &mut ServerInstance, model_id: &str) -> Result<(), AudiocppError> {
+/// 或超时/进程退出。`model_id` 来自模型族描述表（多族下按实例校验）；`backend`
+/// 用于启动即退出的结构化诊断（lease 层据此决定是否回退 CPU）。
+fn wait_until_ready(
+    inst: &mut ServerInstance,
+    model_id: &str,
+    backend: &str,
+) -> Result<(), AudiocppError> {
     let client = reqwest::blocking::Client::builder()
         .timeout(PROBE_TIMEOUT)
         // 回环探测不走系统代理（代理会拦 localhost 请求返回 5xx）
@@ -300,10 +393,10 @@ fn wait_until_ready(inst: &mut ServerInstance, model_id: &str) -> Result<(), Aud
 
     loop {
         if inst.child.try_wait().map(|s| s.is_some()).unwrap_or(true) {
-            return Err(AudiocppError::SpawnFailed(format!(
-                "audiocpp_server 启动后立即退出。引擎输出末尾：\n{}",
-                tail_string(&inst.stderr_tail)
-            )));
+            return Err(AudiocppError::EngineExitedImmediately {
+                backend: backend.to_string(),
+                stderr_tail: tail_string(&inst.stderr_tail),
+            });
         }
         let healthy = client
             .get(&health_url)
@@ -436,6 +529,9 @@ mod tests {
         let script = r#"#!/usr/bin/env python3
 import sys, json, struct
 cfg = json.load(open(sys.argv[sys.argv.index('--config') + 1]))
+# 模拟「引擎未编入 GPU 后端」：非 cpu backend 启动即退出（供回退测试驱动）
+if cfg.get('backend', 'cpu') != 'cpu':
+    sys.exit(1)
 port = cfg['port']
 import http.server
 class H(http.server.BaseHTTPRequestHandler):
@@ -629,7 +725,7 @@ http.server.HTTPServer(('127.0.0.1', port), H).serve_forever()
         });
     }
 
-    /// 坏 stub（立即退出）→ SpawnFailed「启动后立即退出」错误分支。
+    /// 坏 stub（立即退出）→「启动后立即退出」错误分支（cpu 请求不触发回退，直接报错）。
     #[test]
     #[cfg(all(unix, not(target_os = "macos")))]
     fn test_lease_fails_when_engine_exits_immediately() {
@@ -653,6 +749,109 @@ http.server.HTTPServer(('127.0.0.1', port), H).serve_forever()
             // 恢复好 stub（供后续测试使用）
             setup_stub_engine();
         });
+    }
+
+    /// GPU 回退：cuda spec 遇「引擎不编入该后端」（stub 对非 cpu backend 退出）
+    /// 时自动以 cpu 重试成功；回退指纹被记忆，二次 lease 不再试 cuda。
+    #[test]
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn test_lease_falls_back_to_cpu_when_gpu_backend_exits() {
+        crate::test_util::run_with_temp_home(|home| {
+            setup_stub_engine();
+            let cfg = stub_ready_cfg(home);
+            let mut spec = ServerInstanceSpec::from_tts(&cfg).unwrap();
+            spec.provider = "cuda".to_string();
+
+            let l = lease(&spec).expect("cuda 启动失败应回退 cpu 成功");
+            // 回退实例以 cpu 指纹落盘：engines 目录下的 config backend == "cpu"
+            let engines = super::super::locator::engines_dir();
+            let configs: Vec<String> = std::fs::read_dir(&engines)
+                .unwrap()
+                .flatten()
+                .filter(|e| e.file_name().to_string_lossy().ends_with(".json"))
+                .map(|e| std::fs::read_to_string(e.path()).unwrap())
+                .collect();
+            assert!(
+                configs
+                    .iter()
+                    .any(|c| serde_json::from_str::<serde_json::Value>(c)
+                        .ok()
+                        .is_some_and(|j| j["backend"].as_str() == Some("cpu"))),
+                "应存在 backend=cpu 的落盘 config，实际：{configs:?}"
+            );
+
+            // 回退指纹已记忆：cuda spec 的 hash 命中 GPU_FALLBACK_HASHES
+            let engine = super::super::locator::locate_engine(spec.engine_path.as_deref()).unwrap();
+            let hash = config_hash(&spec, &engine);
+            assert!(
+                gpu_fallback_hashes()
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .contains(&hash),
+                "cuda 指纹应被记入回退表"
+            );
+
+            // 二次 lease：直接走 cpu 指纹复用同一实例（端口不变，无再次 cuda 尝试）
+            let l2 = lease(&spec).expect("二次 lease 复用回退实例");
+            assert_eq!(l2.base_url(), l.base_url());
+            shutdown_blocking();
+        });
+    }
+
+    /// 回退后仍失败（引擎对任何 backend 都退出）→ 返回 cpu 尝试的错误，含诊断子串。
+    #[test]
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn test_lease_fallback_still_fails_reports_cpu_error() {
+        crate::test_util::run_with_temp_home(|home| {
+            let dir = std::env::temp_dir().join("zapmomo-audiocpp-stub-test");
+            std::fs::create_dir_all(&dir).unwrap();
+            let exe = dir.join(super::super::locator::engine_file_name());
+            std::fs::write(&exe, "#!/bin/sh\nexit 3\n").unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+            super::super::locator::set_search_dirs(vec![dir]);
+
+            let cfg = stub_ready_cfg(home);
+            let mut spec = ServerInstanceSpec::from_tts(&cfg).unwrap();
+            spec.provider = "cuda".to_string();
+            let err = lease(&spec).unwrap_err();
+            let msg = err.to_user_message();
+            assert!(msg.contains("启动后立即退出"), "msg: {msg}");
+            assert!(msg.contains("cpu"), "错误应来自 cpu 尝试：{msg}");
+            shutdown_blocking();
+
+            setup_stub_engine();
+        });
+    }
+
+    /// 子进程 PATH 前置：引擎目录与搜索目录在先、原有 PATH 随后去重保序。
+    #[test]
+    fn test_augmented_child_path_order_and_dedup() {
+        let engine_dir = std::path::Path::new("/engines");
+        let search_dirs = vec![
+            std::path::PathBuf::from("/resources/cuda"),
+            std::path::PathBuf::from("/engines"), // 与引擎目录重复 → 不重复出现
+        ];
+        // 用 join_paths 构造（分隔符随平台；Windows 为 `;`）
+        let current = std::env::join_paths([
+            std::path::Path::new("/usr/bin"),
+            std::path::Path::new("/engines"),
+            std::path::Path::new("/windows"),
+        ])
+        .unwrap();
+        let joined = augmented_child_path(engine_dir, &search_dirs, &current);
+        let dirs: Vec<String> = std::env::split_paths(&joined)
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            dirs,
+            vec![
+                "/engines".to_string(),
+                "/resources/cuda".to_string(),
+                "/usr/bin".to_string(),
+                "/windows".to_string()
+            ]
+        );
     }
 
     /// 多实例并存：不同配置指纹各起实例、互不误杀；释放一个不影响另一个。

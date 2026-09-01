@@ -19,6 +19,13 @@ rust-version.workspace = true
 description.workspace = true
 license.workspace = true
 
+# 显式命名：默认 bin 名 = 包名 `zapmomo`，与 src-tauri 的 bin `ZapMomo` 仅大小写
+# 不同——Windows 的 target 目录大小写不敏感，二者会互相覆盖（GUI / CLI 变成
+# 对方的二进制，`tauri dev` 启动后打印 CLI 帮助即此症）。
+[[bin]]
+name = "zapmomo-cli"
+path = "src/main.rs"
+
 [dependencies]
 # CLI 框架
 clap = { version = "4", features = ["derive"] }
@@ -85,7 +92,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 
 # 模型下载安装（HTTP + sha256 校验 + tar.bz2 解压）
-ureq = { version = "3", features = ["socks-proxy"] }
+# platform-verifier：用系统证书存储校验 TLS——国内用户常开杀软/代理的 HTTPS
+# 解密（CA 只装在系统存储），ureq 默认的打包根证书（WebPki）会验证失败。
+ureq = { version = "3", features = ["socks-proxy", "platform-verifier"] }
 sha2 = "0.11"
 hex = "0.4"
 tar = { version = "0.4", default-features = false }

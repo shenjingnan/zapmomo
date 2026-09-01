@@ -67,7 +67,12 @@ pub fn list_disks() -> Vec<DiskInfo> {
 }
 
 /// `dir` 所在卷（挂载点最长前缀匹配，未命中 → `None`）。
+///
+/// 匹配前先剥离 dir 的 Windows verbatim 前缀（canonicalize 产物 `\\?\C:\...`
+/// 的 `VerbatimDisk(C)` 与挂载点 `C:\` 的 `Disk(C)` 逐组件比较不相等，会导致
+/// 永远匹配不到卷、空间误报 0）。
 pub fn volume_of<'a>(disks: &'a [DiskInfo], dir: &Path) -> Option<&'a DiskInfo> {
+    let dir = &crate::config::settings::strip_verbatim_prefix(dir.to_path_buf());
     let mut best: Option<(usize, &DiskInfo)> = None;
     for d in disks {
         if dir.starts_with(&d.mount_point) {
@@ -257,6 +262,31 @@ mod tests {
     fn test_volume_of_empty_when_no_match() {
         let disks = vec![disk("/data", 1)];
         assert!(volume_of(&disks, Path::new("/home/u")).is_none());
+    }
+
+    // Windows canonicalize 产物为 verbatim 路径（`\\?\D:\...`），其 Prefix 组件
+    // `VerbatimDisk(D)` 与挂载点 `D:\` 的 `Disk(D)` 逐组件比较不相等；volume_of
+    // 须先剥离 verbatim 前缀，否则查不到卷、可用空间误报 0。
+    #[cfg(windows)]
+    #[test]
+    fn test_volume_of_matches_verbatim_dir() {
+        let disks = vec![disk("D:\\", 100 * GB)];
+        let d = volume_of(&disks, Path::new(r"\\?\D:\zapmomo\models")).unwrap();
+        assert_eq!(d.available, 100 * GB);
+        // 普通路径不受影响；剥前缀后仍不属于该卷 → None
+        assert_eq!(
+            volume_of(&disks, Path::new(r"D:\other")).unwrap().available,
+            100 * GB
+        );
+        assert!(volume_of(&disks, Path::new(r"\\?\E:\x")).is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_volume_of_matches_verbatim_unc_dir() {
+        let disks = vec![disk(r"\\server\share", 100 * GB)];
+        let d = volume_of(&disks, Path::new(r"\\?\UNC\server\share\zapmomo")).unwrap();
+        assert_eq!(d.available, 100 * GB);
     }
 
     // ---- pick_suggested_dir ----

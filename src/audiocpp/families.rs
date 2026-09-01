@@ -33,10 +33,6 @@ pub struct AudiocppFamilyDesc {
     pub required_files: &'static [&'static str],
     /// 输出采样率初值（Hz；client 首响应按 wav 头校准）。
     pub sample_rate: i32,
-    /// 缺省推理后端（server `backend`）；用户显式配置 `[tts].provider` 优先。
-    /// omnivoice 0.6B 实测 CPU RTF 6.6 不可用、Metal RTF 0.41 达标
-    /// （技术方案阶段 1 实测，2026-08-23）。
-    pub default_provider: &'static str,
     /// 音色语义。
     pub voice_semantics: VoiceSemantics,
     /// 是否透传 `Named` 具名音色（ReferenceClone 族的差异项）：omnivoice 支持
@@ -74,7 +70,7 @@ impl AudiocppFamilyDesc {
     }
 }
 
-/// OmniVoice q8_0（Qwen3-0.6B 基座，600+ 语种零样本克隆 + 声音设计；Metal 必需）。
+/// OmniVoice q8_0（Qwen3-0.6B 基座，600+ 语种零样本克隆 + 声音设计）。
 ///
 /// 单文件 GGUF（generator 与 audio_tokenizer 双权重内嵌，无 embeddings 副件）。
 pub const OMNIVOICE: AudiocppFamilyDesc = AudiocppFamilyDesc {
@@ -83,14 +79,13 @@ pub const OMNIVOICE: AudiocppFamilyDesc = AudiocppFamilyDesc {
     gguf_file: "omnivoice-q8_0.gguf",
     required_files: &["omnivoice-q8_0.gguf"],
     sample_rate: 24_000,
-    default_provider: "metal",
     voice_semantics: VoiceSemantics::ReferenceClone,
     allows_named_voice: true,
     supports_streaming: true,
     registry_hint: "zapmomo tts install-model --registry-id tts-omnivoice-q8-audiocpp",
 };
 
-/// VoxCPM2 q8_0（OpenBMB MiniCPM-4 2B 基座，48kHz 录音室级 + 30 语种克隆；Metal 必需）。
+/// VoxCPM2 q8_0（OpenBMB MiniCPM-4 2B 基座，48kHz 录音室级 + 30 语种克隆）。
 ///
 /// 单文件 GGUF（权重与 AudioVAE V2 内嵌）。流式为**音频帧级**（实测 0.16s/块连续
 /// 吐出、首块 0.36s），与 omnivoice 的文本块伪流式不同；`options.retry_badcase=false`
@@ -101,14 +96,13 @@ pub const VOXCPM2: AudiocppFamilyDesc = AudiocppFamilyDesc {
     gguf_file: "voxcpm2-q8_0.gguf",
     required_files: &["voxcpm2-q8_0.gguf"],
     sample_rate: 48_000,
-    default_provider: "metal",
     voice_semantics: VoiceSemantics::ReferenceClone,
     allows_named_voice: false,
     supports_streaming: true,
     registry_hint: "zapmomo tts install-model --registry-id tts-voxcpm2-q8-audiocpp",
 };
 
-/// Qwen3-TTS 0.6B Base q8_0（10 语种 3 秒音色克隆，24kHz；Metal 必需）。
+/// Qwen3-TTS 0.6B Base q8_0（10 语种 3 秒音色克隆，24kHz）。
 ///
 /// 单文件 GGUF（权重 + speech tokenizer + 全部 sidecar 内嵌，实测
 /// `audiocpp.embedded_files` 含 11 个文件）。**Base 版必须参考音频**（无
@@ -120,7 +114,6 @@ pub const QWEN3_TTS_06B: AudiocppFamilyDesc = AudiocppFamilyDesc {
     gguf_file: "qwen3-tts-12hz-0.6b-base-q8_0.gguf",
     required_files: &["qwen3-tts-12hz-0.6b-base-q8_0.gguf"],
     sample_rate: 24_000,
-    default_provider: "metal",
     voice_semantics: VoiceSemantics::ReferenceCloneRequired,
     allows_named_voice: false,
     supports_streaming: false,
@@ -129,14 +122,13 @@ pub const QWEN3_TTS_06B: AudiocppFamilyDesc = AudiocppFamilyDesc {
 
 /// Qwen3-TTS 1.7B Base q8_0（质量优先变体；GGUF 为上游 `_v2` 重打包版，文件名带 `_v2`）。
 ///
-/// 同 0.6B 语义；1.7B Metal RTF 预计 ~1.0+，句级流水线可能句间间隙，定位质量优先。
+/// 同 0.6B 语义；1.7B RTF 预计 ~1.0+，句级流水线可能句间间隙，定位质量优先。
 pub const QWEN3_TTS_17B: AudiocppFamilyDesc = AudiocppFamilyDesc {
     model_id: "qwen3-tts-1.7b",
     family: "qwen3_tts",
     gguf_file: "qwen3-tts-12hz-1.7b-base-q8_0_v2.gguf",
     required_files: &["qwen3-tts-12hz-1.7b-base-q8_0_v2.gguf"],
     sample_rate: 24_000,
-    default_provider: "metal",
     voice_semantics: VoiceSemantics::ReferenceCloneRequired,
     allows_named_voice: false,
     supports_streaming: false,
@@ -178,12 +170,11 @@ mod tests {
         }
     }
 
-    /// omnivoice 单文件清单 / metal 默认后端 / 克隆语义。
+    /// omnivoice 单文件清单 / 克隆语义。
     #[test]
     fn test_family_records_shape() {
         let omni = family_desc(TtsModelKind::Omnivoice).unwrap();
         assert_eq!(omni.required_files, &["omnivoice-q8_0.gguf"]);
-        assert_eq!(omni.default_provider, "metal");
         assert_eq!(omni.voice_semantics, VoiceSemantics::ReferenceClone);
         assert!(omni.supports_streaming, "omnivoice 支持 SSE 伪流式");
         assert_eq!(omni.load_options(), serde_json::json!({}));
@@ -195,7 +186,6 @@ mod tests {
         let vox = family_desc(TtsModelKind::Voxcpm2).unwrap();
         assert_eq!(vox.required_files, &["voxcpm2-q8_0.gguf"]);
         assert_eq!(vox.sample_rate, 48_000, "VoxCPM2 输出 48kHz");
-        assert_eq!(vox.default_provider, "metal");
         assert!(vox.supports_streaming);
         assert!(!vox.allows_named_voice, "上游仅接受 speaker reference");
         assert_eq!(
@@ -204,13 +194,12 @@ mod tests {
         );
         assert_eq!(omni.request_options(), serde_json::json!({}));
 
-        // qwen3_tts 两尺寸：24kHz / 强制克隆 / 无流式 / metal / 单文件清单
+        // qwen3_tts 两尺寸：24kHz / 强制克隆 / 无流式 / 单文件清单
         let q06 = family_desc(TtsModelKind::Qwen3Tts06).unwrap();
         assert_eq!(q06.model_id, "qwen3-tts-0.6b");
         assert_eq!(q06.family, "qwen3_tts");
         assert_eq!(q06.required_files, &["qwen3-tts-12hz-0.6b-base-q8_0.gguf"]);
         assert_eq!(q06.sample_rate, 24_000);
-        assert_eq!(q06.default_provider, "metal");
         assert_eq!(q06.voice_semantics, VoiceSemantics::ReferenceCloneRequired);
         assert!(!q06.allows_named_voice, "Base 版仅接受 speaker reference");
         assert!(!q06.supports_streaming, "上游 modes 仅 offline");
@@ -224,7 +213,6 @@ mod tests {
             &["qwen3-tts-12hz-1.7b-base-q8_0_v2.gguf"]
         );
         assert_eq!(q17.sample_rate, 24_000);
-        assert_eq!(q17.default_provider, "metal");
         assert_eq!(q17.voice_semantics, VoiceSemantics::ReferenceCloneRequired);
     }
 }

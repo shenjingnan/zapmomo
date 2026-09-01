@@ -2298,7 +2298,10 @@ fn load_llm_impl(app: AppHandle, state: &LlmState) -> Result<(), String> {
     }
     let cfg = llm_resolved_config()?;
     if !cfg.enabled {
-        return Err("LLM 功能未启用，请先在设置中启用。".to_string());
+        return Err(
+            "LLM 未启用：请先在本页填写并保存连接配置（API 地址 / API Key / 模型名），保存后即自动启用。"
+                .to_string(),
+        );
     }
     if cfg.base_url.as_deref().unwrap_or("").trim().is_empty() {
         return Err("未配置 API 地址（base_url），请先填写。".to_string());
@@ -2714,7 +2717,10 @@ fn preflight_voice_models(
         return Err(format!("缺少 TTS 数据目录: {}", cfg.tts.data_dir.display()));
     }
     if !cfg.llm.enabled {
-        return Err("语音会话需要启用 LLM，请先在设置中启用。".to_string());
+        return Err(
+            "语音会话需要启用 LLM：请先在 AI 大脑页保存连接配置（API 地址 / API Key / 模型名）。"
+                .to_string(),
+        );
     }
     if cfg.llm.base_url.as_deref().unwrap_or("").trim().is_empty() {
         return Err("语音会话需要配置 LLM API 地址（base_url），请先填写。".to_string());
@@ -3769,6 +3775,9 @@ fn clear_conversation_records() -> Result<(), String> {
 
 /// 持久化远程 LLM 连接配置（base_url / api_key / model），写入 `[llm]`。
 ///
+/// 保存连接即视为启用 LLM（`enabled = true`）：`[llm].enabled` 缺省 false 且
+/// 无任何 UI 开关可写，若保存连接不置位，用户连接时永远撞
+/// 「LLM 功能未启用」（设置中并不存在该开关，文案成死路）。
 /// `None` 字段保持原有配置不变；`api_key` 为空串时清空。保存后需重新连接生效。
 #[tauri::command]
 fn set_llm_connection(
@@ -3783,6 +3792,7 @@ fn set_llm_connection(
     if llm.provider.is_none() {
         llm.provider = Some("openai".to_string());
     }
+    llm.enabled = Some(true);
     if !base_url.trim().is_empty() {
         llm.base_url = Some(base_url.trim().to_string());
     }
@@ -6714,8 +6724,18 @@ async fn download_library_model(
     state.cancel.store(false, Ordering::SeqCst);
     *state.current_id.lock().unwrap_or_else(|e| e.into_inner()) = Some(id.clone());
 
-    let model = model_library::registry::model_by_id(&id)
-        .ok_or_else(|| format!("未知的 Registry 模型：{id}"))?;
+    // 平台门控：与列表层同一事实源（`list_models` 的过滤），
+    // 堵住「前端硬编码预设 / 外部调用绕过 UI 直接按 id 下载」的口子
+    let model = model_library::registry::model_for_current_platform(&id).ok_or_else(|| {
+        match model_library::registry::model_by_id(&id) {
+            Some(m) => format!(
+                "该模型在当前平台不可用（{}仅支持 {}）",
+                m.display_name,
+                m.platforms.as_deref().unwrap_or_default().join(" / ")
+            ),
+            None => format!("未知的 Registry 模型：{id}"),
+        }
+    })?;
     if model.download.is_none() {
         flag.store(false, Ordering::SeqCst);
         *state.current_id.lock().unwrap_or_else(|e| e.into_inner()) = None;
@@ -8398,6 +8418,8 @@ mod companion_menu_tests {
             imported_at: "2026-01-01T00:00:00Z".to_string(),
             voice_id: None,
             layout: None,
+            wake_word: None,
+            welcome_text: None,
         }
     }
 
@@ -8580,6 +8602,8 @@ mod companion_open_dir_tests {
             imported_at: "2026-01-01T00:00:00Z".to_string(),
             voice_id: None,
             layout: None,
+            wake_word: None,
+            welcome_text: None,
         }
     }
 
@@ -8750,5 +8774,106 @@ mod preflight_tests {
         assert!(err.contains("tokenizer"), "err: {err}");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+/// `set_llm_connection` 写入行为（保存连接即启用 LLM）。
+#[cfg(test)]
+mod llm_connection_tests {
+    use super::set_llm_connection;
+    use std::sync::{Mutex, OnceLock};
+
+    /// HOME 隔离锁：串行化修改 HOME/USERPROFILE 的测试（env 为进程全局）。
+    static HOME_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    /// HOME 环境守卫：构造期替换 HOME/USERPROFILE 到临时目录，Drop 恢复
+    /// （测试 panic 时也保证还原，不污染其他测试与本机真实配置）。
+    struct TempHome {
+        _guard: MutexGuard<'static, ()>,
+        _dir: tempfile::TempDir,
+        saved_home: Option<std::ffi::OsString>,
+        saved_profile: Option<std::ffi::OsString>,
+    }
+
+    type MutexGuard<'a, T> = std::sync::MutexGuard<'a, T>;
+
+    impl TempHome {
+        fn new() -> Self {
+            let guard = HOME_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let saved_home = std::env::var_os("HOME");
+            let saved_profile = std::env::var_os("USERPROFILE");
+            // SAFETY: HOME_LOCK 串行化下无并发读写；单值替换、Drop 恢复
+            unsafe {
+                std::env::set_var("HOME", dir.path());
+                std::env::set_var("USERPROFILE", dir.path());
+            }
+            Self {
+                _guard: guard,
+                _dir: dir,
+                saved_home,
+                saved_profile,
+            }
+        }
+    }
+
+    impl Drop for TempHome {
+        fn drop(&mut self) {
+            // SAFETY: 同构造（持锁期间还原）
+            unsafe {
+                match &self.saved_home {
+                    Some(v) => std::env::set_var("HOME", v),
+                    None => std::env::remove_var("HOME"),
+                }
+                match &self.saved_profile {
+                    Some(v) => std::env::set_var("USERPROFILE", v),
+                    None => std::env::remove_var("USERPROFILE"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_set_llm_connection_saves_fields_and_enables_llm() {
+        let _home = TempHome::new();
+        // 无 [llm] 段 → 保存连接创建该段，且 enabled 置 true（保存即启用：
+        // enabled 缺省 false 且无 UI 开关可写，否则连接永远撞「LLM 功能未启用」）
+        set_llm_connection(
+            "https://api.example.com".to_string(),
+            Some("  sk-test  ".to_string()),
+            "test-model".to_string(),
+        )
+        .unwrap();
+        let settings = zapmomo::config::settings::load_settings()
+            .unwrap()
+            .expect("settings.toml 应已写入");
+        let llm = settings.llm.expect("[llm] 段应已创建");
+        assert_eq!(llm.enabled, Some(true), "保存连接即启用 LLM");
+        assert_eq!(llm.base_url.as_deref(), Some("https://api.example.com"));
+        assert_eq!(llm.model.as_deref(), Some("test-model"));
+        assert_eq!(llm.api_key.as_deref(), Some("sk-test"), "key 应 trim");
+        assert_eq!(
+            llm.provider.as_deref(),
+            Some("openai"),
+            "未设置时缺省 openai"
+        );
+
+        // 已有配置（provider = anthropic）再保存：enabled 保持 true，provider 不被重置
+        set_llm_connection(
+            "https://api.example.com/v2".to_string(),
+            None,
+            "model-v2".to_string(),
+        )
+        .unwrap();
+        let settings = zapmomo::config::settings::load_settings().unwrap().unwrap();
+        let llm = settings.llm.expect("[llm] 段应存在");
+        assert_eq!(llm.enabled, Some(true), "再次保存仍为启用");
+        assert_eq!(
+            llm.api_key.as_deref(),
+            Some("sk-test"),
+            "None 不改动已有 key"
+        );
+        assert_eq!(llm.base_url.as_deref(), Some("https://api.example.com/v2"));
+        assert_eq!(llm.model.as_deref(), Some("model-v2"));
     }
 }

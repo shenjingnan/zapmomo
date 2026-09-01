@@ -283,7 +283,9 @@ pub fn validate_data_dir(path: &Path) -> Result<PathBuf, String> {
     {
         return Err("数据目录不能嵌套在现有模型根目录内，请选择独立目录".to_string());
     }
-    Ok(canon)
+    // canonicalize 在 Windows 上返回 verbatim 形式（`\\?\D:\...`），落盘前转回
+    // 普通盘符形式，避免挂载点前缀匹配失配（见 `settings::strip_verbatim_prefix`）。
+    Ok(settings::strip_verbatim_prefix(canon))
 }
 
 // ---------------------------------------------------------------------------
@@ -709,6 +711,24 @@ mod tests {
             let target = home.join("newdata");
             let canon = validate_data_dir(&target).unwrap();
             assert!(canon.exists());
+        });
+    }
+
+    #[test]
+    fn test_validate_returns_plain_path() {
+        run_with_temp_home(|home| {
+            set_custom_data_dir(home);
+            let target = home.join("newdata2");
+            let returned = validate_data_dir(&target).unwrap();
+            // Windows canonicalize 产物带 verbatim 前缀，落盘前须剥掉
+            // （否则挂载点前缀匹配失配，磁盘空间误报 0）
+            assert!(
+                !returned
+                    .as_os_str()
+                    .to_string_lossy()
+                    .starts_with(r#"\\?\"#)
+            );
+            assert!(returned.exists());
         });
     }
 

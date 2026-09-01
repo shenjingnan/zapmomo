@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { isCloneRequiredTtsKind, isCloneTtsKind, ttsModelKindLabel } from "./ttsMeta";
 import { TTS_PRESETS } from "@/hooks/useTtsModelSwitch";
+import { visiblePresets } from "@/lib/modelPlatforms";
+import { isCloneRequiredTtsKind, isCloneTtsKind, ttsModelKindLabel } from "./ttsMeta";
 
 describe("ttsModelKindLabel", () => {
   it("zipvoice 有专属标签", () => {
@@ -71,12 +72,54 @@ describe("TTS_PRESETS", () => {
       "tts-pocket-english-audiocpp",
     ];
     for (const id of removed) {
-      expect(TTS_PRESETS.find((p) => p.id === id), id).toBeUndefined();
+      expect(
+        TTS_PRESETS.find((p) => p.id === id),
+        id,
+      ).toBeUndefined();
     }
   });
 
   it("id 唯一（防预设重复注册）", () => {
     const ids = TTS_PRESETS.map((p) => p.id);
     expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it("audiocpp 预设 platforms 与 registry 解锁范围一致（darwin-aarch64 + windows-x86_64）", () => {
+    const audiocppIds = [
+      "tts-omnivoice-q8-audiocpp",
+      "tts-voxcpm2-q8-audiocpp",
+      "tts-qwen3-06b-base-q8-audiocpp",
+      "tts-qwen3-17b-base-q8-audiocpp",
+    ];
+    for (const id of audiocppIds) {
+      const p = TTS_PRESETS.find((x) => x.id === id);
+      expect(p, id).toBeDefined();
+      expect(p?.platforms, id).toEqual(["darwin-aarch64", "windows-x86_64"]);
+    }
+    // sherpa 族无平台约束
+    const zipvoice = TTS_PRESETS.find((p) => p.id === "tts-zipvoice-distill-int8");
+    expect(zipvoice?.platforms).toBeUndefined();
+  });
+});
+
+describe("visiblePresets", () => {
+  const presets = [
+    { id: "free", name: "free" },
+    { id: "gpu", name: "gpu", platforms: ["darwin-aarch64", "windows-x86_64"] as const },
+  ];
+
+  it("后端列表未加载（null）→ 空数组（防闪现不可用预设）", () => {
+    expect(visiblePresets(presets, null)).toEqual([]);
+  });
+
+  it("后端列表不含平台受限 id → 仅全平台预设可见", () => {
+    const backend = [{ id: "tts-zipvoice-distill-int8" }];
+    const visible = visiblePresets(presets, backend);
+    expect(visible.map((p) => p.id)).toEqual(["free"]);
+  });
+
+  it("后端列表含平台受限 id → 该预设可见", () => {
+    const backend = [{ id: "free" }, { id: "gpu" }];
+    expect(visiblePresets(presets, backend).map((p) => p.id)).toEqual(["free", "gpu"]);
   });
 });

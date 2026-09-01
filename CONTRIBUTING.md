@@ -389,6 +389,12 @@ scripts/fetch-audiocpp-dev.sh
 scripts/fetch-audiocpp-dev.sh --build
 ```
 
+**Windows（Git Bash）**：仅支持 `--build` 模式（Release 资产暂无 `.exe` 后缀
+条目）；检测到 CUDA Toolkit（`%CUDA_PATH%` 有 `nvcc.exe`）时自动开启 CUDA
+后端，并把 ggml DLL 与 CUDA 运行时 DLL 收集到 `src-tauri/binaries/`（运行时
+由子进程 PATH 前置解析，见 `src/audiocpp/server.rs`）。无 CUDA Toolkit 时
+引擎仅 CPU，GPU 合成请求会自动回退 CPU（速度显著下降）。
+
 也可以不放该目录——引擎放在 `~/.zapmomo/engines/` 或 PATH 中同样会被自动发现；
 不使用 audio.cpp 后端（默认 sherpa）时引擎缺失只影响 `[tts].backend = "audiocpp"`
 的合成，其余功能不受影响。引擎版本 pin 在 `.github/workflows/release.yml` 的

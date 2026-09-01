@@ -10,6 +10,11 @@
 # + DEPLOYMENT_BUILD
 # （spec 内嵌）+ NATIVE_CPU=OFF（可移植）。产物约 12MB、编译约 2.5 分钟（macOS 实测）。
 # 注意：上游 tag 命名是 release-X.Y.Z（无 v 前缀，v* 只有远古 windows-prebuilt）。
+#
+# Windows（Git Bash / MSYS）：仅支持 --build 模式（Release 资产 URL 带 .exe 后缀
+# 需发版流程同步调整）。检测到 CUDA Toolkit（%CUDA_PATH% 有 nvcc）时自动开
+# CUDA 后端并收集运行时 DLL 到 src-tauri/binaries/（server.rs 的子进程 PATH
+# 前置会覆盖该目录），否则引擎仅 CPU（合成时自动回退、速度慢）。
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -21,6 +26,7 @@ triple() {
     Darwin/arm64) t=aarch64-apple-darwin ;;
     Darwin/x86_64) t=x86_64-apple-darwin ;;
     Linux/x86_64) t=x86_64-unknown-linux-gnu ;;
+    MINGW*|MSYS*|CYGWIN*) t=x86_64-pc-windows-msvc ;;
     *) echo "不支持的平台: $(uname -s)/$(uname -m)" >&2; exit 1 ;;
   esac
   echo "$t"
@@ -28,8 +34,11 @@ triple() {
 
 TRIPLE="$(triple)"
 SUFFIX=""
-[ "$(uname -s)" = "Darwin" ] || SUFFIX=".exe" # Linux/macOS 无后缀；Windows 场景走 CI
-DEST="src-tauri/binaries/audiocpp_server-${TRIPLE}"
+case "$(uname -s)" in
+  Darwin|Linux) SUFFIX="" ;;    # Linux/macOS 无后缀
+  *) SUFFIX=".exe" ;;           # Windows（MINGW/MSYS/CYGWIN）带 .exe
+esac
+DEST="src-tauri/binaries/audiocpp_server-${TRIPLE}${SUFFIX}"
 mkdir -p src-tauri/binaries
 
 if [ "${1:-}" = "--build" ]; then
@@ -38,6 +47,19 @@ if [ "${1:-}" = "--build" ]; then
   git clone --depth 1 --branch "$REF" https://github.com/0xShug0/audio.cpp .audiocpp-src
   METAL_FLAG="-DENGINE_ENABLE_METAL=ON"
   [ "$(uname -m)" = "arm64" ] || METAL_FLAG="-DENGINE_ENABLE_METAL=OFF"
+  CUDA_FLAG="-DENGINE_ENABLE_CUDA=OFF"
+  # Windows：检测 CUDA Toolkit（有 nvcc 才开 CUDA），并保留 CPU 回退能力
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+      METAL_FLAG="-DENGINE_ENABLE_METAL=OFF"
+      if [ -x "${CUDA_PATH:-}/bin/nvcc.exe" ]; then
+        CUDA_FLAG="-DENGINE_ENABLE_CUDA=ON"
+        echo "==> 检测到 CUDA Toolkit: $CUDA_PATH（启用 CUDA 后端）"
+      else
+        echo "==> 未检测到 CUDA Toolkit（引擎仅 CPU；安装 CUDA Toolkit 后重跑可启用）"
+      fi
+      ;;
+  esac
   # macOS：Apple Clang 不带 OpenMP，需要 brew 的 libomp（keg-only，须用
   # OpenMP_ROOT 让 CMake 的 FindOpenMP 定位；与 release.yml 的 arm64 job 一致）
   if [ "$(uname -s)" = "Darwin" ]; then
@@ -55,15 +77,27 @@ if [ "${1:-}" = "--build" ]; then
   cmake -S .audiocpp-src -B .audiocpp-build \
     -DAUDIOCPP_MODEL_SET=custom -DAUDIOCPP_MODELS=omnivoice,voxcpm2,qwen3_tts,qwen3_asr \
     -DAUDIOCPP_DEPLOYMENT_BUILD=ON -DENGINE_ENABLE_NATIVE_CPU=OFF \
-    -DENGINE_ENABLE_CUDA=OFF -DENGINE_ENABLE_VULKAN=OFF -DENGINE_ENABLE_HIP=OFF \
+    $CUDA_FLAG -DENGINE_ENABLE_VULKAN=OFF -DENGINE_ENABLE_HIP=OFF \
     $METAL_FLAG -DCMAKE_BUILD_TYPE=Release
-  cmake --build .audiocpp-build --target audiocpp_server --parallel "$(sysctl -n hw.ncpu 2>/dev/null || nproc || echo 4)"
+  JOBS="${NUMBER_OF_PROCESSORS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
+  cmake --build .audiocpp-build --target audiocpp_server --parallel "$JOBS"
+  # MSVC multi-config 产物在 bin/Release/ 子目录，find 兜底两种布局
   SRC_BIN="$(find .audiocpp-build -type f -name 'audiocpp_server*' ! -name '*.dSYM*' | head -1)"
   cp "$SRC_BIN" "$DEST"
+  # Windows + CUDA：收集 ggml DLL 与 CUDA 运行时到引擎旁（运行时由子进程
+  # PATH 前置解析；与 release.yml 的 Collect CUDA runtime DLLs 步骤同款逻辑）
+  if [[ "$CUDA_FLAG" == *CUDA=ON* ]]; then
+    while IFS= read -r -d '' dll; do cp "$dll" src-tauri/binaries/; done \
+      < <(find .audiocpp-build -type f -name '*.dll' -print0)
+    for prefix in cudart64_ cublas64_ cublasLt64_ cufft64_; do
+      cp "$CUDA_PATH"/bin/"${prefix}"*.dll src-tauri/binaries/ 2>/dev/null || true
+    done
+    ls -lh src-tauri/binaries/*.dll | head -20
+  fi
 else
   echo "==> 从 GitHub Release 下载 sidecar ($TRIPLE)"
   REPO="${GITHUB_REPOSITORY:-$(git remote get-url origin | sed -E 's#.*[:/]([^/]+/[^/.]+)(\.git)?$#\1#')}"
-  URL="https://github.com/${REPO}/releases/latest/download/audiocpp_server-${TRIPLE}"
+  URL="https://github.com/${REPO}/releases/latest/download/audiocpp_server-${TRIPLE}${SUFFIX}"
   if ! curl -fsSL --fail -o "$DEST" "$URL"; then
     echo "下载失败（Release 可能尚未附带 sidecar 产物）。" >&2
     echo "首次发版前请用: scripts/fetch-audiocpp-dev.sh --build" >&2
