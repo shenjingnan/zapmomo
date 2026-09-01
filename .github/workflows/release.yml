@@ -139,7 +139,10 @@ jobs:
         # version compatibility 下 12.x 运行时可跑在 R527+ 的 12.x 驱动上，
         # 覆盖面比 13.x（需 R580+）广。action 自动设置 CUDA_PATH。
         if: matrix.platform == 'windows-latest'
-        uses: Jimver/cuda-toolkit@v2
+        # 上游已删除滚动 major tag v2（仓库现只维护 v0.2.x），@v2 无法解析会让
+        # 整个 workflow 所有 job 在 Set up job 阶段失败（action 解析先于 if 求值）。
+        # 因此固定到具体小版本而非 @master。
+        uses: Jimver/cuda-toolkit@v0.2.36
         with:
           cuda-toolkit: '12.4.0'
 
