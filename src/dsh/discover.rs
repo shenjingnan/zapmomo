@@ -4,6 +4,8 @@
 //! v22 的 bin、pnpm 在 v24 的 bin），靠 `which dsh` 基本必失败。因此按候选目录
 //! 清单逐一探测，命中后以 `--version` 轻量验证；全 miss 返回带 searched 列表的
 //! [`DshDiscoveryError`]（对齐 audiocpp locator 的 EngineNotFound 诊断惯例）。
+//! Windows 的 fnm/nvm 落点与垫片层布局另见 [`versioned_roots`]（实测 Roaming
+//! 下的 fnm、垫片平铺在 installation 根）。
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -34,8 +36,16 @@ fn executable_name() -> &'static str {
 }
 
 /// 版本目录根（每个子目录是一个 node 版本）与其内部 bin 的相对路径。
+///
+/// Windows 两处布局差异（Win11 + fnm 实测）：
+/// - fnm 数据目录在 `%USERPROFILE%\AppData` 下（Roaming 默认 / Local 部分安装），
+///   Unix 位置不存在；
+/// - npm 全局垫片平铺在 `installation` 根，无 `bin` 子目录（`dsh.cmd` 与 `node.exe`
+///   同层）；nvm-windows 版本目录（`%APPDATA%\nvm\vX.Y.Z`）同理平铺。
+///
+/// 全部从 home 推导（不读环境变量），测试可注入临时目录；不存在处由 is_dir 兜底跳过。
 fn versioned_roots(home: &Path) -> Vec<(PathBuf, &'static str)> {
-    vec![
+    let mut roots = vec![
         // fnm：node-versions/<ver>/installation/bin（实测本机 dsh 在此）
         (
             home.join(".local/share/fnm/node-versions"),
@@ -43,7 +53,16 @@ fn versioned_roots(home: &Path) -> Vec<(PathBuf, &'static str)> {
         ),
         // nvm：versions/node/<ver>/bin
         (home.join(".nvm/versions/node"), "bin"),
-    ]
+    ];
+    if cfg!(windows) {
+        // fnm 的 Windows 垫片层名：平铺在 installation 根（无 bin 子目录）
+        const WIN_FNM_BIN: &str = "installation";
+        roots.push((home.join("AppData/Roaming/fnm/node-versions"), WIN_FNM_BIN));
+        roots.push((home.join("AppData/Local/fnm/node-versions"), WIN_FNM_BIN));
+        // nvm-windows：node.exe 与全局垫片同层，连 installation 层都没有（空相对路径）
+        roots.push((home.join("AppData/Roaming/nvm"), ""));
+    }
+    roots
 }
 
 /// 固定 bin 目录（volta shims / homebrew / npm 全局默认前缀）。
@@ -257,6 +276,42 @@ mod tests {
         assert_eq!(names[0], "v22.22.2");
         assert_eq!(names[1], "v20.10.0");
         assert_eq!(names[2], "v9.0.0");
+    }
+
+    #[test]
+    fn test_windows_fnm_flat_installation() {
+        // Windows fnm：数据目录在 AppData/Roaming 下，垫片平铺在 installation 根
+        //（无 bin 子目录，dsh.cmd 与 node.exe 同层）——此前只扫 Unix 布局导致一键安装定位失败
+        let tmp = tempfile::TempDir::new().unwrap();
+        let inst = tmp
+            .path()
+            .join("AppData/Roaming/fnm/node-versions/v24.20.0/installation");
+        std::fs::create_dir_all(&inst).unwrap();
+        std::fs::write(inst.join("dsh.cmd"), "").unwrap();
+
+        let dirs = collect_versioned_dirs(tmp.path());
+        let hit = dirs
+            .iter()
+            .find(|d| d.ends_with("installation"))
+            .map(|d| d.join("dsh.cmd").is_file());
+        assert_eq!(
+            hit,
+            if cfg!(windows) { Some(true) } else { None },
+            "Windows 应产出 installation 根且垫片在根层: {dirs:?}"
+        );
+    }
+
+    #[test]
+    fn test_windows_nvm_flat_layout() {
+        // nvm-windows：%APPDATA%\nvm 下版本目录平铺（bin 相对路径为空，目录本身即 bin 层）
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ver = tmp.path().join("AppData/Roaming/nvm/v22.14.0");
+        std::fs::create_dir_all(&ver).unwrap();
+        std::fs::write(ver.join("dsh.cmd"), "").unwrap();
+
+        let dirs = collect_versioned_dirs(tmp.path());
+        let hit = dirs.iter().any(|d| d.ends_with("v22.14.0"));
+        assert_eq!(hit, cfg!(windows), "nvm-windows 平铺目录应被收集: {dirs:?}");
     }
 
     #[test]
