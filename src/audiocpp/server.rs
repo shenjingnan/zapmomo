@@ -776,8 +776,7 @@ http.server.HTTPServer(('127.0.0.1', port), H).serve_forever()
                     .iter()
                     .any(|c| serde_json::from_str::<serde_json::Value>(c)
                         .ok()
-                        .and_then(|j| j["backend"].as_str().map(|b| b == "cpu").unwrap_or(false))
-                        .unwrap_or(false)),
+                        .is_some_and(|j| j["backend"].as_str() == Some("cpu"))),
                 "应存在 backend=cpu 的落盘 config，实际：{configs:?}"
             );
 
