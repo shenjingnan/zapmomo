@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.1.21](https://github.com/shenjingnan/zapmomo/compare/v0.1.20...v0.1.21) - 2026-09-01
+
+### Added
+
+- *(dmg)* 安装包内置「首次打开修复.command」一键修复 macOS「已损坏」拦截 ([#256](https://github.com/shenjingnan/zapmomo/pull/256))
+
+### Other
+
+- 更新首页截图 ([#255](https://github.com/shenjingnan/zapmomo/pull/255))
+- *(deps-dev)* bump @testing-library/react from 16.3.2 to 16.3.3 ([#247](https://github.com/shenjingnan/zapmomo/pull/247))
+- *(deps-dev)* bump @biomejs/biome from 2.5.10 to 2.5.11 ([#244](https://github.com/shenjingnan/zapmomo/pull/244))
+- *(deps)* bump @tanstack/react-query from 5.102.3 to 5.102.8 ([#250](https://github.com/shenjingnan/zapmomo/pull/250))
+- *(deps)* bump react-intersection-observer from 11.0.0 to 11.0.1 ([#252](https://github.com/shenjingnan/zapmomo/pull/252))
+- *(deps-dev)* bump @types/node from 26.3.0 to 26.4.0 ([#251](https://github.com/shenjingnan/zapmomo/pull/251))
+- *(deps)* bump fumadocs-mdx from 15.3.1 to 15.4.0 ([#243](https://github.com/shenjingnan/zapmomo/pull/243))
+- *(deps-dev)* bump @vitejs/plugin-react from 6.1.0 to 6.1.1 ([#248](https://github.com/shenjingnan/zapmomo/pull/248))
+
 ## [0.1.20](https://github.com/shenjingnan/zapmomo/compare/v0.1.19...v0.1.20) - 2026-08-31
 
 ### Added
