@@ -737,15 +737,17 @@ pub fn resolve(
     }
 
     cfg.enabled = s.and_then(|s| s.enabled).unwrap_or(false);
-    // 推理设备：用户显式配置优先；缺省时 audiocpp 后端按模型族取默认（metal）
+    // 推理设备：用户显式配置优先；缺省时 audiocpp 后端按平台取默认
+    // （见 `audiocpp::provider`：macOS Metal / Windows CUDA / 其余 CPU，
+    // 无可用 GPU 由 server 层自动回退 CPU）
     cfg.provider = s.and_then(|s| s.provider.clone()).unwrap_or_else(|| {
         match cfg.backend {
-            AsrBackendKind::Audiocpp => {
-                crate::audiocpp::asr_families::asr_family_desc(cfg.model_type)
-                    .map(|d| d.default_provider)
-                    .unwrap_or("cpu")
+            AsrBackendKind::Audiocpp
+                if crate::audiocpp::asr_families::asr_family_desc(cfg.model_type).is_some() =>
+            {
+                crate::audiocpp::provider::current_default_provider()
             }
-            AsrBackendKind::Sherpa => "cpu",
+            _ => "cpu",
         }
         .to_string()
     });
@@ -1943,7 +1945,11 @@ mod tests {
             assert_eq!(cfg.backend, AsrBackendKind::Audiocpp);
             assert_eq!(cfg.model_type, AsrModelKind::Qwen3Asr, "GGUF 探测命中");
             assert_eq!(cfg.model, None, "audiocpp 不消费 ONNX 主模型字段");
-            assert_eq!(cfg.provider, "metal", "audiocpp 缺省 provider 取族表");
+            assert_eq!(
+                cfg.provider,
+                crate::audiocpp::provider::current_default_provider(),
+                "audiocpp 缺省 provider 按平台取值"
+            );
 
             // 显式 provider 优先
             let settings = AsrSettings {

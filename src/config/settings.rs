@@ -141,7 +141,7 @@ pub fn get_data_dir() -> Option<PathBuf> {
         .and_then(|raw| match resolve_env_ref(&raw) {
             Ok(dir) if dir.trim().is_empty() => None,
             Ok(dir) => {
-                let p = PathBuf::from(&dir);
+                let p = strip_verbatim_prefix(PathBuf::from(&dir));
                 if p.is_absolute() {
                     Some(p)
                 } else {
@@ -162,6 +162,27 @@ pub fn get_data_dir() -> Option<PathBuf> {
 /// 清空 `data_dir` 缓存：写入 data_dir 后调用，确保后续读取立即可见（不等 mtime）。
 pub fn refresh_data_dir_cache() {
     *DATA_DIR_CACHE.write().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+/// 剥离 Windows verbatim 前缀：`std::fs::canonicalize` 在 Windows 上返回
+/// `\\?\C:\...` / `\\?\UNC\server\share` 形式，若原样落盘，后续「挂载点前缀匹配」
+/// 会失配（`Path::starts_with` 逐组件比较，`VerbatimDisk(C)` ≠ `Disk(C)`，
+/// 导致磁盘空间查询误报 0）。转回普通形式 `C:\...` / `\\server\share`；
+/// 非 verbatim 路径与其他平台原样返回。
+pub(crate) fn strip_verbatim_prefix(p: PathBuf) -> PathBuf {
+    if !cfg!(windows) {
+        return p;
+    }
+    let Some(s) = p.to_str() else {
+        return p;
+    };
+    if let Some(rest) = s.strip_prefix(r#"\\?\UNC\"#) {
+        PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = s.strip_prefix(r#"\\?\"#) {
+        PathBuf::from(rest)
+    } else {
+        p
+    }
 }
 
 /// 测试专用：重置 data_dir 缓存，避免跨用例污染。
@@ -1482,6 +1503,57 @@ mod tests {
             write_data_dir_settings(Some("relative/dir"));
             assert_eq!(get_data_dir(), None);
         });
+    }
+
+    #[test]
+    fn test_get_data_dir_strips_verbatim_prefix() {
+        run_with_temp_home(|home| {
+            // 模拟旧版落盘的 canonicalize 产物：读取时须转回普通盘符形式
+            write_data_dir_settings(Some(r"\\?\D:\zapdata"));
+            let expected = if cfg!(windows) {
+                Some(PathBuf::from(r"D:\zapdata"))
+            } else {
+                // 非 Windows 无 verbatim 概念，且该字符串不是合法绝对路径 → 回退默认
+                None
+            };
+            assert_eq!(get_data_dir(), expected);
+            assert_eq!(
+                get_models_dir(),
+                expected
+                    .map(|d| d.join("models"))
+                    .unwrap_or_else(|| home.join(".zapmomo/models"))
+            );
+        });
+    }
+
+    #[test]
+    fn test_strip_verbatim_prefix() {
+        if cfg!(windows) {
+            assert_eq!(
+                strip_verbatim_prefix(PathBuf::from(r"\\?\D:\zapdata\models")),
+                PathBuf::from(r"D:\zapdata\models")
+            );
+            // UNC verbatim → 普通 UNC
+            assert_eq!(
+                strip_verbatim_prefix(PathBuf::from(r"\\?\UNC\server\share\x")),
+                PathBuf::from(r"\\server\share\x")
+            );
+            // 普通 / 相对路径原样返回
+            assert_eq!(
+                strip_verbatim_prefix(PathBuf::from(r"D:\zapdata")),
+                PathBuf::from(r"D:\zapdata")
+            );
+            assert_eq!(
+                strip_verbatim_prefix(PathBuf::from("relative/dir")),
+                PathBuf::from("relative/dir")
+            );
+        } else {
+            // 非 Windows 恒为 no-op
+            assert_eq!(
+                strip_verbatim_prefix(PathBuf::from(r"\\?\D:\zapdata")),
+                PathBuf::from(r"\\?\D:\zapdata")
+            );
+        }
     }
 
     #[test]

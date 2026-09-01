@@ -101,8 +101,9 @@ pub struct RegistryModel {
     pub download: Option<RegistryDownload>,
 }
 
-/// 当前平台的 triple 简写（与 registry `platforms` 字段取值对齐）。
-fn current_platform_triple() -> &'static str {
+/// 当前平台的 triple 简写（与 registry `platforms` 字段取值对齐；
+/// crate 内共享事实源——audiocpp provider 平台缺省也从此取值）。
+pub(crate) fn current_platform_triple() -> &'static str {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
         "darwin-aarch64"
@@ -164,19 +165,30 @@ pub fn model_by_id(id: &str) -> Option<&'static RegistryModel> {
     registry().models.iter().find(|m| m.id == id)
 }
 
+/// 平台可见性判定（`platforms` 为 None = 全平台；纯函数便于按任意 triple 单测）。
+pub fn platform_allows(m: &RegistryModel, triple: &str) -> bool {
+    m.platforms
+        .as_ref()
+        .is_none_or(|list| list.iter().any(|p| p == triple))
+}
+
 /// 当前平台可用的目录条目（`platforms` 为 None 的条目恒可用）。
 ///
 /// 模型库列表（`list_models`）与解析入口都应以此过滤，保证平台受限条目
-/// （如仅 Metal 平台的 omnivoice）在其余平台不可见、不可下载。
+/// （如 GPU 加速的 audiocpp 家族）在不支持的平台不可见、不可下载。
 pub fn models_for_current_platform() -> Vec<&'static RegistryModel> {
     all_models()
         .iter()
-        .filter(|m| {
-            m.platforms
-                .as_ref()
-                .is_none_or(|list| list.iter().any(|p| p == current_platform_triple()))
-        })
+        .filter(|m| platform_allows(m, current_platform_triple()))
         .collect()
+}
+
+/// 按 id 取「当前平台可见」的目录条目；平台不可见 → `None`。
+///
+/// 下载入口（`download_library_model`）以此替代 [`model_by_id`]，
+/// 堵住「绕过 UI 平台过滤直接按 id 下载」的口子。
+pub fn model_for_current_platform(id: &str) -> Option<&'static RegistryModel> {
+    model_by_id(id).filter(|m| platform_allows(m, current_platform_triple()))
 }
 
 /// 按下载引用解析 manifest 资产。
@@ -383,35 +395,63 @@ mod tests {
         assert_eq!(registry_tts_kind("不存在"), None);
     }
 
-    /// 平台过滤：omnivoice 仅darwin-aarch64；无 platforms 的条目全平台可见。
-    /// 本机为 darwin-aarch64 时 omnivoice 在列；其它平台的 CI 通过「显式三元组
-    /// 判定函数」覆盖，不依赖宿主平台。
+    /// 平台过滤：audiocpp TTS 家族 = darwin-aarch64 + windows-x86_64（Windows CUDA
+    /// 解锁）；无 platforms 的条目全平台可见。本机命中解锁平台时条目在列；
+    /// 其它平台的 CI 通过「显式三元组判定函数」覆盖，不依赖宿主平台。
     #[test]
     fn test_platforms_filter() {
+        let audiocpp_ids = [
+            "tts-omnivoice-q8-audiocpp",
+            "tts-voxcpm2-q8-audiocpp",
+            "tts-qwen3-06b-base-q8-audiocpp",
+            "tts-qwen3-17b-base-q8-audiocpp",
+        ];
+        let expected = ["darwin-aarch64", "windows-x86_64"];
+        for id in audiocpp_ids {
+            let m = model_by_id(id).unwrap();
+            assert_eq!(
+                m.platforms.as_deref(),
+                Some(&expected.map(String::from)[..]),
+                "{id} 平台清单"
+            );
+        }
+        // 显式判定（不依赖宿主平台）：解锁 darwin-aarch64 / windows-x86_64，
+        // darwin-x86_64（引擎无 Metal）/ linux（CPU-only 引擎）保持隐藏
         let omni = model_by_id("tts-omnivoice-q8-audiocpp").unwrap();
-        assert_eq!(
-            omni.platforms.as_deref(),
-            Some(&["darwin-aarch64".to_string()][..])
-        );
-        // 显式判定（不依赖宿主平台）
-        let visible = |triple: &str| {
-            omni.platforms
-                .as_ref()
-                .is_none_or(|list| list.iter().any(|p| p == triple))
-        };
-        assert!(visible("darwin-aarch64"));
-        assert!(!visible("darwin-x86_64"));
-        assert!(!visible("linux-x86_64"));
-        assert!(!visible("windows-x86_64"));
+        assert!(platform_allows(omni, "darwin-aarch64"));
+        assert!(platform_allows(omni, "windows-x86_64"));
+        assert!(!platform_allows(omni, "darwin-x86_64"));
+        assert!(!platform_allows(omni, "linux-x86_64"));
         // 无 platforms 的条目恒可见
         let zipvoice = model_by_id("tts-zipvoice-distill-int8").unwrap();
         assert!(zipvoice.platforms.is_none());
-        // 全量条目在当前平台的过滤数 ≤ 总数，且 darwin-aarch64 下含 omnivoice
+        assert!(platform_allows(zipvoice, "linux-x86_64"));
+        // 全量条目在当前平台的过滤数 ≤ 总数，解锁平台上 audiocpp 条目在列
         let filtered = models_for_current_platform();
         assert!(filtered.len() <= all_models().len());
-        if current_platform_triple() == "darwin-aarch64" {
+        let triple = current_platform_triple();
+        if triple == "darwin-aarch64" || triple == "windows-x86_64" {
             assert!(filtered.iter().any(|m| m.id == "tts-omnivoice-q8-audiocpp"));
+        } else {
+            assert!(
+                !filtered.iter().any(|m| m.id == "tts-omnivoice-q8-audiocpp"),
+                "{triple} 上 omnivoice 不可见"
+            );
         }
+    }
+
+    /// 下载门控纯函数：`model_for_current_platform` 按 id + 当前平台过滤
+    /// （宿主无关的路径以 `platform_allows` 覆盖，见 `test_platforms_filter`）。
+    #[test]
+    fn test_model_for_current_platform() {
+        let triple = current_platform_triple();
+        let unlocked = triple == "darwin-aarch64" || triple == "windows-x86_64";
+        let vox = model_for_current_platform("tts-voxcpm2-q8-audiocpp");
+        assert_eq!(vox.is_some(), unlocked, "{triple} 上 VoxCPM2 可见性");
+        // zipvoice 全平台可见
+        assert!(model_for_current_platform("tts-zipvoice-distill-int8").is_some());
+        // 不存在的 id 恒 None
+        assert!(model_for_current_platform("不存在").is_none());
     }
 
     #[test]

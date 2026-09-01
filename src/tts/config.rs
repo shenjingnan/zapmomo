@@ -442,16 +442,16 @@ pub fn resolve(
             .ok_or_else(|| format!("未知 TTS 后端: {v}（支持 sherpa / audiocpp）"))?,
         None => TtsBackendKind::default(),
     };
-    // 推理设备：用户显式配置优先；缺省时 audiocpp 后端按模型族取默认
-    // （克隆族 metal——CPU RTF 6.6 不可用、Metal 0.41 达标，
-    // 技术方案阶段 1 实测），sherpa 恒 cpu。
+    // 推理设备：用户显式配置优先；缺省时 audiocpp 后端按平台取默认
+    // （见 `audiocpp::provider`：macOS Metal / Windows CUDA / 其余 CPU，
+    // 无可用 GPU 由 server 层自动回退 CPU），sherpa 恒 cpu。
     cfg.provider = match s.and_then(|s| s.provider.clone()) {
         Some(p) => p,
         None => {
             if cfg.backend == TtsBackendKind::Audiocpp
-                && let Some(desc) = crate::audiocpp::families::family_desc(cfg.model_type)
+                && crate::audiocpp::families::family_desc(cfg.model_type).is_some()
             {
-                desc.default_provider.to_string()
+                crate::audiocpp::provider::current_default_provider().to_string()
             } else {
                 "cpu".to_string()
             }
@@ -870,6 +870,33 @@ model_type = "omnivoice"
             resolve(Some(&settings), None).unwrap().engine_path,
             Some(PathBuf::from("/opt/audiocpp/audiocpp_server"))
         );
+    }
+
+    #[test]
+    fn test_resolve_provider_platform_default_and_explicit_override() {
+        // audiocpp 族缺省 provider 按平台取值（mac Metal / Windows CUDA / 其余 CPU）
+        let settings = TtsSettings {
+            backend: Some("audiocpp".to_string()),
+            model_type: Some(TtsModelKind::Voxcpm2),
+            ..TtsSettings::default()
+        };
+        let cfg = resolve(Some(&settings), None).unwrap();
+        assert_eq!(
+            cfg.provider,
+            crate::audiocpp::provider::current_default_provider(),
+            "audiocpp 缺省 provider 按平台取值"
+        );
+        // 显式 provider 永远优先（含显式 cpu——无 N 卡用户的手动兜底）
+        let settings = TtsSettings {
+            backend: Some("audiocpp".to_string()),
+            model_type: Some(TtsModelKind::Voxcpm2),
+            provider: Some("cpu".to_string()),
+            ..TtsSettings::default()
+        };
+        assert_eq!(resolve(Some(&settings), None).unwrap().provider, "cpu");
+        // sherpa 后端恒 cpu（即便 settings 残留 provider 缺省）
+        let cfg = resolve(None, None).unwrap();
+        assert_eq!(cfg.provider, "cpu");
     }
 
     #[test]

@@ -18,14 +18,12 @@ pub struct AudiocppAsrFamilyDesc {
     pub gguf_file: &'static str,
     /// preflight / registry 完整性共用清单（相对模型目录）。
     pub required_files: &'static [&'static str],
-    /// 缺省推理后端（server `backend`）；用户显式配置 `[asr].provider` 优先。
-    pub default_provider: &'static str,
     /// preflight 缺文件时的安装提示命令。
     pub registry_hint: &'static str,
 }
 
-/// Qwen3-ASR 0.6B q8_0（29 语言自动识别，LLM 自回归解码；Metal 必需——sherpa
-/// ONNX int8 版 CPU 解码慢是接入本族的动机）。
+/// Qwen3-ASR 0.6B q8_0（29 语言自动识别，LLM 自回归解码；GPU 加速是接入
+/// 本族的动机——sherpa ONNX int8 版 CPU 解码慢）。
 ///
 /// 单文件 GGUF（tokenizer/config sidecar 内嵌，上游 converter 默认嵌入）。
 /// 无 hotwords 能力（上游 spec 无此选项，sherpa 版独有）；量化降低自动语种识别
@@ -35,7 +33,6 @@ pub const QWEN3_ASR_06B: AudiocppAsrFamilyDesc = AudiocppAsrFamilyDesc {
     family: "qwen3_asr",
     gguf_file: "qwen3-asr-0.6b-q8_0.gguf",
     required_files: &["qwen3-asr-0.6b-q8_0.gguf"],
-    default_provider: "metal",
     registry_hint: "zapmomo asr install-model --registry-id asr-qwen3-0.6b-audiocpp",
 };
 
@@ -82,14 +79,13 @@ mod tests {
         }
     }
 
-    /// qwen3_asr 记录形状：单文件清单 / metal 默认后端 / model_id 与 registry hint 对应。
+    /// qwen3_asr 记录形状：单文件清单 / model_id 与 registry hint 对应。
     #[test]
     fn test_asr_family_record_shape() {
         let q = asr_family_desc(AsrModelKind::Qwen3Asr).unwrap();
         assert_eq!(q.model_id, "qwen3-asr-0.6b");
         assert_eq!(q.required_files, &["qwen3-asr-0.6b-q8_0.gguf"]);
         assert_eq!(q.gguf_file, q.required_files[0], "清单即单 GGUF");
-        assert_eq!(q.default_provider, "metal");
         assert!(q.registry_hint.contains("asr-qwen3-0.6b-audiocpp"));
     }
 

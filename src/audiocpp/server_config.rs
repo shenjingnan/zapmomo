@@ -214,6 +214,17 @@ mod tests {
         assert_eq!(m.load_options, serde_json::json!({}));
     }
 
+    /// provider 原样透传为 server config `backend`（Windows CUDA 解锁依赖此语义）。
+    #[test]
+    fn test_spec_provider_passthrough_to_backend() {
+        let mut cfg = audiocpp_tts_cfg(std::path::Path::new("/models/voxcpm2-audiocpp"));
+        cfg.model_type = crate::tts::config::TtsModelKind::Voxcpm2;
+        cfg.provider = "cuda".to_string();
+        let spec = ServerInstanceSpec::from_tts(&cfg).unwrap();
+        assert_eq!(spec.provider, "cuda");
+        assert_eq!(build_server_config(&spec, 18400).backend, "cuda");
+    }
+
     /// sherpa kind（默认 Zipvoice）配 audiocpp 后端 → 明确报错。
     #[test]
     fn test_spec_from_tts_rejects_sherpa_kind() {

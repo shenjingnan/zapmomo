@@ -410,10 +410,10 @@ fn progress(
     }
 }
 
-/// 流式下载到临时文件，带进度回调；失败重试 3 次（退避等待）。
+/// 流式下载到临时文件，带进度回调；中断后从断点续传，重试 5 次（指数退避）。
 ///
 /// `cancel` 命中时立即返回 [`ModelError::Cancelled`]（不重试），并删除临时文件。
-/// `pub(crate)`：模型库下载（download.rs）复用同一流式核心。
+/// `pub(crate)`：模型库安装（model_library）复用同一流式核心。
 pub(crate) fn download_to(
     url: &str,
     tmp_archive: &Path,
@@ -422,7 +422,7 @@ pub(crate) fn download_to(
     cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<(), ModelError> {
     let mut last_err: Option<ModelError> = None;
-    for attempt in 0..3 {
+    for attempt in 0..5 {
         if attempt > 0 {
             std::thread::sleep(std::time::Duration::from_millis(400 * (1 << attempt)));
         }
@@ -453,6 +453,28 @@ fn try_download_once(
     try_download_once_core(url, None, tmp_archive, manifest_total, on_progress, cancel)
 }
 
+/// 下载用 HTTP Agent：
+/// - TLS 根证书取系统证书存储（`PlatformVerifier`）：杀软 / 代理的 HTTPS 解密
+///   证书只装在系统存储，默认打包根证书（WebPki）会报 UnknownIssuer 或被掐断；
+/// - 读取 `ALL_PROXY` / `HTTPS_PROXY` / `HTTP_PROXY`（含 `NO_PROXY` 排除规则）
+///   环境变量，代理用户无须 TUN 即可生效；未设置时直连。
+fn download_agent() -> ureq::Agent {
+    let config = ureq::Agent::config_builder()
+        .tls_config(
+            ureq::tls::TlsConfig::builder()
+                .root_certs(ureq::tls::RootCerts::PlatformVerifier)
+                .build(),
+        )
+        .proxy(ureq::Proxy::try_from_env())
+        .build();
+    ureq::Agent::new_with_config(config)
+}
+
+/// 解析 `Content-Range: bytes 100-200/345` 的总量（345）；`*/345` 或无效 → `None`。
+fn content_range_total(v: &str) -> Option<u64> {
+    v.rsplit('/').next()?.trim().parse().ok()
+}
+
 fn try_download_once_core(
     url: &str,
     token: Option<&str>,
@@ -461,22 +483,52 @@ fn try_download_once_core(
     on_progress: &mut ProgressFn,
     cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<(), ModelError> {
-    let mut req = ureq::get(url);
+    // 断点续传：上次中断留下的部分文件非空时，请求剩余区间（服务器以 206 应答）
+    let resume_from = std::fs::metadata(tmp_archive).map_or(0, |m| m.len());
+    let mut req = download_agent().get(url);
     if let Some(t) = token {
         req = req.header("Authorization", &format!("Bearer {t}"));
     }
-    let resp = req.call().map_err(|e| ModelError::Http(e.to_string()))?;
-    let total = resp
+    if resume_from > 0 {
+        req = req.header("Range", &format!("bytes={resume_from}-"));
+    }
+    let resp = req.call().map_err(|e| {
+        // 416 = 断点越界（远端内容已变化等）→ 丢弃部分文件，下次重试从 0 开始
+        if matches!(&e, ureq::Error::StatusCode(416)) {
+            let _ = std::fs::remove_file(tmp_archive);
+        }
+        ModelError::Http(e.to_string())
+    })?;
+
+    let content_length = resp
         .headers()
         .get("Content-Length")
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(manifest_total);
+        .and_then(|v| v.parse::<u64>().ok());
+    let range_total = resp
+        .headers()
+        .get("Content-Range")
+        .and_then(|v| v.to_str().ok())
+        .and_then(content_range_total);
+    // 206 = 续传生效（追加写入）；200 = 服务器忽略 Range（覆盖重下）
+    let resumed = resp.status() == 206;
+    let total = if resumed {
+        // Content-Range 总量最准；缺失时用「断点 + 剩余长度」；仍未知退回清单值
+        range_total.or_else(|| content_length.map(|len| resume_from.saturating_add(len)))
+    } else {
+        content_length
+    }
+    .filter(|&t| t > 0)
+    .unwrap_or(manifest_total);
 
     let mut reader = resp.into_body().into_reader();
-    let mut file = std::fs::File::create(tmp_archive)?;
+    let mut file = if resumed {
+        std::fs::OpenOptions::new().append(true).open(tmp_archive)?
+    } else {
+        std::fs::File::create(tmp_archive)?
+    };
     let mut buf = [0u8; 64 * 1024];
-    let mut done: u64 = 0;
+    let mut done: u64 = if resumed { resume_from } else { 0 };
     loop {
         if cancelled(cancel) {
             let _ = std::fs::remove_file(tmp_archive);
@@ -1014,5 +1066,115 @@ pub(crate) mod tests {
         }
         assert!(monotonic, "总体进度不能倒退");
         assert!((last_overall - 100.0).abs() < 1e-9);
+    }
+
+    // ---- 断点续传 ----
+
+    #[test]
+    fn test_content_range_total() {
+        assert_eq!(content_range_total("bytes 100-200/345"), Some(345));
+        assert_eq!(content_range_total("bytes */345"), Some(345));
+        assert_eq!(content_range_total("bytes */*"), None);
+        assert_eq!(content_range_total("garbage"), None);
+    }
+
+    /// 手动网络探针：用真实下载 Agent 打模型清单源，验证系统证书 + 代理链路。
+    /// 平时忽略（不联网）；诊断时运行 `cargo test -- --ignored probe_model_url`。
+    #[test]
+    #[ignore = "联网探针，诊断时手动运行"]
+    fn probe_model_url() {
+        let url = default_asset().source.clone();
+        let range = "bytes=0-1023";
+        let resp = download_agent()
+            .get(&url)
+            .header("Range", range)
+            .call()
+            .expect("请求失败（TLS/网络）");
+        assert!(resp.status().is_success(), "HTTP {}", resp.status());
+        let bytes = resp.into_body().read_to_vec().unwrap();
+        assert_eq!(bytes.len(), 1024, "Range 请求应返回 1024 字节");
+    }
+
+    /// 支持 Range 的「弱网」服务器：每次连接只发送 max_bytes 字节就提前断开
+    /// （响应头声明 Content-Length 但未发完即关闭，客户端读到 early EOF），
+    /// 只有完整区间才正常收尾。用于驱动断点续传重试。
+    fn serve_flaky_resumable(payload: Vec<u8>, max_bytes_per_conn: usize) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let payload = std::sync::Arc::new(payload);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut sock) = stream else { break };
+                let payload = payload.clone();
+                std::thread::spawn(move || {
+                    // 读完请求头（可能跨多个 TCP 段）
+                    let mut request: Vec<u8> = Vec::new();
+                    let mut buf = [0u8; 4096];
+                    loop {
+                        let n = sock.read(&mut buf).unwrap_or(0);
+                        if n == 0 {
+                            break;
+                        }
+                        request.extend_from_slice(&buf[..n]);
+                        if request.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    let text = String::from_utf8_lossy(&request);
+                    let start = text
+                        .lines()
+                        .find_map(|l| {
+                            l.to_ascii_lowercase()
+                                .strip_prefix("range: bytes=")
+                                .and_then(|r| r.trim_end_matches('-').parse::<usize>().ok())
+                        })
+                        .unwrap_or(0);
+                    if start >= payload.len() {
+                        let _ = sock.write_all(
+                            b"HTTP/1.1 416 Range Not Satisfiable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        );
+                        return;
+                    }
+                    let end = (start + max_bytes_per_conn).min(payload.len());
+                    let remaining = payload.len() - start;
+                    if start == 0 {
+                        let head = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            payload.len()
+                        );
+                        let _ = sock.write_all(head.as_bytes());
+                    } else {
+                        let head = format!(
+                            "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {start}-{}/{remaining}\r\nContent-Length: {remaining}\r\nConnection: close\r\n\r\n",
+                            payload.len() - 1
+                        );
+                        let _ = sock.write_all(head.as_bytes());
+                    }
+                    let _ = sock.write_all(&payload[start..end]);
+                    let _ = sock.flush();
+                });
+            }
+        });
+        format!("http://{addr}/flaky.tar.bz2")
+    }
+
+    #[test]
+    fn test_download_resumes_across_disconnects() {
+        let dir = tempfile::tempdir().unwrap();
+        // 512KB、每连接最多 192KB：两次中断后第三次连接应完成
+        let payload: Vec<u8> = (0..512 * 1024).map(|i| (i % 251) as u8).collect();
+        let url = serve_flaky_resumable(payload.clone(), 192 * 1024);
+        let tmp = dir.path().join(".flaky.tar.bz2.tmp");
+        let mut last_percent = -1.0;
+        download_to(
+            &url,
+            &tmp,
+            payload.len() as u64,
+            &mut |p| last_percent = p.percent,
+            None,
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&tmp).unwrap(), payload);
+        assert_eq!(last_percent, 100.0);
     }
 }

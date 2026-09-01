@@ -65,3 +65,6 @@ tmp
 src-tauri/binaries/
 .audiocpp-src/
 .audiocpp-build/
+
+# CUDA 运行时 DLL 收集目录（构建期生成；README.md 占位入库）
+src-tauri/resources/cuda/*.dll

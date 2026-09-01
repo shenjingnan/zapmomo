@@ -78,7 +78,7 @@
       "asr_kind": "qwen3_asr",
       "runtime": "audiocpp",
       "format": "GGUF",
-      "description": "Qwen3-ASR 离线转写（audio.cpp 引擎，Metal 加速，实测 RTF≈0.05），29 语言自动识别；不支持热词。下载约 1.1GB。",
+      "description": "Qwen3-ASR 离线转写（audio.cpp 引擎，GPU 加速：macOS Metal / Windows NVIDIA CUDA，实测 RTF≈0.05，无可用 GPU 时自动回退 CPU），29 语言自动识别；不支持热词。下载约 1.1GB。",
       "languages": [
         "multilingual"
       ],
@@ -150,7 +150,7 @@
       "tts_kind": "omnivoice",
       "runtime": "audiocpp",
       "format": "GGUF",
-      "description": "OmniVoice（Qwen3-0.6B 基座）零样本声音克隆 + 声音设计，600+ 语种，q8_0 量化，24kHz；由 audio.cpp 引擎驱动。体积约 1.26 GiB，推理依赖 Metal 加速（实测 CPU 不可用），建议 8GB 以上内存的 Apple Silicon 设备使用。",
+      "description": "OmniVoice（Qwen3-0.6B 基座）零样本声音克隆 + 声音设计，600+ 语种，q8_0 量化，24kHz；由 audio.cpp 引擎驱动，GPU 加速（macOS Metal / Windows NVIDIA CUDA），无可用 GPU 时自动回退 CPU（速度显著下降）。体积约 1.26 GiB，建议 8GB 以上内存。",
       "languages": [
         "zh",
         "en"
@@ -159,7 +159,8 @@
         "tts",
         "audiocpp",
         "clone",
-        "multilingual"
+        "multilingual",
+        "cuda"
       ],
       "parameter_count": "0.6B",
       "quantization": "q8_0",
@@ -171,7 +172,8 @@
       ],
       "optional_assets": [],
       "platforms": [
-        "darwin-aarch64"
+        "darwin-aarch64",
+        "windows-x86_64"
       ],
       "download": {
         "manifest_role": "tts-audiocpp-omnivoice",
@@ -187,7 +189,7 @@
       "tts_kind": "voxcpm2",
       "runtime": "audiocpp",
       "format": "GGUF",
-      "description": "VoxCPM2（OpenBMB MiniCPM-4 2B 基座）零样本声音克隆 + 声音设计，30 语种免语言标签，q8_0 量化，48kHz 录音室级输出（AudioVAE V2 内置超分）；由 audio.cpp 引擎驱动，支持音频帧级流式（实测首块 0.36s）。体积约 2.75 GiB，推理依赖 Metal 加速，运行内存峰值约 7.6GB，建议 16GB 以上内存（32GB 更稳）的 Apple Silicon 设备使用。",
+      "description": "VoxCPM2（OpenBMB MiniCPM-4 2B 基座）零样本声音克隆 + 声音设计，30 语种免语言标签，q8_0 量化，48kHz 录音室级输出（AudioVAE V2 内置超分）；由 audio.cpp 引擎驱动，支持音频帧级流式（实测首块 0.36s），GPU 加速（macOS Metal / Windows NVIDIA CUDA），无可用 GPU 时自动回退 CPU（速度显著下降）。体积约 2.75 GiB，运行内存峰值约 7.6GB，建议 16GB 以上内存（32GB 更稳）。",
       "languages": [
         "zh",
         "en"
@@ -198,7 +200,8 @@
         "clone",
         "multilingual",
         "48khz",
-        "streaming"
+        "streaming",
+        "cuda"
       ],
       "parameter_count": "2B",
       "quantization": "q8_0",
@@ -210,7 +213,8 @@
       ],
       "optional_assets": [],
       "platforms": [
-        "darwin-aarch64"
+        "darwin-aarch64",
+        "windows-x86_64"
       ],
       "download": {
         "manifest_role": "tts-audiocpp-voxcpm2",
@@ -226,9 +230,9 @@
       "tts_kind": "qwen3_tts_06",
       "runtime": "audiocpp",
       "format": "GGUF",
-      "description": "Qwen3-TTS 0.6B Base（12Hz）零样本音色克隆，10 语种，q8_0 量化，24kHz；由 audio.cpp 引擎驱动。体积约 1.86 GiB，推理依赖 Metal 加速，建议 8GB 以上内存的 Apple Silicon 设备使用。需配合音色库克隆音色（Base 版无内置音色）。",
+      "description": "Qwen3-TTS 0.6B Base（12Hz）零样本音色克隆，10 语种，q8_0 量化，24kHz；由 audio.cpp 引擎驱动，GPU 加速（macOS Metal / Windows NVIDIA CUDA），无可用 GPU 时自动回退 CPU（速度显著下降）。体积约 1.86 GiB，建议 8GB 以上内存。需配合音色库克隆音色（Base 版无内置音色）。",
       "languages": ["zh", "en", "ja", "ko", "de", "fr", "ru", "pt", "es", "it"],
-      "tags": ["tts", "audiocpp", "clone", "multilingual"],
+      "tags": ["tts", "audiocpp", "clone", "multilingual", "cuda"],
       "parameter_count": "0.6B",
       "quantization": "q8_0",
       "version": "q8_0",
@@ -236,7 +240,7 @@
       "homepage": "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base",
       "required_assets": ["tts-audiocpp-qwen3-06b"],
       "optional_assets": [],
-      "platforms": ["darwin-aarch64"],
+      "platforms": ["darwin-aarch64", "windows-x86_64"],
       "download": {
         "manifest_role": "tts-audiocpp-qwen3-06b",
         "extra_roles": [],
@@ -251,9 +255,9 @@
       "tts_kind": "qwen3_tts_17",
       "runtime": "audiocpp",
       "format": "GGUF",
-      "description": "Qwen3-TTS 1.7B Base（12Hz）零样本音色克隆，10 语种，q8_0 量化（_v2 打包），24kHz；由 audio.cpp 引擎驱动。质量优先变体，体积约 2.51 GiB，推理依赖 Metal 加速，建议 16GB 以上内存的 Apple Silicon 设备使用。需配合音色库克隆音色（Base 版无内置音色）。",
+      "description": "Qwen3-TTS 1.7B Base（12Hz）零样本音色克隆，10 语种，q8_0 量化（_v2 打包），24kHz；由 audio.cpp 引擎驱动。质量优先变体，GPU 加速（macOS Metal / Windows NVIDIA CUDA），无可用 GPU 时自动回退 CPU（速度显著下降）。体积约 2.51 GiB，建议 16GB 以上内存。需配合音色库克隆音色（Base 版无内置音色）。",
       "languages": ["zh", "en", "ja", "ko", "de", "fr", "ru", "pt", "es", "it"],
-      "tags": ["tts", "audiocpp", "clone", "multilingual"],
+      "tags": ["tts", "audiocpp", "clone", "multilingual", "cuda"],
       "parameter_count": "1.7B",
       "quantization": "q8_0",
       "version": "q8_0_v2",
@@ -261,7 +265,7 @@
       "homepage": "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base",
       "required_assets": ["tts-audiocpp-qwen3-17b"],
       "optional_assets": [],
-      "platforms": ["darwin-aarch64"],
+      "platforms": ["darwin-aarch64", "windows-x86_64"],
       "download": {
         "manifest_role": "tts-audiocpp-qwen3-17b",
         "extra_roles": [],

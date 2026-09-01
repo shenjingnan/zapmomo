@@ -1,11 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useToast } from "@/components/ui/toast";
+import type { PlatformId } from "@/lib/modelPlatforms";
 import { api, onModelLibraryDownloadProgress } from "@/lib/tauri";
 import { useRuntime } from "@/providers/RuntimeContext";
 import { useStorageGate } from "@/providers/StorageGateProvider";
 import type { LibraryModel, ModelLibraryProgress, SetCurrentResult } from "@/types/modelLibrary";
 
-/** ASR 切换弹窗的内置预设（id = models/model_registry.json 的 registry id）。 */
+/**
+ * ASR 切换弹窗的内置预设（id = models/model_registry.json 的 registry id）。
+ * `platforms` 与 registry 同步维护（见 useTtsModelSwitch.ts 的 TTS_PRESETS 注释）。
+ */
 export const ASR_PRESETS = [
   {
     id: "asr-streaming-bilingual-zh-en",
@@ -17,9 +21,10 @@ export const ASR_PRESETS = [
   {
     id: "asr-qwen3-0.6b-audiocpp",
     name: "Qwen3-ASR 0.6B (audio.cpp)",
-    tagline: "29 语言自动识别 · Metal 加速 · 不支持热词 · 包体约 1.1GB",
+    tagline: "29 语言自动识别 · GPU 加速（macOS Metal / Windows CUDA）· 不支持热词 · 包体约 1.1GB",
     sizeBytes: 1_151_272_416,
     kind: "qwen3_asr",
+    platforms: ["darwin-aarch64", "windows-x86_64"] as const satisfies readonly PlatformId[],
   },
 ] as const;
 

@@ -53,6 +53,14 @@ pub fn set_search_dirs(dirs: Vec<PathBuf>) {
     let _ = SEARCH_DIRS.set(dirs);
 }
 
+/// 注入的搜索目录快照（未注入 → 空）。
+///
+/// 供 spawn 时构造子进程 DLL 搜索路径（Windows CUDA 运行时 DLL 随
+/// resources 落 resource_dir，与引擎 exe 不同目录时依赖子进程 PATH 解析）。
+pub fn search_dirs() -> Vec<PathBuf> {
+    SEARCH_DIRS.get().cloned().unwrap_or_default()
+}
+
 /// 引擎目录（`<data_dir>/engines`，未自定义时为 `~/.zapmomo/engines`）。
 pub fn engines_dir() -> PathBuf {
     crate::config::settings::get_data_dir()

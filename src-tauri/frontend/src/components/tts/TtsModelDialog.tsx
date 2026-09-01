@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { useSmoothProgress } from "@/hooks/useSmoothProgress";
 import { TTS_PRESETS, useTtsModelSwitch } from "@/hooks/useTtsModelSwitch";
+import { visiblePresets } from "@/lib/modelPlatforms";
 import { formatBytes } from "@/lib/utils";
 import type { LibraryModel } from "@/types/modelLibrary";
 
@@ -53,7 +54,14 @@ export function TtsModelDialog({ open, onClose }: TtsModelDialogProps) {
       </p>
 
       <div className="space-y-2">
-        {TTS_PRESETS.map((p) => {
+        {/* 后端列表未加载时不渲染任何预设（可见性以后端平台过滤为准，防闪现不可用条目） */}
+        {switcher.models === null && (
+          <p className="flex items-center gap-2 text-xs text-text-muted">
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            正在读取模型列表…
+          </p>
+        )}
+        {visiblePresets(TTS_PRESETS, switcher.models).map((p) => {
           // 仅「完整已安装」视为已安装（list_model_library 对未安装 registry 模型也返回记录）
           const installed =
             (switcher.models ?? []).find(
