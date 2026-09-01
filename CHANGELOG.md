@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.22](https://github.com/shenjingnan/zapmomo/compare/v0.1.21...v0.1.22) - 2026-09-01
+
+### Added
+
+- *(tts)* Windows 引擎启用 CUDA，支持运行时 provider 选择 ([#259](https://github.com/shenjingnan/zapmomo/pull/259))
+
 ## [0.1.21](https://github.com/shenjingnan/zapmomo/compare/v0.1.20...v0.1.21) - 2026-09-01
 
 ### Added
