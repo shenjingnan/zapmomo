@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.23](https://github.com/shenjingnan/zapmomo/compare/v0.1.22...v0.1.23) - 2026-09-01
+
+### Fixed
+
+- *(ci)* 上游删除 cuda-toolkit v2 滚动 tag，固定到 v0.2.36
+
 ## [0.1.22](https://github.com/shenjingnan/zapmomo/compare/v0.1.21...v0.1.22) - 2026-09-01
 
 ### Added
