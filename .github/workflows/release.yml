@@ -214,16 +214,17 @@ jobs:
               WIN_ARGS+=("-DCMAKE_CUDA_ARCHITECTURES=$archs")
               echo "CUDA architectures: $archs"
             fi
-            # CUDA 12.4 的 host_config.h 只放行 MSVC 2017~2022，2026 镜像的
-            # MSVC 19.51 会被 #error 拒掉。-allow-unsupported-compiler 是官方
-            # 逃生口（PyTorch/llama.cpp 同款续命法）；若编译期撞出真正的不
-            # 兼容再考虑升 CUDA 13.x（需重新评估驱动覆盖面与 ggml 兼容性）。
+            # CUDA 12.4 的 crt/host_config.h 硬编码只放行 MSVC 2017~2022
+            # （_MSC_VER ≤ 1943），2026 镜像的 19.51 触发 #error。-allow-
+            # unsupported-compiler 是官方逃生口（PyTorch/llama.cpp 同款），
+            # 但实测（run #29~#31）它够不着 CMake 的 nvcc 编译器检测阶段：
+            # 检测不传 CMAKE_CUDA_FLAGS，CUDAFLAGS env 也只被 nvcc trace 打印
+            # 不被消费。故直接把 #error 降级为 #warning——检测与正式编译读
+            # 同一个文件，一并放行；风险等级与官方 flag 相同（use at your own
+            # risk），若编译期撞出真正的不兼容再评估升 CUDA 13.x。
+            sed -i 's/^#error -- unsupported Microsoft Visual Studio version.*/#warning -- unsupported MSVC version (CI patched: CUDA 12.4 supports up to 2022)/' \
+              "$CUDA_PATH/include/crt/host_config.h"
             WIN_ARGS+=("-DCMAKE_CUDA_FLAGS=-Xcompiler=-utf-8 -allow-unsupported-compiler")
-            # 但 CMake 的 nvcc 编译器检测阶段不读 CMAKE_CUDA_FLAGS（见 CMake
-            # 源码 CMakeDetermineCUDACompiler.cmake：CMAKE_DETERMINE_COMPILER_ID
-            # 用 CUDAFLAGS env 变量），检测调用的 nvcc 同样要带豁免，否则
-            # configure 在检测阶段就被 host_config.h 干掉。
-            export CUDAFLAGS="-allow-unsupported-compiler"
           fi
           # shellcheck disable=SC2086
           cmake -S .audiocpp-src -B .audiocpp-build "${WIN_ARGS[@]}" $COMMON_FLAGS $AUDIOCPP_EXTRA -DCMAKE_BUILD_TYPE=Release
