@@ -125,6 +125,8 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v0-rust-${{ matrix.args }}
+          # Windows CUDA 冷构建约 1 小时，失败时也保存缓存，重试无需全量重编
+          cache-on-failure: true
 
       - name: Cache sherpa-onnx prebuilt libs
         # 同 ci.yml check job：rust-cache 恢复出的 sherpa-onnx-prebuilt 可能只剩
@@ -252,38 +254,34 @@ jobs:
           ls -lh src-tauri/binaries/
 
       - name: Collect CUDA runtime DLLs
-        # CUDA 后端的 DLL 依赖分两路：构建产物的 ggml DLL（ggml-cuda 等）+
-        # CUDA Toolkit 运行时（cudart/cuBLAS/cuFFT，按
-        # major 版本 glob，不硬编码小版本）。收集到 src-tauri/resources/cuda/，
-        # 经 tauri.windows.conf.json 的 resources 随安装包落安装目录，运行时由
-        # 子进程 PATH 前置（server.rs::augmented_child_path）解析。
+        # CUDA 后端（ggml-cuda）由上游 CMake 强制 BUILD_SHARED_LIBS=OFF 静态
+        # 编进 audiocpp_server.exe（release-0.6.1 实测产物为静态 .lib，不存在
+        # ggml-cuda.dll），exe 运行时缺的只是 CUDA Toolkit 的动态运行时
+        # （cudart/cuBLAS/cuFFT，按 major 版本 glob，不硬编码小版本）。收集到
+        # src-tauri/resources/cuda/，经 tauri.windows.conf.json 的 resources
+        # 随安装包落安装目录，运行时由子进程 PATH 前置
+        # （server.rs::augmented_child_path）解析。
         if: matrix.platform == 'windows-latest'
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p src-tauri/resources/cuda
-          # 1) 构建产物的 ggml DLL（含 ggml-cuda.dll）
-          found_dlls=0
-          while IFS= read -r -d '' dll; do
-            cp "$dll" src-tauri/resources/cuda/
-            found_dlls=$((found_dlls + 1))
-          done < <(find .audiocpp-build -type f -name '*.dll' -print0)
-          echo "ggml build DLLs: $found_dlls"
-          # 2) CUDA Toolkit 运行时
+          # CUDA Toolkit 动态运行时（exe 的全部外部 CUDA 依赖；glob 不匹配时
+          # cp 收到字面量报错退出，set -e 即中止）
           for prefix in cudart64_ cublas64_ cublasLt64_ cufft64_; do
             cp "$CUDA_PATH"/bin/"${prefix}"*.dll src-tauri/resources/cuda/
           done
-          # 3) 门禁：关键 DLL 必须在（缺失时引擎加载报 0xC0000135）
-          test -f src-tauri/resources/cuda/ggml-cuda.dll || {
-            echo '::error::ggml-cuda.dll 未收集到（CUDA 后端构建失败？）'; exit 1;
-          }
+          # 门禁：关键 DLL 必须在（缺失时引擎加载报 0xC0000135）
           ls src-tauri/resources/cuda/cudart64_*.dll >/dev/null || {
             echo '::error::cudart DLL 未收集到（CUDA_PATH 定位失败？）'; exit 1;
           }
+          ls src-tauri/resources/cuda/cublas64_*.dll >/dev/null || {
+            echo '::error::cuBLAS DLL 未收集到'; exit 1;
+          }
           ls -lh src-tauri/resources/cuda/
-          # 4) 运行冒烟：引擎能起（DLL 集齐）。--help 若被引擎识别会即刻退出；
-          #    若引擎直接开始服务则由 timeout 杀掉（退出码 124，同样算通过）。
-          #    DLL 缺失时进程死 0xC0000135（bash 呈现为 127）→ 门禁失败。
+          # 运行冒烟：引擎能起（DLL 集齐）。--help 若被引擎识别会即刻退出；
+          # 若引擎直接开始服务则由 timeout 杀掉（退出码 124，同样算通过）。
+          # DLL 缺失时进程死 0xC0000135（bash 呈现为 127）→ 门禁失败。
           set +e
           timeout 60 "src-tauri/binaries/audiocpp_server-x86_64-pc-windows-msvc.exe" --help >/dev/null 2>&1
           smoke=$?
