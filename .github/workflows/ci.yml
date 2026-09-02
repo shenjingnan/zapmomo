@@ -3,10 +3,10 @@ name: CI
 on:
   push:
     branches: [main]
-    paths: ['Cargo.toml', 'Cargo.lock', 'src/**/*.rs', 'tests/**', 'src-tauri/**', 'package.json', 'package-lock.json', '.github/workflows/**']
+    paths: ['Cargo.toml', 'Cargo.lock', 'src/**/*.rs', 'tests/**', 'src-tauri/**', 'package.json', 'pnpm-lock.yaml', '.github/workflows/**']
   pull_request:
     branches: [main]
-    paths: ['Cargo.toml', 'Cargo.lock', 'src/**/*.rs', 'tests/**', 'src-tauri/**', 'package.json', 'package-lock.json', '.github/workflows/**']
+    paths: ['Cargo.toml', 'Cargo.lock', 'src/**/*.rs', 'tests/**', 'src-tauri/**', 'package.json', 'pnpm-lock.yaml', '.github/workflows/**']
 
 env:
   CARGO_TERM_COLOR: always
@@ -253,3 +253,34 @@ jobs:
           # 需通过 CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded 让 vcxproj 的 RuntimeLibrary 设为 /MT。
           CMAKE_MSVC_RUNTIME_LIBRARY: "MultiThreaded"
         run: cargo test -- --test-threads=1
+
+  frontend:
+    name: Frontend Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # 版本由根 package.json 的 packageManager 字段决定（pnpm@10.18.2），
+      # 安装范围与 release.yml 完全一致（排除 docs workspace）。
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          # 版本单一来源 .node-version（本地 fnm 与 CI 读同一文件）
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Install frontend deps
+        run: pnpm install --filter '!zapmomo-docs' --frozen-lockfile
+
+      - name: Type check (tsc -b)
+        # 与 release.yml tauri beforeBuildCommand 的第一步完全相同。此前前端
+        # 无任何类型检查门禁：vitest 不做类型检查，tsc 错误只在发布构建时
+        # 暴露（v0.1.23 曾因此 PR 全绿、四个平台打包全部失败）。
+        run: pnpm --dir src-tauri/frontend exec tsc -b
+
+      - name: Unit tests (vitest)
+        # test:run = vitest run（CI 必须单次运行，默认 watch 模式会挂住）
+        run: pnpm --dir src-tauri/frontend run test:run
