@@ -219,6 +219,11 @@ jobs:
             # 逃生口（PyTorch/llama.cpp 同款续命法）；若编译期撞出真正的不
             # 兼容再考虑升 CUDA 13.x（需重新评估驱动覆盖面与 ggml 兼容性）。
             WIN_ARGS+=("-DCMAKE_CUDA_FLAGS=-Xcompiler=-utf-8 -allow-unsupported-compiler")
+            # 但 CMake 的 nvcc 编译器检测阶段不读 CMAKE_CUDA_FLAGS（见 CMake
+            # 源码 CMakeDetermineCUDACompiler.cmake：CMAKE_DETERMINE_COMPILER_ID
+            # 用 CUDAFLAGS env 变量），检测调用的 nvcc 同样要带豁免，否则
+            # configure 在检测阶段就被 host_config.h 干掉。
+            export CUDAFLAGS="-allow-unsupported-compiler"
           fi
           # shellcheck disable=SC2086
           cmake -S .audiocpp-src -B .audiocpp-build "${WIN_ARGS[@]}" $COMMON_FLAGS $AUDIOCPP_EXTRA -DCMAKE_BUILD_TYPE=Release
