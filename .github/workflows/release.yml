@@ -144,7 +144,9 @@ jobs:
         # 因此固定到具体小版本而非 @master。
         uses: Jimver/cuda-toolkit@v0.2.36
         with:
-          cuda-toolkit: '12.4.0'
+          # v0.2.x 后期版本把输入名从 cuda-toolkit 改成了 cuda；用旧名会被静默
+          # 忽略、回落到默认 13.2.0，装错 Toolkit 版本
+          cuda: '12.4.0'
 
       - name: Build audiocpp_server sidecar
         # TTS/ASR 第二后端（audio.cpp，Apache-2.0）的 sidecar 进程：裁剪构建只编

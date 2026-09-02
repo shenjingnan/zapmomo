@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useToast } from "@/components/ui/toast";
-import { type PlatformId, visiblePresets } from "@/lib/modelPlatforms";
+import { type PlatformId } from "@/lib/modelPlatforms";
 import { api, onModelLibraryDownloadProgress } from "@/lib/tauri";
 import { useRuntime } from "@/providers/RuntimeContext";
 import { useStorageGate } from "@/providers/StorageGateProvider";

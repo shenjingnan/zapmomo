@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { TTS_PRESETS } from "@/hooks/useTtsModelSwitch";
-import { visiblePresets } from "@/lib/modelPlatforms";
+import { type PresetWithPlatforms, visiblePresets } from "@/lib/modelPlatforms";
 import { isCloneRequiredTtsKind, isCloneTtsKind, ttsModelKindLabel } from "./ttsMeta";
 
 describe("ttsModelKindLabel", () => {
@@ -92,12 +92,16 @@ describe("TTS_PRESETS", () => {
       "tts-qwen3-17b-base-q8-audiocpp",
     ];
     for (const id of audiocppIds) {
-      const p = TTS_PRESETS.find((x) => x.id === id);
+      // 标注为 PresetWithPlatforms：联合类型里 zipvoice 成员无 platforms 字段，
+      // 直接访问 p?.platforms 会因属性不全而编译失败
+      const p: PresetWithPlatforms | undefined = TTS_PRESETS.find((x) => x.id === id);
       expect(p, id).toBeDefined();
       expect(p?.platforms, id).toEqual(["darwin-aarch64", "windows-x86_64"]);
     }
     // sherpa 族无平台约束
-    const zipvoice = TTS_PRESETS.find((p) => p.id === "tts-zipvoice-distill-int8");
+    const zipvoice: PresetWithPlatforms | undefined = TTS_PRESETS.find(
+      (p) => p.id === "tts-zipvoice-distill-int8",
+    );
     expect(zipvoice?.platforms).toBeUndefined();
   });
 });
