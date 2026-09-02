@@ -29,6 +29,7 @@ jobs:
       matrix:
         include:
           - platform: macos-latest
+            runner: macos-latest
             # triple 供下方 Stage macOS bundles 步骤定位 bundle 产物目录
             # （target/<triple>/release/bundle），不挪用语义专属的 audiocpp_triple
             triple: aarch64-apple-darwin
@@ -37,23 +38,32 @@ jobs:
             # arm64 保留 Metal（大模型可走 GPU；小模型实测 CPU 更快，运行时按 [tts].provider 选择）
             audiocpp_extra: '-DENGINE_ENABLE_METAL=ON -DENGINE_ENABLE_CUDA=OFF'
           - platform: macos-latest
+            runner: macos-latest
             triple: x86_64-apple-darwin
             args: '--target x86_64-apple-darwin'
             audiocpp_triple: x86_64-apple-darwin
             # ARM runner 上交叉编译 x86_64：Metal 关闭（Intel Mac 走 CPU）
             audiocpp_extra: '-DENGINE_ENABLE_METAL=OFF -DENGINE_ENABLE_CUDA=OFF -DCMAKE_OSX_ARCHITECTURES=x86_64'
           - platform: ubuntu-22.04
+            runner: ubuntu-22.04
             args: ''
             audiocpp_triple: x86_64-unknown-linux-gnu
             audiocpp_extra: '-DENGINE_ENABLE_CUDA=OFF'
           - platform: windows-latest
+            # runner 固定 windows-2022（VS 2022 / MSVC 19.4x）：windows-latest
+            # 与 windows-2025 现均指向 VS 2026 镜像，CUDA 12.4 的 cudafe++ 前端
+            # 解析 MSVC 19.51 头文件时直接段错误（run #33 实测 0xC0000005），
+            # 无 flag 可救；上游 audio.cpp 的 Windows CI 同样用 windows-2022。
+            # 19.44 若超 host_config 的 1943 上限，由下方 patch + -allow-
+            # unsupported-compiler 双保险覆盖（对 19.4x 稳定）。
+            runner: windows-2022
             args: ''
             audiocpp_triple: x86_64-pc-windows-msvc
             # Windows 开 CUDA（上游 VoxCPM2 CUDA 实测 RTF 0.23~0.55）；CUDA 运行时
             # DLL 由下方 Collect CUDA runtime DLLs 收集进 src-tauri/resources/cuda/，
             # 经 tauri.windows.conf.json 的 resources 随安装包分发
             audiocpp_extra: '-DENGINE_ENABLE_CUDA=ON'
-    runs-on: ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
 
