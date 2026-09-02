@@ -333,7 +333,20 @@ jobs:
           mkdir -p staged
           cp "${DMGS[@]}" staged/
           for dmg in staged/*.dmg; do
-            ./scripts/patch-dmg-gatekeeper.sh "$dmg"
+            # tauri bundle_dmg 刚 detach 过同卷名（ZapMomo）镜像，diskarbitration
+            # 释放有延迟，patch 脚本里的 hdiutil attach 偶发 Mount failed
+            # （exit 16；run #34 x64 腿实测，与成功的 arm64 腿只差几秒）。
+            # 脚本 set -e 即刻中止且 WORK 目录每次全新，外层等待后重试即可。
+            for attempt in 1 2 3; do
+              if ./scripts/patch-dmg-gatekeeper.sh "$dmg"; then
+                break
+              elif [ "$attempt" -eq 3 ]; then
+                echo "::error::dmg patch 三次均失败: $dmg"
+                exit 1
+              fi
+              echo "::warning::dmg patch 第 ${attempt} 次失败（疑似卷释放竞态），10 秒后重试"
+              sleep 10
+            done
           done
           ls -l staged
 
