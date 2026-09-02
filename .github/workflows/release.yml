@@ -219,10 +219,13 @@ jobs:
             # unsupported-compiler 是官方逃生口（PyTorch/llama.cpp 同款），
             # 但实测（run #29~#31）它够不着 CMake 的 nvcc 编译器检测阶段：
             # 检测不传 CMAKE_CUDA_FLAGS，CUDAFLAGS env 也只被 nvcc trace 打印
-            # 不被消费。故直接把 #error 降级为 #warning——检测与正式编译读
-            # 同一个文件，一并放行；风险等级与官方 flag 相同（use at your own
-            # risk），若编译期撞出真正的不兼容再评估升 CUDA 13.x。
-            sed -i 's/^#error -- unsupported Microsoft Visual Studio version.*/#warning -- unsupported MSVC version (CI patched: CUDA 12.4 supports up to 2022)/' \
+            # 不被消费。故把 #error 行首改成 // 注释——检测与正式编译读同一
+            # 个文件，一并放行（#warning 不行：MSVC 19.5x 里它要 /std:c++23
+            # preview 才合法，run #32 实测报 C1188）。若原 #error 是 \ 续行的
+            # 多行文案，行拼接先于注释处理，续行会被一并并入注释，语法安全。
+            # 风险等级与官方 flag 相同（use at your own risk），若编译期撞出
+            # 真正的不兼容再评估升 CUDA 13.x。
+            sed -i 's/^#error -- unsupported Microsoft Visual Studio version/\/\/ CI patched (CUDA 12.4 officially supports MSVC 2017-2022, relaxed for 2026 runner): -- unsupported Microsoft Visual Studio version/' \
               "$CUDA_PATH/include/crt/host_config.h"
             WIN_ARGS+=("-DCMAKE_CUDA_FLAGS=-Xcompiler=-utf-8 -allow-unsupported-compiler")
           fi
