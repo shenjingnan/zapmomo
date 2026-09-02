@@ -191,7 +191,10 @@ jobs:
           # （2024 年）不认识 2026 镜像的 Visual Studio 18，enable_language(CUDA)
           # 直接报 No CUDA toolset found；Ninja 下 CMake 直接调 nvcc，不依赖
           # VS 集成，不受镜像升 VS 影响。单配置产物落 bin/，非 bin/Release/。
-          # /utf-8 与上游一致（源码含非 ASCII 字面量，MSVC 默认按本地代码页解析）。
+          # utf-8 与上游一致（源码含非 ASCII 字面量，MSVC 默认按本地代码页解析）。
+          # 注意必须写 -utf-8 而非 /utf-8：本步骤是 Git Bash，MSYS 路径转换会把
+          # 以 / 开头的 flag 当 Unix 路径改写成 C:/Program Files/Git/utf-8 传给
+          # cl，报 C1083 找不到源文件（MSVC 选项同时接受 - 前缀，语义相同）。
           WIN_FLAGS=""
           if [ "$RUNNER_OS" = "Windows" ]; then
             # CUDA 架构照抄上游策略：按 nvcc 实际支持过滤（virtual=仅 PTX，
@@ -204,15 +207,18 @@ jobs:
                 archs="${archs:+$archs;}${pair#*:}" ;;
               esac
             done
-            WIN_FLAGS="-G Ninja -DCMAKE_C_FLAGS=/utf-8 -DCMAKE_CXX_FLAGS=/utf-8 \
-              -DCMAKE_CUDA_HOST_COMPILER=cl -DCMAKE_CUDA_FLAGS=-Xcompiler=/utf-8"
+            WIN_FLAGS="-G Ninja -DCMAKE_C_FLAGS=-utf-8 -DCMAKE_CXX_FLAGS=-utf-8 \
+              -DCMAKE_CUDA_HOST_COMPILER=cl -DCMAKE_CUDA_FLAGS=-Xcompiler=-utf-8"
             if [ -n "$archs" ]; then
               WIN_FLAGS="$WIN_FLAGS -DCMAKE_CUDA_ARCHITECTURES=$archs"
               echo "CUDA architectures: $archs"
             fi
           fi
+          # WIN_FLAGS 可能含分号（CUDA 架构列表），不能裸展开（bash 会当命令
+          # 分隔符拆散命令），先分词成数组再展开；其余两个变量无分号可保持原样。
+          read -ra win_args <<< "$WIN_FLAGS"
           # shellcheck disable=SC2086
-          cmake -S .audiocpp-src -B .audiocpp-build $WIN_FLAGS $COMMON_FLAGS $AUDIOCPP_EXTRA -DCMAKE_BUILD_TYPE=Release
+          cmake -S .audiocpp-src -B .audiocpp-build "${win_args[@]}" $COMMON_FLAGS $AUDIOCPP_EXTRA -DCMAKE_BUILD_TYPE=Release
           JOBS="${NUMBER_OF_PROCESSORS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
           cmake --build .audiocpp-build --target audiocpp_server --config Release --parallel "$JOBS"
           # 产物名跨生成器有差异（Ninja 单配置落 bin/，VS 多配置落 bin/Release/），find 兜底
