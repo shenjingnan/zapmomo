@@ -148,6 +148,13 @@ jobs:
           # 忽略、回落到默认 13.2.0，装错 Toolkit 版本
           cuda: '12.4.0'
 
+      - name: Setup MSVC environment
+        # 仅 Windows：初始化 MSVC（cl/mt/rc 进 PATH，经 GITHUB_ENV 对后续步骤
+        # 生效）。下方 CMake 用 Ninja 生成器时要求这些工具已在环境里（为何用
+        # Ninja 见构建步骤注释）。
+        if: matrix.platform == 'windows-latest'
+        uses: ilammy/msvc-dev-cmd@v1
+
       - name: Build audiocpp_server sidecar
         # TTS/ASR 第二后端（audio.cpp，Apache-2.0）的 sidecar 进程：裁剪构建只编
         # omnivoice + voxcpm2 + qwen3_tts + qwen3_asr 模型族（实测约 12MB / ~2.5 分钟）。DEPLOYMENT_BUILD 把 model specs 编进二进制
@@ -179,11 +186,36 @@ jobs:
           COMMON_FLAGS="-DAUDIOCPP_MODEL_SET=custom -DAUDIOCPP_MODELS=omnivoice,voxcpm2,qwen3_tts,qwen3_asr \
             -DAUDIOCPP_DEPLOYMENT_BUILD=ON -DENGINE_ENABLE_NATIVE_CPU=OFF \
             -DENGINE_ENABLE_VULKAN=OFF -DENGINE_ENABLE_HIP=OFF"
+          # Windows 用 Ninja 生成器（上游 build_windows.ps1 同款）：VS 生成器的
+          # CUDA 支持依赖装进 MSBuild 目录的 BuildCustomizations，而 CUDA 12.4
+          # （2024 年）不认识 2026 镜像的 Visual Studio 18，enable_language(CUDA)
+          # 直接报 No CUDA toolset found；Ninja 下 CMake 直接调 nvcc，不依赖
+          # VS 集成，不受镜像升 VS 影响。单配置产物落 bin/，非 bin/Release/。
+          # /utf-8 与上游一致（源码含非 ASCII 字面量，MSVC 默认按本地代码页解析）。
+          WIN_FLAGS=""
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            # CUDA 架构照抄上游策略：按 nvcc 实际支持过滤（virtual=仅 PTX，
+            # 运行时 JIT 到本机卡；real=SASS 直出）。120/121（Blackwell）需
+            # CUDA 12.8+，12.4 的 nvcc 不列 compute_120/121 会自动剔除。
+            supported="$(nvcc --list-gpu-arch 2>/dev/null || true)"
+            archs=""
+            for pair in 75:75-virtual 80:80-virtual 86:86-real 89:89-real 120:120a-real 121:121a-real; do
+              case "$supported" in *"compute_${pair%%:*}"*)
+                archs="${archs:+$archs;}${pair#*:}" ;;
+              esac
+            done
+            WIN_FLAGS="-G Ninja -DCMAKE_C_FLAGS=/utf-8 -DCMAKE_CXX_FLAGS=/utf-8 \
+              -DCMAKE_CUDA_HOST_COMPILER=cl -DCMAKE_CUDA_FLAGS=-Xcompiler=/utf-8"
+            if [ -n "$archs" ]; then
+              WIN_FLAGS="$WIN_FLAGS -DCMAKE_CUDA_ARCHITECTURES=$archs"
+              echo "CUDA architectures: $archs"
+            fi
+          fi
           # shellcheck disable=SC2086
-          cmake -S .audiocpp-src -B .audiocpp-build $COMMON_FLAGS $AUDIOCPP_EXTRA -DCMAKE_BUILD_TYPE=Release
+          cmake -S .audiocpp-src -B .audiocpp-build $WIN_FLAGS $COMMON_FLAGS $AUDIOCPP_EXTRA -DCMAKE_BUILD_TYPE=Release
           JOBS="${NUMBER_OF_PROCESSORS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
           cmake --build .audiocpp-build --target audiocpp_server --config Release --parallel "$JOBS"
-          # MSVC multi-config 产物在 bin/Release/ 子目录，find 兜底两种布局
+          # 产物名跨生成器有差异（Ninja 单配置落 bin/，VS 多配置落 bin/Release/），find 兜底
           SRC_BIN=$(find .audiocpp-build -type f -name 'audiocpp_server*' ! -name '*.dSYM*' | head -1)
           test -n "$SRC_BIN" || { echo '::error::audiocpp_server 产物未找到'; exit 1; }
           mkdir -p src-tauri/binaries
@@ -192,8 +224,8 @@ jobs:
           ls -lh src-tauri/binaries/
 
       - name: Collect CUDA runtime DLLs
-        # CUDA 后端的 DLL 依赖分两路：构建产物的 ggml DLL（ggml-cuda 等，多配置
-        # 产物在 bin/Release/）+ CUDA Toolkit 运行时（cudart/cuBLAS/cuFFT，按
+        # CUDA 后端的 DLL 依赖分两路：构建产物的 ggml DLL（ggml-cuda 等）+
+        # CUDA Toolkit 运行时（cudart/cuBLAS/cuFFT，按
         # major 版本 glob，不硬编码小版本）。收集到 src-tauri/resources/cuda/，
         # 经 tauri.windows.conf.json 的 resources 随安装包落安装目录，运行时由
         # 子进程 PATH 前置（server.rs::augmented_child_path）解析。
