@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.24](https://github.com/shenjingnan/zapmomo/compare/v0.1.23...v0.1.24) - 2026-09-02
+
+### Other
+
+- *(ci)* 缓存 audiocpp 源码树与构建目录，脚本级失败重试免 1 小时全量重编
+
 ## [0.1.23](https://github.com/shenjingnan/zapmomo/compare/v0.1.22...v0.1.23) - 2026-09-01
 
 ### Fixed
