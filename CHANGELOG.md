@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.27](https://github.com/shenjingnan/zapmomo/compare/v0.1.26...v0.1.27) - 2026-09-03
+
+### Fixed
+
+- *(ci)* Windows 引擎改消费上游 v0.7.1 官方预编译，退役源码编译链路 ([#267](https://github.com/shenjingnan/zapmomo/pull/267))
+
 ## [0.1.26](https://github.com/shenjingnan/zapmomo/compare/v0.1.25...v0.1.26) - 2026-09-03
 
 ### Fixed
