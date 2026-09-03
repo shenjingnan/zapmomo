@@ -7651,14 +7651,20 @@ pub fn run() {
                 {
                     search_dirs.push(exe_dir);
                 }
-                if let Ok(resource_dir) = app.path().resource_dir()
-                    && !search_dirs.contains(&resource_dir)
-                {
-                    search_dirs.push(resource_dir.clone());
+                if let Ok(resource_dir) = app.path().resource_dir() {
+                    if !search_dirs.contains(&resource_dir) {
+                        search_dirs.push(resource_dir.clone());
+                    }
                     // Windows 引擎运行时 DLL 随 resources 落 `resource_dir\audiocpp\`
                     // （ggml 动态后端 + MSVC CRT + CUDA 12.4 运行时）。子进程 PATH
                     // 是平铺目录搜索、不递归子目录，必须把 DLL 所在目录本身加进
-                    // 去（见 server.rs::augmented_child_path）。
+                    // 去（见 server.rs::augmented_child_path）。注意不能以
+                    // `resource_dir != exe_dir` 为前提裁剪这一条：Windows NSIS 下
+                    // resource_dir == exe_dir（都落在安装根目录），引擎 exe 在根
+                    // 目录而 DLL 在 audiocpp\ 子目录——裁剪掉它子进程 PATH 就再也
+                    // 不含 DLL 目录，ggml 后端（cuda 和 cpu）一个都注册不上
+                    // （实测签名：cuda → "not registered (available: none)"，
+                    // cpu → "Failed to initialize CPU backend"）。
                     search_dirs.push(resource_dir.join("audiocpp"));
                 }
                 zapmomo::audiocpp::locator::set_search_dirs(search_dirs);
