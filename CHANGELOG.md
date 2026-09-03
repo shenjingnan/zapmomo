@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.25](https://github.com/shenjingnan/zapmomo/compare/v0.1.24...v0.1.25) - 2026-09-03
+
+### Fixed
+
+- *(ci)* Windows sidecar 定位改为确定路径，堵住残片产物 ([#263](https://github.com/shenjingnan/zapmomo/pull/263))
+
 ## [0.1.24](https://github.com/shenjingnan/zapmomo/compare/v0.1.23...v0.1.24) - 2026-09-02
 
 ### Other
