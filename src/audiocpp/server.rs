@@ -314,10 +314,9 @@ fn spawn_instance(
     let search_dirs = super::locator::search_dirs();
     let engine_dir = engine.parent().map(Path::to_path_buf).unwrap_or_default();
     let current_path = std::env::var_os("PATH").unwrap_or_default();
-    cmd.env(
-        "PATH",
-        augmented_child_path(&engine_dir, &search_dirs, &current_path),
-    );
+    let child_path = augmented_child_path(&engine_dir, &search_dirs, &current_path);
+    tracing::info!(target: "audiocpp", engine = %engine.display(), child_path = %child_path.to_string_lossy(), "spawn audiocpp_server");
+    cmd.env("PATH", child_path);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     // Windows：不弹控制台窗口
     #[cfg(target_os = "windows")]
