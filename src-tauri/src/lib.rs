@@ -7654,7 +7654,12 @@ pub fn run() {
                 if let Ok(resource_dir) = app.path().resource_dir()
                     && !search_dirs.contains(&resource_dir)
                 {
-                    search_dirs.push(resource_dir);
+                    search_dirs.push(resource_dir.clone());
+                    // Windows 引擎运行时 DLL 随 resources 落 `resource_dir\audiocpp\`
+                    // （ggml 动态后端 + MSVC CRT + CUDA 12.4 运行时）。子进程 PATH
+                    // 是平铺目录搜索、不递归子目录，必须把 DLL 所在目录本身加进
+                    // 去（见 server.rs::augmented_child_path）。
+                    search_dirs.push(resource_dir.join("audiocpp"));
                 }
                 zapmomo::audiocpp::locator::set_search_dirs(search_dirs);
                 zapmomo::audiocpp::server::set_idle_keepalive(Some(

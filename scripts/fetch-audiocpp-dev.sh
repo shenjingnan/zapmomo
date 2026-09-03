@@ -9,16 +9,19 @@
 # 编译参数与 release.yml 一致：裁剪 omnivoice+voxcpm2+qwen3_tts+qwen3_asr
 # + DEPLOYMENT_BUILD
 # （spec 内嵌）+ NATIVE_CPU=OFF（可移植）。产物约 12MB、编译约 2.5 分钟（macOS 实测）。
-# 注意：上游 tag 命名是 release-X.Y.Z（无 v 前缀，v* 只有远古 windows-prebuilt）。
+# 注意：上游 tag 命名 0.6.x 为 release-X.Y.Z（无 v 前缀），0.7.x 起为 vX.Y.Z。
 #
 # Windows（Git Bash / MSYS）：仅支持 --build 模式（Release 资产 URL 带 .exe 后缀
-# 需发版流程同步调整）。检测到 CUDA Toolkit（%CUDA_PATH% 有 nvcc）时自动开
-# CUDA 后端并收集运行时 DLL 到 src-tauri/binaries/（server.rs 的子进程 PATH
-# 前置会覆盖该目录），否则引擎仅 CPU（合成时自动回退、速度慢）。
+# 需发版流程同步调整；生产 Windows 包走 release.yml 直接消费上游官方预编译）。
+# 检测到 CUDA Toolkit（%CUDA_PATH% 有 nvcc）时自动开 CUDA 后端并收集运行时
+# DLL 到 src-tauri/binaries/（server.rs 的子进程 PATH 前置会覆盖该目录），
+# 否则引擎仅 CPU（合成时自动回退、速度慢）。0.7.1 起上游为动态 ggml 后端
+# （ggml/ggml-base/ggml-cpu-*.dll），无论开不开 CUDA 都会把构建树的 *.dll
+# 一并拷到引擎旁，否则 exe 缺 ggml-base.dll 无法启动。
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-REF="${AUDIOCPP_REF:-release-0.6.1}"
+REF="${AUDIOCPP_REF:-v0.7.1}"
 
 triple() {
   local t
@@ -84,16 +87,22 @@ if [ "${1:-}" = "--build" ]; then
   # MSVC multi-config 产物在 bin/Release/ 子目录，find 兜底两种布局
   SRC_BIN="$(find .audiocpp-build -type f -name 'audiocpp_server*' ! -name '*.dSYM*' | head -1)"
   cp "$SRC_BIN" "$DEST"
-  # Windows + CUDA：收集 ggml DLL 与 CUDA 运行时到引擎旁（运行时由子进程
-  # PATH 前置解析；与 release.yml 的 Collect CUDA runtime DLLs 步骤同款逻辑）
-  if [[ "$CUDA_FLAG" == *CUDA=ON* ]]; then
-    while IFS= read -r -d '' dll; do cp "$dll" src-tauri/binaries/; done \
-      < <(find .audiocpp-build -type f -name '*.dll' -print0)
-    for prefix in cudart64_ cublas64_ cublasLt64_ cufft64_; do
-      cp "$CUDA_PATH"/bin/"${prefix}"*.dll src-tauri/binaries/ 2>/dev/null || true
-    done
-    ls -lh src-tauri/binaries/*.dll | head -20
-  fi
+  # Windows：0.7.1 起上游为动态 ggml 后端（ggml/ggml-base/ggml-cpu-*.dll），
+  # CPU-only 源码编译同样产出这些 DLL——无论开不开 CUDA 都拷到引擎旁（引擎
+  # exe 硬导入 ggml-base.dll，缺了无法启动；引擎目录是子进程 PATH 首位，
+  # server.rs::augmented_child_path 前置）。CUDA=ON 时再补 Toolkit 的运行时。
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+      while IFS= read -r -d '' dll; do cp "$dll" src-tauri/binaries/; done \
+        < <(find .audiocpp-build -type f -name '*.dll' -print0)
+      if [[ "$CUDA_FLAG" == *CUDA=ON* ]]; then
+        for prefix in cudart64_ cublas64_ cublasLt64_ cufft64_; do
+          cp "$CUDA_PATH"/bin/"${prefix}"*.dll src-tauri/binaries/ 2>/dev/null || true
+        done
+      fi
+      ls -lh src-tauri/binaries/*.dll | head -20
+      ;;
+  esac
 else
   echo "==> 从 GitHub Release 下载 sidecar ($TRIPLE)"
   REPO="${GITHUB_REPOSITORY:-$(git remote get-url origin | sed -E 's#.*[:/]([^/]+/[^/.]+)(\.git)?$#\1#')}"
