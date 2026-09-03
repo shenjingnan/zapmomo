@@ -13,11 +13,17 @@ changelog_path = "CHANGELOG.md"
 
 [[package]]
 name = "zapmomo-app"
-# 桌面应用 crate：不发布 crates.io，也不单独打 tag（随 workspace 一起 bump 版本）。
-# release = true：桌面 App 的改动（src-tauri/）也要触发版本发布；
-# 否则 release-plz 只统计可发布包，src-tauri 改动永远不会创建发布 PR。
-# 副作用：因版本与 zapmomo lib 共享（version.workspace），lib 会随之一同 bump/发布。
+# 桌面应用 crate：不发布 crates.io，但 src-tauri/ 改动必须能触发发布 PR。
+# release-pr 只分析两类包：可发布包（对 registry）与 git_only 包（对 git tag）；
+# 仅 publish = false + release = true 不足以让 src-tauri 改动被统计
+# （PR #269 纯 src-tauri 改动未出 release PR 实证），必须 git_only = true，
+# 以专属 tag zapmomo-app-vX.Y.Z 为版本基线。该 tag 与根包 v* tag 打在同一
+# release merge commit 上；前缀非 v 开头，不会误触发监听 v* 的 release.yml。
+# 副作用：版本与 zapmomo lib 共享（version.workspace），app 的 bump 会带动
+# workspace 版本，lib 随之一同 bump/发布。
 # publish = false 需与 src-tauri/Cargo.toml 的 publish = false 保持一致，否则 release-plz 报错
 publish = false
 release = true
-git_tag_enable = false
+git_only = true
+git_tag_enable = true
+git_tag_name = "zapmomo-app-v{{ version }}"
