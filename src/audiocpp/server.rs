@@ -299,6 +299,37 @@ fn augmented_child_path(
     std::env::join_paths(&dirs).unwrap_or_else(|_| current.to_os_string())
 }
 
+/// ggml 核心库文件名（后端 DLL 目录的判定标志，随平台命名）。
+fn ggml_core_lib_name() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "ggml-base.dll"
+    } else if cfg!(target_os = "macos") {
+        "libggml-base.dylib"
+    } else {
+        "libggml-base.so"
+    }
+}
+
+/// 挑选 ggml 后端 DLL 所在目录（作为引擎子进程 CWD）。
+///
+/// ggml 在后端枚举（`ggml_backend_load_best`）里只扫「引擎 exe 目录」和
+/// 「进程当前工作目录」两处，**不查 PATH**（见上游 external/ggml/src/
+/// ggml-backend-reg.cpp）。打包布局若把 DLL 放进资源子目录、引擎 exe 在
+/// 安装根目录，两处都扫不到 → cuda/cpu 后端一个都注册不上（实测签名：
+/// cuda → "not registered in this build (available: none)"，cpu →
+/// "Failed to initialize CPU backend"）。按「引擎目录 → 注入搜索目录」
+/// 顺序取第一个存在且含核心 ggml 库的目录；全不命中返回 None（继承宿主
+/// CWD，维持旧行为）。
+fn pick_backend_dir(
+    engine_dir: &std::path::Path,
+    search_dirs: &[std::path::PathBuf],
+) -> Option<std::path::PathBuf> {
+    std::iter::once(engine_dir)
+        .chain(search_dirs.iter().map(|p| p.as_path()))
+        .find(|dir| dir.join(ggml_core_lib_name()).is_file())
+        .map(Path::to_path_buf)
+}
+
 fn spawn_instance(
     spec: &ServerInstanceSpec,
     engine: &std::path::Path,
@@ -317,6 +348,11 @@ fn spawn_instance(
     let child_path = augmented_child_path(&engine_dir, &search_dirs, &current_path);
     tracing::info!(target: "audiocpp", engine = %engine.display(), child_path = %child_path.to_string_lossy(), "spawn audiocpp_server");
     cmd.env("PATH", child_path);
+    // ggml 后端枚举只扫「引擎目录 + 子进程 CWD」，把 CWD 指到含 ggml 库的目录
+    if let Some(backend_dir) = pick_backend_dir(&engine_dir, &search_dirs) {
+        tracing::debug!(target: "audiocpp", backend_dir = %backend_dir.display(), "引擎子进程 CWD 指向 ggml 后端目录");
+        cmd.current_dir(&backend_dir);
+    }
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     // Windows：不弹控制台窗口
     #[cfg(target_os = "windows")]
@@ -876,6 +912,40 @@ http.server.HTTPServer(('127.0.0.1', port), H).serve_forever()
             drop(lb);
             assert!(!stub_pidfile_exists(), "全部释放后应回收干净");
             shutdown_blocking();
+        });
+    }
+
+    /// pick_backend_dir：引擎目录优先，其次按 search_dirs 顺序取第一个含
+    /// ggml 核心库的目录；全不命中返回 None。
+    #[test]
+    fn test_pick_backend_dir_priority_and_miss() {
+        crate::test_util::run_with_temp_home(|home| {
+            let core = ggml_core_lib_name();
+            let engine_dir = home.join("engines-bin");
+            let dll_dir_a = home.join("dlls-a");
+            let dll_dir_b = home.join("dlls-b");
+            for dir in [&engine_dir, &dll_dir_a, &dll_dir_b] {
+                std::fs::create_dir_all(dir).unwrap();
+            }
+
+            // 全空 → None（继承宿主 CWD）
+            assert_eq!(pick_backend_dir(&engine_dir, &[]), None);
+
+            // 引擎目录命中 → 优先于 search_dirs
+            std::fs::write(engine_dir.join(core), b"x").unwrap();
+            assert_eq!(
+                pick_backend_dir(&engine_dir, &[dll_dir_a.clone()]),
+                Some(engine_dir.clone())
+            );
+
+            // 引擎目录未命中 → search_dirs 按序首个命中
+            std::fs::remove_file(engine_dir.join(core)).unwrap();
+            assert_eq!(pick_backend_dir(&engine_dir, &[dll_dir_a.clone()]), None);
+            std::fs::write(dll_dir_b.join(core), b"x").unwrap();
+            assert_eq!(
+                pick_backend_dir(&engine_dir, &[dll_dir_a.clone(), dll_dir_b.clone()]),
+                Some(dll_dir_b.clone())
+            );
         });
     }
 

@@ -30,7 +30,8 @@ pub enum AudiocppError {
     /// 进程启动失败（spawn 报错）
     SpawnFailed(String),
     /// 引擎启动后立即退出——典型原因：请求的 backend 未被该引擎构建编入
-    /// （如 CPU-only 引擎收到 cuda）、无 NVIDIA GPU、驱动过旧。
+    /// （如 CPU-only 引擎收到 cuda）、无 NVIDIA GPU、驱动过旧、引擎目录缺少
+    /// ggml 运行库 DLL（后端枚举只扫引擎目录与进程 CWD）。
     EngineExitedImmediately {
         backend: String,
         stderr_tail: String,
@@ -77,7 +78,8 @@ impl AudiocppError {
                 stderr_tail,
             } => format!(
                 "audiocpp_server 以 {backend} 后端启动后立即退出\
-                 （常见原因：该后端未被引擎构建支持、无 NVIDIA GPU 或驱动过旧）。\
+                 （常见原因：该后端未被引擎构建支持、无 NVIDIA GPU 或驱动过旧、\
+                 引擎目录缺少 ggml 运行库 DLL）。\
                  引擎输出末尾：\n{stderr_tail}"
             ),
             Self::StartupTimeout {
