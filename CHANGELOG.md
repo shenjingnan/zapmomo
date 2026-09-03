@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.28](https://github.com/shenjingnan/zapmomo/compare/v0.1.27...v0.1.28) - 2026-09-03
+
+### Fixed
+
+- *(audiocpp)* DLL 随引擎同目录分发 + 子进程 CWD 指向后端目录，修复安装包后端全挂 ([#272](https://github.com/shenjingnan/zapmomo/pull/272))
+- *(release)* zapmomo-app 改 git_only 修复纯 src-tauri 漏发版；strip \?\ 前缀修复安装包 DLL 搜索目录 ([#270](https://github.com/shenjingnan/zapmomo/pull/270))
+
 ## [0.1.27](https://github.com/shenjingnan/zapmomo/compare/v0.1.26...v0.1.27) - 2026-09-03
 
 ### Fixed
