@@ -55,9 +55,15 @@ tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", branch = "v2.
 objc2-app-kit = { version = "0.3", features = ["NSGraphics"] }
 
 [target.'cfg(windows)'.dependencies]
-# 置底：SetWindowPos(HWND_BOTTOM) 把角色窗口沉到 Z 序底部
+# 置底：SetWindowPos(HWND_BOTTOM) 把角色窗口沉到 Z 序底部；
+# 设置窗阴影：DwmExtendFrameIntoClientArea + MARGINS（Win32_Graphics_Dwm / Win32_UI_Controls）
 #（windows crate 已是 tauri 的传递依赖，此处显式声明为直接依赖并启用所需 feature）
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Dwm",
+  "Win32_UI_Controls",
+  "Win32_UI_WindowsAndMessaging",
+] }
 
 [dev-dependencies]
 tempfile = "3"

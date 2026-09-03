@@ -5389,6 +5389,34 @@ fn apply_companion_layer_platform(_app: &AppHandle, layer: CompanionWindowLayer)
     tracing::debug!("角色窗口层级切换在 Linux 上暂不支持置底（{layer:?}）");
 }
 
+/// 设置窗口（Windows）：经 DWM 扩展边框换取原生窗口阴影。
+///
+/// 建窗时 shadow(false)：tao 的 undecorated shadow 会在 WM_NCCALCSIZE 里对客户区做
+/// 左右底三边 inset、Win10 顶部强制 0，DWM 画成三边黑框（见 setup 处注释）。这里改为
+/// 对完整客户区注入 1px 扩展边框：DWM 依据帧存在性在窗口四周绘制投影，不触发 tao 的
+/// inset，Win10/Win11 通吃；1px 扩展区被 WebView2 不透明内容盖住，仅留阴影。隐藏窗口
+/// 上设置同样生效（设置窗默认 visible(false)，首次显示时已带上）。best-effort：失败
+/// 仅表现为无阴影，不影响其余功能。
+#[cfg(windows)]
+fn apply_settings_window_shadow(app: &AppHandle) {
+    use windows::Win32::Graphics::Dwm::DwmExtendFrameIntoClientArea;
+    use windows::Win32::UI::Controls::MARGINS;
+
+    let Some(window) = app.get_webview_window("settings") else {
+        return;
+    };
+    let Ok(hwnd) = window.hwnd() else { return };
+    let margins = MARGINS {
+        cxLeftWidth: 1,
+        cxRightWidth: 1,
+        cyTopHeight: 1,
+        cyBottomHeight: 1,
+    };
+    unsafe {
+        let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
+    }
+}
+
 /// 把原生菜单项 id 解析为缩放比例。
 fn scale_from_id(id: &str) -> Option<f64> {
     match id {
@@ -7817,15 +7845,21 @@ pub fn run() {
                 settings = settings.decorations(false).transparent(true);
             }
             // Windows：去掉系统标题栏即可；无 CSS 圆角处理，无需透明窗口
-            //（不透明窗口性能更好）。同时关 DWM shadow：undecorated+shadow 会被
+            //（不透明窗口性能更好）。同时关 tao shadow：undecorated+shadow 会被
             // tao 在 WM_NCCALCSIZE 里左右底三边缩进客户区、由 DWM 画黑色窗框，
-            // 而顶部 inset 在 Win10 强制为 0（否则画出原生标题栏），形成三边黑框；
-            // 四边完整边框改由前端 AppShell 用 CSS 自绘。三键悬浮右上角。
+            // 而顶部 inset 在 Win10 强制为 0（否则画出原生标题栏），形成三边黑框。
+            // 原生阴影改由建窗后 DwmExtendFrameIntoClientArea 注入（不触发 inset，
+            // Win10/Win11 通吃，见 apply_settings_window_shadow）；四边细边框仍由
+            // 前端 AppShell 用 CSS 自绘。三键悬浮右上角。
             #[cfg(target_os = "windows")]
             {
                 settings = settings.decorations(false).shadow(false);
             }
             settings.build()?;
+            // Windows：注入 DWM 扩展边框换原生窗口阴影（其余平台无需处理：
+            // macOS 建窗参数已 shadow(true)，Linux 由窗口管理器绘制）。
+            #[cfg(windows)]
+            apply_settings_window_shadow(app.handle());
 
             // 文字输入条窗口：显隐走持久化开关（缺省显示——首次启动随角色一同
             // 出现），托盘/右键菜单「文字输入条」可勾选开关；关闭走全局
