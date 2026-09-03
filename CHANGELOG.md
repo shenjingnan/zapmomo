@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.26](https://github.com/shenjingnan/zapmomo/compare/v0.1.25...v0.1.26) - 2026-09-03
+
+### Fixed
+
+- *(ci)* Windows 冒烟测试前置 CUDA DLL 路径 ([#265](https://github.com/shenjingnan/zapmomo/pull/265))
+
 ## [0.1.25](https://github.com/shenjingnan/zapmomo/compare/v0.1.24...v0.1.25) - 2026-09-03
 
 ### Fixed
