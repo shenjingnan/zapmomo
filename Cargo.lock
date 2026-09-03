@@ -7076,7 +7076,7 @@ dependencies = [
 
 [[package]]
 name = "zapmomo"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "anyhow",
  "async-openai",
@@ -7116,7 +7116,7 @@ dependencies = [
 
 [[package]]
 name = "zapmomo-app"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "objc2-app-kit",
  "serde",
