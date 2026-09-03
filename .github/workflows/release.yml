@@ -17,6 +17,10 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # audio.cpp 引擎版本（上游 tag 无 v 前缀）。下方 sidecar 构建步骤的 clone
+  # 与 audiocpp 构建树缓存 key 都引用这里：升级引擎只改这一行（与
+  # tauri.conf.json 同步审查）。
+  AUDIOCPP_REF: release-0.6.1
 
 permissions:
   contents: write
@@ -146,6 +150,22 @@ jobs:
             rm -rf target/sherpa-onnx-prebuilt
           fi
 
+      - name: Cache audiocpp build tree
+        # Windows CUDA 冷编译实测 ~55 分钟，远超本 job 其余步骤总和。缓存
+        # 源码树 + 构建目录后，脚本级失败（DLL 收集/冒烟）重跑时 ninja 无事
+        # 可做，迭代从 ~1h 压到 ~5min。key 绑定引擎 ref（workflow 级 env）：
+        # 升级引擎自动 miss 重建；改 CMake flags（COMMON_FLAGS/audiocpp_extra/
+        # CUDA 架构列表）须手动 bump key 里的 v1 前缀，否则会命中旧 flags 的
+        # 产物。job 失败时 post 步骤仍保存缓存（仅取消不保存），失败迭代同样
+        # 为下次铺路。
+        if: matrix.platform == 'windows-latest'
+        uses: actions/cache@v6
+        with:
+          path: |
+            .audiocpp-src
+            .audiocpp-build
+          key: audiocpp-v1-${{ runner.os }}-${{ matrix.audiocpp_triple }}-${{ env.AUDIOCPP_REF }}
+
       - name: Install CUDA Toolkit
         # Windows 引擎开 CUDA（见 matrix audiocpp_extra）。选 12.4 轨：minor
         # version compatibility 下 12.x 运行时可跑在 R527+ 的 12.x 驱动上，
@@ -177,11 +197,14 @@ jobs:
         # 注意：上游 tag 命名是 release-X.Y.Z（无 v 前缀，v* 只有远古 windows-prebuilt）。
         shell: bash
         env:
-          AUDIOCPP_REF: release-0.6.1
           AUDIOCPP_TRIPLE: ${{ matrix.audiocpp_triple }}
           AUDIOCPP_EXTRA: ${{ matrix.audiocpp_extra }}
         run: |
-          git clone --depth 1 --branch "$AUDIOCPP_REF" https://github.com/0xShug0/audio.cpp .audiocpp-src
+          # AUDIOCPP_REF 来自 workflow 级 env（缓存 key 与这里同源）。
+          # 构建树缓存命中时源码树已存在，跳过 clone。
+          if [ ! -d .audiocpp-src/.git ]; then
+            git clone --depth 1 --branch "$AUDIOCPP_REF" https://github.com/0xShug0/audio.cpp .audiocpp-src
+          fi
           # macOS：Apple Clang 不带 OpenMP。native（arm64）job 装 brew libomp 并以
           # OpenMP_ROOT 定位（keg-only）；x86_64 交叉编译 job 无 x86_64 版 libomp
           # 可用，关 OpenMP（与该 job METAL=OFF 同等的可移植性取舍）。
