@@ -17,10 +17,10 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  # audio.cpp 引擎版本（上游 tag 无 v 前缀）。下方 sidecar 构建步骤的 clone
-  # 与 audiocpp 构建树缓存 key 都引用这里：升级引擎只改这一行（与
-  # tauri.conf.json 同步审查）。
-  AUDIOCPP_REF: release-0.6.1
+  # audio.cpp 引擎版本。macOS/Linux 腿据此 tag 源码编译 sidecar；Windows 腿
+  # 据此 tag 下载上游官方预编译包（资产名 audio-<此值>-bin-…，v0.7.x 起 tag
+  # 带 v 前缀）。升级引擎只改这一行（与 tauri.conf.json 同步审查）。
+  AUDIOCPP_REF: v0.7.1
 
 permissions:
   contents: write
@@ -54,19 +54,12 @@ jobs:
             audiocpp_triple: x86_64-unknown-linux-gnu
             audiocpp_extra: '-DENGINE_ENABLE_CUDA=OFF'
           - platform: windows-latest
-            # runner 固定 windows-2022（VS 2022 / MSVC 19.4x）：windows-latest
-            # 与 windows-2025 现均指向 VS 2026 镜像，CUDA 12.4 的 cudafe++ 前端
-            # 解析 MSVC 19.51 头文件时直接段错误（run #33 实测 0xC0000005），
-            # 无 flag 可救；上游 audio.cpp 的 Windows CI 同样用 windows-2022。
-            # 19.44 若超 host_config 的 1943 上限，由下方 patch + -allow-
-            # unsupported-compiler 双保险覆盖（对 19.4x 稳定）。
-            runner: windows-2022
+            # Windows 腿不编译引擎：直接消费上游官方预编译包（见下方 Fetch 步骤）。
+            # 历史上曾固定 windows-2022 以绕开 CUDA 12.4 × VS 2026 的 nvcc 前端
+            # 崩溃（run #33 实测 0xC0000005），源码编译整体退役后该约束消失，
+            # 回归滚动 latest。
+            runner: windows-latest
             args: ''
-            audiocpp_triple: x86_64-pc-windows-msvc
-            # Windows 开 CUDA（上游 VoxCPM2 CUDA 实测 RTF 0.23~0.55）；CUDA 运行时
-            # DLL 由下方 Collect CUDA runtime DLLs 收集进 src-tauri/resources/cuda/，
-            # 经 tauri.windows.conf.json 的 resources 随安装包分发
-            audiocpp_extra: '-DENGINE_ENABLE_CUDA=ON'
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
@@ -129,7 +122,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v0-rust-${{ matrix.args }}
-          # Windows CUDA 冷构建约 1 小时，失败时也保存缓存，重试无需全量重编
+          # 引擎获取/打包级失败重跑时避免 cargo 全量重编
           cache-on-failure: true
 
       - name: Cache sherpa-onnx prebuilt libs
@@ -150,61 +143,23 @@ jobs:
             rm -rf target/sherpa-onnx-prebuilt
           fi
 
-      - name: Cache audiocpp build tree
-        # Windows CUDA 冷编译实测 ~55 分钟，远超本 job 其余步骤总和。缓存
-        # 源码树 + 构建目录后，脚本级失败（DLL 收集/冒烟）重跑时 ninja 无事
-        # 可做，迭代从 ~1h 压到 ~5min。key 绑定引擎 ref（workflow 级 env）：
-        # 升级引擎自动 miss 重建；改 CMake flags（COMMON_FLAGS/audiocpp_extra/
-        # CUDA 架构列表）须手动 bump key 里的 v1 前缀，否则会命中旧 flags 的
-        # 产物。job 失败时 post 步骤仍保存缓存（仅取消不保存），失败迭代同样
-        # 为下次铺路。
-        if: matrix.platform == 'windows-latest'
-        uses: actions/cache@v6
-        with:
-          path: |
-            .audiocpp-src
-            .audiocpp-build
-          key: audiocpp-v1-${{ runner.os }}-${{ matrix.audiocpp_triple }}-${{ env.AUDIOCPP_REF }}
-
-      - name: Install CUDA Toolkit
-        # Windows 引擎开 CUDA（见 matrix audiocpp_extra）。选 12.4 轨：minor
-        # version compatibility 下 12.x 运行时可跑在 R527+ 的 12.x 驱动上，
-        # 覆盖面比 13.x（需 R580+）广。action 自动设置 CUDA_PATH。
-        if: matrix.platform == 'windows-latest'
-        # 上游已删除滚动 major tag v2（仓库现只维护 v0.2.x），@v2 无法解析会让
-        # 整个 workflow 所有 job 在 Set up job 阶段失败（action 解析先于 if 求值）。
-        # 因此固定到具体小版本而非 @master。
-        uses: Jimver/cuda-toolkit@v0.2.36
-        with:
-          # v0.2.x 后期版本把输入名从 cuda-toolkit 改成了 cuda；用旧名会被静默
-          # 忽略、回落到默认 13.2.0，装错 Toolkit 版本
-          cuda: '12.4.0'
-
-      - name: Setup MSVC environment
-        # 仅 Windows：初始化 MSVC（cl/mt/rc 进 PATH，经 GITHUB_ENV 对后续步骤
-        # 生效）。下方 CMake 用 Ninja 生成器时要求这些工具已在环境里（为何用
-        # Ninja 见构建步骤注释）。
-        if: matrix.platform == 'windows-latest'
-        uses: ilammy/msvc-dev-cmd@v1
-
       - name: Build audiocpp_server sidecar
+        if: matrix.platform != 'windows-latest'
         # TTS/ASR 第二后端（audio.cpp，Apache-2.0）的 sidecar 进程：裁剪构建只编
-        # omnivoice + voxcpm2 + qwen3_tts + qwen3_asr 模型族（实测约 12MB / ~2.5 分钟）。DEPLOYMENT_BUILD 把 model specs 编进二进制
-        # （否则运行时依赖源码目录的 model_specs/）；NATIVE_CPU=OFF 保证产物可移植
-        # （默认 -march=native 只能在构建机级 CPU 上跑）。externalBin 要求带 target
-        # triple 后缀的文件名（tauri.conf.json bundle.externalBin）。
+        # omnivoice + voxcpm2 + qwen3_tts + qwen3_asr 模型族。DEPLOYMENT_BUILD 把
+        # model specs 编进二进制（否则运行时依赖源码目录的 model_specs/）；
+        # NATIVE_CPU=OFF 保证产物可移植（默认 -march=native 只能在构建机级 CPU
+        # 上跑）。externalBin 要求带 target triple 后缀的文件名
+        # （tauri.conf.json bundle.externalBin）。Windows 腿不编译，改消费上游
+        # 官方预编译包（见下方 Fetch 步骤）。
         # 引擎版本升级只改 AUDIOCPP_REF（与 tauri.conf.json 同步审查）。
-        # 注意：上游 tag 命名是 release-X.Y.Z（无 v 前缀，v* 只有远古 windows-prebuilt）。
         shell: bash
         env:
           AUDIOCPP_TRIPLE: ${{ matrix.audiocpp_triple }}
           AUDIOCPP_EXTRA: ${{ matrix.audiocpp_extra }}
         run: |
-          # AUDIOCPP_REF 来自 workflow 级 env（缓存 key 与这里同源）。
-          # 构建树缓存命中时源码树已存在，跳过 clone。
-          if [ ! -d .audiocpp-src/.git ]; then
-            git clone --depth 1 --branch "$AUDIOCPP_REF" https://github.com/0xShug0/audio.cpp .audiocpp-src
-          fi
+          # AUDIOCPP_REF 来自 workflow 级 env。
+          git clone --depth 1 --branch "$AUDIOCPP_REF" https://github.com/0xShug0/audio.cpp .audiocpp-src
           # macOS：Apple Clang 不带 OpenMP。native（arm64）job 装 brew libomp 并以
           # OpenMP_ROOT 定位（keg-only）；x86_64 交叉编译 job 无 x86_64 版 libomp
           # 可用，关 OpenMP（与该 job METAL=OFF 同等的可移植性取舍）。
@@ -216,104 +171,97 @@ jobs:
               export OpenMP_ROOT="$(brew --prefix libomp)"
             fi
           fi
-          # 各 entry 的 audiocpp_extra 显式带 ENGINE_ENABLE_CUDA（Windows=ON 开
-          # CUDA 后端，其余 OFF）；VULKAN/HIP 两后端全平台关闭。
+          # 各 entry 的 audiocpp_extra 显式带 ENGINE_ENABLE_CUDA（均 OFF）；
+          # VULKAN/HIP 两后端全平台关闭。
           COMMON_FLAGS="-DAUDIOCPP_MODEL_SET=custom -DAUDIOCPP_MODELS=omnivoice,voxcpm2,qwen3_tts,qwen3_asr \
             -DAUDIOCPP_DEPLOYMENT_BUILD=ON -DENGINE_ENABLE_NATIVE_CPU=OFF \
             -DENGINE_ENABLE_VULKAN=OFF -DENGINE_ENABLE_HIP=OFF"
-          # Windows 用 Ninja 生成器（上游 build_windows.ps1 同款）：VS 生成器的
-          # CUDA 支持依赖装进 MSBuild 目录的 BuildCustomizations，而 CUDA 12.4
-          # （2024 年）不认识 2026 镜像的 Visual Studio 18，enable_language(CUDA)
-          # 直接报 No CUDA toolset found；Ninja 下 CMake 直接调 nvcc，不依赖
-          # VS 集成，不受镜像升 VS 影响。单配置产物落 bin/，非 bin/Release/。
-          # utf-8 与上游一致（源码含非 ASCII 字面量，MSVC 默认按本地代码页解析）。
-          # 注意必须写 -utf-8 而非 /utf-8：本步骤是 Git Bash，MSYS 路径转换会把
-          # 以 / 开头的 flag 当 Unix 路径改写成 C:/Program Files/Git/utf-8 传给
-          # cl，报 C1083 找不到源文件（MSVC 选项同时接受 - 前缀，语义相同）。
-          # 参数用数组而非字符串变量：CUDA 架构列表含分号、CUDA flags 含空格，
-          # 字符串展开要么被 bash 拆散要么无法携带引号；数组元素天然完整。
-          WIN_ARGS=()
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            WIN_ARGS+=(-G Ninja -DCMAKE_C_FLAGS=-utf-8 -DCMAKE_CXX_FLAGS=-utf-8 -DCMAKE_CUDA_HOST_COMPILER=cl)
-            # CUDA 架构照抄上游策略：按 nvcc 实际支持过滤（virtual=仅 PTX，
-            # 运行时 JIT 到本机卡；real=SASS 直出）。120/121（Blackwell）需
-            # CUDA 12.8+，12.4 的 nvcc 不列 compute_120/121 会自动剔除。
-            supported="$(nvcc --list-gpu-arch 2>/dev/null || true)"
-            archs=""
-            for pair in 75:75-virtual 80:80-virtual 86:86-real 89:89-real 120:120a-real 121:121a-real; do
-              case "$supported" in *"compute_${pair%%:*}"*)
-                archs="${archs:+$archs;}${pair#*:}" ;;
-              esac
-            done
-            if [ -n "$archs" ]; then
-              WIN_ARGS+=("-DCMAKE_CUDA_ARCHITECTURES=$archs")
-              echo "CUDA architectures: $archs"
-            fi
-            # CUDA 12.4 的 crt/host_config.h 硬编码只放行 MSVC 2017~2022
-            # （_MSC_VER ≤ 1943），2026 镜像的 19.51 触发 #error。-allow-
-            # unsupported-compiler 是官方逃生口（PyTorch/llama.cpp 同款），
-            # 但实测（run #29~#31）它够不着 CMake 的 nvcc 编译器检测阶段：
-            # 检测不传 CMAKE_CUDA_FLAGS，CUDAFLAGS env 也只被 nvcc trace 打印
-            # 不被消费。故把 #error 行首改成 // 注释——检测与正式编译读同一
-            # 个文件，一并放行（#warning 不行：MSVC 19.5x 里它要 /std:c++23
-            # preview 才合法，run #32 实测报 C1188）。若原 #error 是 \ 续行的
-            # 多行文案，行拼接先于注释处理，续行会被一并并入注释，语法安全。
-            # 风险等级与官方 flag 相同（use at your own risk），若编译期撞出
-            # 真正的不兼容再评估升 CUDA 13.x。
-            sed -i 's/^#error -- unsupported Microsoft Visual Studio version/\/\/ CI patched (CUDA 12.4 officially supports MSVC 2017-2022, relaxed for 2026 runner): -- unsupported Microsoft Visual Studio version/' \
-              "$CUDA_PATH/include/crt/host_config.h"
-            WIN_ARGS+=("-DCMAKE_CUDA_FLAGS=-Xcompiler=-utf-8 -allow-unsupported-compiler")
-          fi
           # shellcheck disable=SC2086
-          cmake -S .audiocpp-src -B .audiocpp-build "${WIN_ARGS[@]}" $COMMON_FLAGS $AUDIOCPP_EXTRA -DCMAKE_BUILD_TYPE=Release
+          cmake -S .audiocpp-src -B .audiocpp-build $COMMON_FLAGS $AUDIOCPP_EXTRA -DCMAKE_BUILD_TYPE=Release
           JOBS="${NUMBER_OF_PROCESSORS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
           cmake --build .audiocpp-build --target audiocpp_server --config Release --parallel "$JOBS"
           # 产物名跨生成器有差异（Ninja 单配置落 bin/，VS 多配置落 bin/Release/），find 兜底
           SRC_BIN=$(find .audiocpp-build -type f -name 'audiocpp_server*' ! -name '*.dSYM*' | head -1)
           test -n "$SRC_BIN" || { echo '::error::audiocpp_server 产物未找到'; exit 1; }
-          mkdir -p src-tauri/binaries
-          if [ "$RUNNER_OS" = "Windows" ]; then EXE_SUFFIX=".exe"; else EXE_SUFFIX=""; fi
-          cp "$SRC_BIN" "src-tauri/binaries/audiocpp_server-${AUDIOCPP_TRIPLE}${EXE_SUFFIX}"
-          ls -lh src-tauri/binaries/
-
-      - name: Collect CUDA runtime DLLs
-        # CUDA 后端（ggml-cuda）由上游 CMake 强制 BUILD_SHARED_LIBS=OFF 静态
-        # 编进 audiocpp_server.exe（release-0.6.1 实测产物为静态 .lib，不存在
-        # ggml-cuda.dll），exe 运行时缺的只是 CUDA Toolkit 的动态运行时
-        # （cudart/cuBLAS/cuFFT，按 major 版本 glob，不硬编码小版本）。收集到
-        # src-tauri/resources/cuda/，经 tauri.windows.conf.json 的 resources
-        # 随安装包落安装目录，运行时由子进程 PATH 前置
-        # （server.rs::augmented_child_path）解析。
-        if: matrix.platform == 'windows-latest'
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p src-tauri/resources/cuda
-          # CUDA Toolkit 动态运行时（exe 的全部外部 CUDA 依赖；glob 不匹配时
-          # cp 收到字面量报错退出，set -e 即中止）
-          for prefix in cudart64_ cublas64_ cublasLt64_ cufft64_; do
-            cp "$CUDA_PATH"/bin/"${prefix}"*.dll src-tauri/resources/cuda/
-          done
-          # 门禁：关键 DLL 必须在（缺失时引擎加载报 0xC0000135）
-          ls src-tauri/resources/cuda/cudart64_*.dll >/dev/null || {
-            echo '::error::cudart DLL 未收集到（CUDA_PATH 定位失败？）'; exit 1;
-          }
-          ls src-tauri/resources/cuda/cublas64_*.dll >/dev/null || {
-            echo '::error::cuBLAS DLL 未收集到'; exit 1;
-          }
-          ls -lh src-tauri/resources/cuda/
-          # 运行冒烟：引擎能起（DLL 集齐）。--help 若被引擎识别会即刻退出；
-          # 若引擎直接开始服务则由 timeout 杀掉（退出码 124，同样算通过）。
-          # DLL 缺失时进程死 0xC0000135（bash 呈现为 127）→ 门禁失败。
-          set +e
-          timeout 60 "src-tauri/binaries/audiocpp_server-x86_64-pc-windows-msvc.exe" --help >/dev/null 2>&1
-          smoke=$?
-          set -e
-          if [ "$smoke" -eq 3221225781 ] || [ "$smoke" -eq 127 ]; then
-            echo '::error::引擎加载失败（CUDA 运行时 DLL 缺失或不兼容）'
+          # 防呆：本步骤假设引擎编为单体可执行（externalBin 只打包这一个文件）。
+          # 上游 0.7.x 引入了动态 ggml 后端（Windows 预编译即为 ggml-*.dll 集）；
+          # 若某天 mac/linux 构建也开始产出 dylib/so，单发 exe 会缺库无法启动，
+          # 在这里显式失败，提示扩展打包而不是发出坏包。
+          EXTRA_LIBS=$(find .audiocpp-build -type f \( -name '*.dylib' -o -name '*.so' \) | head -5)
+          if [ -n "$EXTRA_LIBS" ]; then
+            echo '::error::0.7.x 源码编译产出了动态库（动态 ggml 后端？），单 exe 打包会缺库：'
+            echo "$EXTRA_LIBS"
             exit 1
           fi
-          echo "smoke exit=$smoke（0/124 均视为通过）"
+          mkdir -p src-tauri/binaries
+          cp "$SRC_BIN" "src-tauri/binaries/audiocpp_server-${AUDIOCPP_TRIPLE}"
+          ls -lh src-tauri/binaries/
+
+      - name: Fetch audio.cpp prebuilt (Windows)
+        # Windows 引擎不本地编译，直接消费上游官方预编译包（同 tag、无补丁，
+        # 契约一致性由 src/audiocpp/server_config.rs 的快照单测与引擎冒烟兜底）：
+        #   bin 包    = audiocpp_server.exe + ggml 动态后端 DLL（ggml/ggml-base/
+        #               ggml-cuda/ggml-cpu-*）+ MSVC CRT 运行时
+        #   cudart 包 = CUDA 12.4 动态运行时（cudart/cublas/cublasLt/cufft）
+        # nvcuda.dll（NVIDIA 驱动库）只被 ggml-cuda.dll 硬导入、且 ggml 动态后端
+        # 加载失败即优雅跳过 CUDA——无驱动机器回退 CPU，进程仍能启动。因此
+        # runner 冒烟能过 = 引擎在任意 Windows 机器上都可加载。
+        # 选 cuda12.4 轨：minor version compatibility 下 12.x 运行时可跑在
+        # R527+ 的 12.x 驱动上，覆盖面比 13.x（需 R580+）广。
+        # 上游不发 sha256，信任锚 = 官方仓库 tag + HTTPS。
+        if: matrix.platform == 'windows-latest'
+        shell: bash
+        env:
+          AUDIOCPP_TRIPLE: x86_64-pc-windows-msvc
+        run: |
+          set -euo pipefail
+          BASE="https://github.com/0xShug0/audio.cpp/releases/download/${AUDIOCPP_REF}"
+          BIN_ZIP="audio-${AUDIOCPP_REF}-bin-windows-x64-cuda12.4.zip"
+          RT_ZIP="audio-${AUDIOCPP_REF}-cudart-windows-x64-cuda12.4.zip"
+          mkdir -p .audiocpp-prebuilt/bin .audiocpp-prebuilt/rt
+          curl --proto '=https' --tlsv1.2 -fL --retry 3 --retry-connrefused \
+            "$BASE/$BIN_ZIP" -o ".audiocpp-prebuilt/$BIN_ZIP"
+          curl --proto '=https' --tlsv1.2 -fL --retry 3 --retry-connrefused \
+            "$BASE/$RT_ZIP" -o ".audiocpp-prebuilt/$RT_ZIP"
+          unzip -q -o ".audiocpp-prebuilt/$BIN_ZIP" -d .audiocpp-prebuilt/bin
+          unzip -q -o ".audiocpp-prebuilt/$RT_ZIP" -d .audiocpp-prebuilt/rt
+          EXE="src-tauri/binaries/audiocpp_server-${AUDIOCPP_TRIPLE}.exe"
+          RT_DIR="src-tauri/resources/audiocpp"
+          mkdir -p src-tauri/binaries "$RT_DIR"
+          cp .audiocpp-prebuilt/bin/audiocpp_server.exe "$EXE"
+          # 仅取 exe 旁的运行时 DLL（tools/、model_specs/ 是上游 WebUI 附属，不用）
+          find .audiocpp-prebuilt/bin -maxdepth 1 -name '*.dll' -exec cp -f {} "$RT_DIR"/ \;
+          find .audiocpp-prebuilt/rt  -maxdepth 1 -name '*.dll' -exec cp -f {} "$RT_DIR"/ \;
+          # 门禁 1：PE 实体（历史 v0.1.21~23 曾发过 12K 残片）
+          test -s "$EXE" || { echo '::error::引擎 exe 缺失'; exit 1; }
+          [ "$(head -c 2 "$EXE")" = "MZ" ] || { echo '::error::引擎 exe 缺 MZ 头（非 PE）'; exit 1; }
+          [ "$(wc -c <"$EXE")" -gt 5242880 ] || { echo '::error::引擎 exe 过小（残片）'; exit 1; }
+          # 门禁 2：关键 DLL 必须在（缺失时引擎加载报 0xC0000135 → bash 127）
+          for glob in ggml.dll ggml-base.dll ggml-cuda.dll \
+                      cudart64_*.dll cublas64_*.dll cublasLt64_*.dll cufft64_*.dll \
+                      msvcp140.dll vcruntime140.dll; do
+            ls "$RT_DIR"/$glob >/dev/null 2>&1 || {
+              echo "::error::$glob 未收集到（上游包结构变化？）"; exit 1;
+            }
+          done
+          ls -lh "$RT_DIR" | head -30
+          # 门禁 3：运行冒烟。--help 被引擎识别即退出（0）；若引擎直接开始服务
+          # 则由 timeout 杀掉（124），均视为通过。CUDA 运行时 DLL 在正式产物里
+          # 位于安装目录 audiocpp/ 子目录，由应用启动引擎时前置 PATH 解析
+          # （server.rs::augmented_child_path）；CI 里直跑裸 exe 无人前置，必须
+          # 手动加上。
+          export PATH="$(pwd)/$RT_DIR:$PATH"
+          set +e
+          timeout 60 "$EXE" --help >/dev/null 2>&1
+          smoke=$?
+          set -e
+          if [ "$smoke" -ne 0 ] && [ "$smoke" -ne 124 ]; then
+            echo "::error::引擎冒烟失败（exit=$smoke；127/3221225781 = DLL 加载失败）"
+            # 诊断：列出导入 DLL，便于定位缺哪个
+            objdump -p "$EXE" 2>/dev/null | grep "DLL Name" || true
+            exit 1
+          fi
+          echo "smoke exit=$smoke（0/124 视为通过）"
 
       - uses: tauri-apps/tauri-action@v1
         with:
