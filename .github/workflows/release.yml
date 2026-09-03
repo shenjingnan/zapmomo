@@ -245,9 +245,30 @@ jobs:
           cmake -S .audiocpp-src -B .audiocpp-build "${WIN_ARGS[@]}" $COMMON_FLAGS $AUDIOCPP_EXTRA -DCMAKE_BUILD_TYPE=Release
           JOBS="${NUMBER_OF_PROCESSORS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
           cmake --build .audiocpp-build --target audiocpp_server --config Release --parallel "$JOBS"
-          # 产物名跨生成器有差异（Ninja 单配置落 bin/，VS 多配置落 bin/Release/），find 兜底
-          SRC_BIN=$(find .audiocpp-build -type f -name 'audiocpp_server*' ! -name '*.dSYM*' | head -1)
+          # 定位产物。Unix 真身名为 audiocpp_server（无后缀歧义，find 兜底跨生成器差异）；
+          # Windows 禁用模糊 find：`audiocpp_server*` 会先命中 CMakeFiles/ 下的中间产物
+          # （目录序 CMakeFiles < bin；Ninja+CUDA 实测拿到 12K 的 device-link obj，旧
+          # VS 生成器则拿到 442B 的 Release/audiocpp_server.exp），而数百 MB 的真身在
+          # bin/audiocpp_server.exe。v0.1.21~v0.1.23 的 Windows 安装包因此全装了残片，
+          # 引擎启动报 os error 216（ERROR_EXE_MACHINE_TYPE_MISMATCH）。
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            SRC_BIN=".audiocpp-build/bin/audiocpp_server.exe"
+          else
+            SRC_BIN=$(find .audiocpp-build -type f -name 'audiocpp_server' ! -name '*.dSYM*' | head -1)
+          fi
           test -n "$SRC_BIN" || { echo '::error::audiocpp_server 产物未找到'; exit 1; }
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            # 门禁：必须为 PE 且体积合理（裁剪构建实测约 12MB，CUDA 版数百 MB；
+            # 残片仅 442B/12K，取 5MB 下限）。
+            # MZ 头缺失时顺带打印构建树里全部同名产物，便于定位真身缺在哪里。
+            [ "$(head -c 2 "$SRC_BIN" 2>/dev/null)" = "MZ" ] || {
+              echo "::error::$SRC_BIN 不是 PE 可执行（MZ 头缺失）"
+              find .audiocpp-build -name 'audiocpp_server*' -exec ls -la {} +
+              exit 1
+            }
+            SIZE=$(wc -c < "$SRC_BIN")
+            [ "$SIZE" -gt 5242880 ] || { echo "::error::$SRC_BIN 仅 ${SIZE} 字节（<5MB），残缺产物"; exit 1; }
+          fi
           mkdir -p src-tauri/binaries
           if [ "$RUNNER_OS" = "Windows" ]; then EXE_SUFFIX=".exe"; else EXE_SUFFIX=""; fi
           cp "$SRC_BIN" "src-tauri/binaries/audiocpp_server-${AUDIOCPP_TRIPLE}${EXE_SUFFIX}"
@@ -286,11 +307,15 @@ jobs:
           timeout 60 "src-tauri/binaries/audiocpp_server-x86_64-pc-windows-msvc.exe" --help >/dev/null 2>&1
           smoke=$?
           set -e
-          if [ "$smoke" -eq 3221225781 ] || [ "$smoke" -eq 127 ]; then
-            echo '::error::引擎加载失败（CUDA 运行时 DLL 缺失或不兼容）'
+          # 门禁：只放行 0（--help 即退）与 124（服务模式被 timeout 杀掉），其余一律
+          # 失败。126=无法执行（非 PE 残片——旧门禁只拦 127/0xC0000135，v0.1.21~
+          # v0.1.23 的 12K/442B 残片全从 126 漏过）、127=命令未找到、
+          # 3221225781(0xC0000135)=DLL 加载失败。
+          if [ "$smoke" -ne 0 ] && [ "$smoke" -ne 124 ]; then
+            echo "::error::引擎冒烟失败（exit=$smoke）"
             exit 1
           fi
-          echo "smoke exit=$smoke（0/124 均视为通过）"
+          echo "smoke exit=$smoke（0/124 视为通过）"
 
       - uses: tauri-apps/tauri-action@v1
         with:
