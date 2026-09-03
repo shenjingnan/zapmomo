@@ -66,5 +66,8 @@ src-tauri/binaries/
 .audiocpp-src/
 .audiocpp-build/
 
-# CUDA 运行时 DLL 收集目录（构建期生成；README.md 占位入库）
+# 引擎运行时 DLL 收集目录（构建期生成；README.md 占位入库）：
+#   cuda/     旧布局（v0.1.25 及之前，源码编译 + CUDA Toolkit 收集）
+#   audiocpp/ 现行布局（上游 v0.7.1 官方预编译，release.yml 填充）
 src-tauri/resources/cuda/*.dll
+src-tauri/resources/audiocpp/*.dll
