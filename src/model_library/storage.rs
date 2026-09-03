@@ -78,7 +78,7 @@ pub struct MigrateFailedItem {
 // ---------------------------------------------------------------------------
 
 /// 迁移条目类型。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MigrateKind {
     Model,
     Companion,
@@ -338,6 +338,11 @@ pub fn plan_migration() -> Result<Vec<MigrateItem>, String> {
             }
         }
     }
+    // 排序保证迁移顺序确定：read_dir 的目录序依文件系统而异（ext4 哈希序 /
+    // tmpfs 哈希序 / NTFS 按名序），不排序会让「取消时机落在哪个条目之后」
+    // 变成碰运气——test_migrate_cancel_midway_consistent 在 CI Coverage 上
+    // 即因 /tmp 的哈希序让 m2 先于 m1 而挂掉。
+    items.sort_by(|a, b| a.kind.cmp(&b.kind).then_with(|| a.name.cmp(&b.name)));
     Ok(items)
 }
 

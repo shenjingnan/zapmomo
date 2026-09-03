@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.1.26](https://github.com/shenjingnan/zapmomo/compare/v0.1.25...v0.1.26) - 2026-09-03
+
+### Fixed
+
+- *(ci)* Windows 冒烟测试前置 CUDA DLL 路径 ([#265](https://github.com/shenjingnan/zapmomo/pull/265))
+
+## [0.1.25](https://github.com/shenjingnan/zapmomo/compare/v0.1.24...v0.1.25) - 2026-09-03
+
+### Fixed
+
+- *(ci)* Windows sidecar 定位改为确定路径，堵住残片产物 ([#263](https://github.com/shenjingnan/zapmomo/pull/263))
+
+## [0.1.24](https://github.com/shenjingnan/zapmomo/compare/v0.1.23...v0.1.24) - 2026-09-02
+
+### Other
+
+- *(ci)* 缓存 audiocpp 源码树与构建目录，脚本级失败重试免 1 小时全量重编
+
 ## [0.1.23](https://github.com/shenjingnan/zapmomo/compare/v0.1.22...v0.1.23) - 2026-09-01
 
 ### Fixed
