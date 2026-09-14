@@ -54,7 +54,7 @@ reqwest = { version = "0.13", features = ["blocking", "json", "multipart"] }
 
 # 远程 LLM（OpenAI 兼容 Chat Completions：智谱 GLM / DeepSeek / OpenRouter / llama-server 等）
 # 0.41 起 API 域按 feature 拆分，default 仅 rustls；只需 chat-completion
-async-openai = { version = "0.41", features = ["chat-completion"] }
+async-openai = { version = "0.42", features = ["chat-completion"] }
 
 # Anthropic 原生 Messages API provider（消息/流式/tool use 原语；agent 编排为自研，
 # 只用 genai 的传输层能力，不用其 agent 抽象）
